@@ -1,7 +1,8 @@
 FROM golang:1.22-alpine AS build
-WORKDIR /app
-COPY go.mod ./
-COPY main.go ./
+WORKDIR /src
+COPY pkg/health ./pkg/health
+COPY services/transfers-svc ./services/transfers-svc
+WORKDIR /src/services/transfers-svc
 RUN go build -o /out/server .
 
 FROM alpine:latest

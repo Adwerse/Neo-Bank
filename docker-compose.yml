@@ -1,35 +1,49 @@
 services:
   gateway:
-    build: ./gateway
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
     ports:
       - "8080:8080"
 
   auth-svc:
-    build: ./services/auth-svc
+    build:
+      context: .
+      dockerfile: services/auth-svc/Dockerfile
     ports:
       - "8081:8081"
 
   accounts-svc:
-    build: ./services/accounts-svc
+    build:
+      context: .
+      dockerfile: services/accounts-svc/Dockerfile
     ports:
       - "8082:8082"
 
   ledger-svc:
-    build: ./services/ledger-svc
+    build:
+      context: .
+      dockerfile: services/ledger-svc/Dockerfile
     ports:
       - "8083:8083"
 
   transfers-svc:
-    build: ./services/transfers-svc
+    build:
+      context: .
+      dockerfile: services/transfers-svc/Dockerfile
     ports:
       - "8084:8084"
 
   fraud-svc:
-    build: ./services/fraud-svc
+    build:
+      context: .
+      dockerfile: services/fraud-svc/Dockerfile
     ports:
       - "8085:8085"
 
   notifications-svc:
-    build: ./services/notifications-svc
+    build:
+      context: .
+      dockerfile: services/notifications-svc/Dockerfile
     ports:
       - "8086:8086"

@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+
+	"neobank/pkg/health"
 )
 
 const defaultPort = "8080"
@@ -20,6 +22,7 @@ func main() {
 		w.WriteHeader(http.StatusNotImplemented)
 		json.NewEncoder(w).Encode(map[string]string{"service": "gateway"})
 	})
+	http.HandleFunc("/healthz", health.Handler("gateway"))
 
 	log.Printf("gateway listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {

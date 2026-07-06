@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+
+	"neobank/pkg/health"
 )
 
 const defaultPort = "8081"
@@ -20,6 +22,7 @@ func main() {
 		w.WriteHeader(http.StatusNotImplemented)
 		json.NewEncoder(w).Encode(map[string]string{"service": "auth-svc"})
 	})
+	http.HandleFunc("/healthz", health.Handler("auth-svc"))
 
 	log.Printf("auth-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
