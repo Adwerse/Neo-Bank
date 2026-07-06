@@ -1,0 +1,35 @@
+services:
+  gateway:
+    build: ./gateway
+    ports:
+      - "8080:8080"
+
+  auth-svc:
+    build: ./services/auth-svc
+    ports:
+      - "8081:8081"
+
+  accounts-svc:
+    build: ./services/accounts-svc
+    ports:
+      - "8082:8082"
+
+  ledger-svc:
+    build: ./services/ledger-svc
+    ports:
+      - "8083:8083"
+
+  transfers-svc:
+    build: ./services/transfers-svc
+    ports:
+      - "8084:8084"
+
+  fraud-svc:
+    build: ./services/fraud-svc
+    ports:
+      - "8085:8085"
+
+  notifications-svc:
+    build: ./services/notifications-svc
+    ports:
+      - "8086:8086"
