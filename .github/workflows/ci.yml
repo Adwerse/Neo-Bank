@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+
+      # go.work lets go list -m enumerate every module by itself, so this
+      # loop needs no hardcoded module list and no per-module CI matrix.
+      # We deliberately loop "./..." per module rather than run a single
+      # "go build all" / "go vet all" from the repo root: "all" pulls in
+      # every dependency as a direct vet target too (not just the type
+      # info needed to check our own code), which can surface pre-existing
+      # vet findings inside third-party packages we don't own or control.
+      - name: Build and vet every workspace module
+        run: |
+          set -e
+          go list -m -f '{{.Dir}}' | while IFS= read -r dir; do
+            echo "::group::$dir"
+            (cd "$dir" && go build ./... && go vet ./...)
+            echo "::endgroup::"
+          done
