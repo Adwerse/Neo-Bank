@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package common.v1;
+
+option go_package = "neobank/proto/gen/go/common/v1;commonv1";
+
+// Empty — заглушка, чтобы было на чём проверить пайплайн buf generate.
+message Empty {}

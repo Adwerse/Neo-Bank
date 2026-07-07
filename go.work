@@ -1,0 +1,13 @@
+go 1.22
+
+use (
+	./gateway
+	./pkg/health
+	./proto/gen/go
+	./services/accounts-svc
+	./services/auth-svc
+	./services/fraud-svc
+	./services/ledger-svc
+	./services/notifications-svc
+	./services/transfers-svc
+)
