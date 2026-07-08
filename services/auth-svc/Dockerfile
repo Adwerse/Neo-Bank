@@ -1,8 +1,6 @@
-FROM golang:1.22-alpine AS build
-WORKDIR /src
-COPY pkg/health ./pkg/health
-COPY services/auth-svc ./services/auth-svc
+FROM golang:1.25-alpine AS build
 WORKDIR /src/services/auth-svc
+COPY services/auth-svc .
 RUN go build -o /out/server .
 
 FROM alpine:latest

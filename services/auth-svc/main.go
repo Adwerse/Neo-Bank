@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
-	"neobank/pkg/health"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const defaultPort = "8081"
@@ -17,12 +19,32 @@ func main() {
 		port = defaultPort
 	}
 
+	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatalf("auth-svc: failed to create postgres pool: %v", err)
+	}
+	defer pool.Close()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotImplemented)
 		json.NewEncoder(w).Encode(map[string]string{"service": "auth-svc"})
 	})
-	http.HandleFunc("/healthz", health.Handler("auth-svc"))
+
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		w.Header().Set("Content-Type", "application/json")
+		var result int
+		if err := pool.QueryRow(ctx, "SELECT 1").Scan(&result); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "service": "auth-svc"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "auth-svc"})
+	})
 
 	log.Printf("auth-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {

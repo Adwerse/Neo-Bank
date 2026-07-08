@@ -12,6 +12,11 @@ services:
       dockerfile: services/auth-svc/Dockerfile
     ports:
       - "8081:8081"
+    environment:
+      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   accounts-svc:
     build:
@@ -89,6 +94,12 @@ services:
       ALLOW_PLAINTEXT_LISTENER: "yes"
     volumes:
       - kafka_data:/bitnami/kafka
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
 
 volumes:
   postgres_data:
