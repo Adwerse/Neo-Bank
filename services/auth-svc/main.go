@@ -11,12 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const defaultPort = "8081"
+const (
+	defaultPort     = "8081"
+	defaultSMTPAddr = "mailpit:1025"
+	defaultSMTPFrom = "noreply@neobank.local"
+)
 
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = defaultPort
+	}
+	smtpAddr := os.Getenv("SMTP_ADDR")
+	if smtpAddr == "" {
+		smtpAddr = defaultSMTPAddr
+	}
+	smtpFrom := os.Getenv("SMTP_FROM")
+	if smtpFrom == "" {
+		smtpFrom = defaultSMTPFrom
 	}
 
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
@@ -45,6 +57,8 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "auth-svc"})
 	})
+
+	http.HandleFunc("/register", registerHandler(pool, smtpAddr, smtpFrom))
 
 	log.Printf("auth-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {

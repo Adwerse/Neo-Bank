@@ -14,8 +14,12 @@ services:
       - "8081:8081"
     environment:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      SMTP_ADDR: mailpit:1025
+      SMTP_FROM: noreply@neobank.local
     depends_on:
       postgres:
+        condition: service_healthy
+      mailpit:
         condition: service_healthy
 
   accounts-svc:
