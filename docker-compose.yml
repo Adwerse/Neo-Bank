@@ -17,6 +17,7 @@ services:
       SMTP_ADDR: mailpit:1025
       SMTP_FROM: noreply@neobank.local
       REDIS_ADDR: redis:6379
+      JWT_SECRET: neobank_dev_jwt_secret_change_me
     depends_on:
       postgres:
         condition: service_healthy

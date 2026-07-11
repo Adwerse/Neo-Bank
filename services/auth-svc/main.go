@@ -36,6 +36,10 @@ func main() {
 	if redisAddr == "" {
 		redisAddr = defaultRedisAddr
 	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("auth-svc: JWT_SECRET environment variable is required")
+	}
 
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
@@ -70,6 +74,9 @@ func main() {
 	http.HandleFunc("/register", registerHandler(pool, smtpAddr, smtpFrom))
 	http.HandleFunc("/verify-email", verifyEmailHandler(pool))
 	http.HandleFunc("/resend-verification", resendVerificationHandler(pool, rdb, smtpAddr, smtpFrom))
+	http.HandleFunc("/login", loginHandler(pool, rdb, jwtSecret))
+	http.HandleFunc("/refresh", refreshHandler(pool, rdb, jwtSecret))
+	http.HandleFunc("/logout", logoutHandler(rdb))
 
 	log.Printf("auth-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
