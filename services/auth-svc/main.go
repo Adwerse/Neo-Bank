@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
-	defaultPort     = "8081"
-	defaultSMTPAddr = "mailpit:1025"
-	defaultSMTPFrom = "noreply@neobank.local"
+	defaultPort      = "8081"
+	defaultSMTPAddr  = "mailpit:1025"
+	defaultSMTPFrom  = "noreply@neobank.local"
+	defaultRedisAddr = "redis:6379"
 )
 
 func main() {
@@ -30,12 +32,19 @@ func main() {
 	if smtpFrom == "" {
 		smtpFrom = defaultSMTPFrom
 	}
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = defaultRedisAddr
+	}
 
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatalf("auth-svc: failed to create postgres pool: %v", err)
 	}
 	defer pool.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	defer rdb.Close()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -59,6 +68,8 @@ func main() {
 	})
 
 	http.HandleFunc("/register", registerHandler(pool, smtpAddr, smtpFrom))
+	http.HandleFunc("/verify-email", verifyEmailHandler(pool))
+	http.HandleFunc("/resend-verification", resendVerificationHandler(pool, rdb, smtpAddr, smtpFrom))
 
 	log.Printf("auth-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {

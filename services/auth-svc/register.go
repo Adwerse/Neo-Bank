@@ -126,23 +126,31 @@ func registerUserAndIssueCode(ctx context.Context, pool *pgxpool.Pool, email, pa
 		); err != nil {
 			return false, err
 		}
-		if _, err := tx.Exec(ctx,
-			"UPDATE verification_codes SET used_at = now() WHERE user_id = $1 AND purpose = 'email_verify' AND used_at IS NULL",
-			userID,
-		); err != nil {
-			return false, err
-		}
 	}
 
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO verification_codes (user_id, purpose, code_hash, expires_at, attempts_remaining)
-		 VALUES ($1, 'email_verify', $2, now() + interval '10 minutes', 5)`,
-		userID, codeHash,
-	); err != nil {
+	if err := invalidateAndIssueCode(ctx, tx, userID, codeHash); err != nil {
 		return false, err
 	}
 
 	return false, tx.Commit(ctx)
+}
+
+// invalidateAndIssueCode invalidates any unused email_verify codes for the
+// user and inserts a fresh one with a new 10-minute expiry. Callers must
+// already be inside a transaction.
+func invalidateAndIssueCode(ctx context.Context, tx pgx.Tx, userID, codeHash string) error {
+	if _, err := tx.Exec(ctx,
+		"UPDATE verification_codes SET used_at = now() WHERE user_id = $1 AND purpose = 'email_verify' AND used_at IS NULL",
+		userID,
+	); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO verification_codes (user_id, purpose, code_hash, expires_at, attempts_remaining)
+		 VALUES ($1, 'email_verify', $2, now() + interval '10 minutes', 5)`,
+		userID, codeHash,
+	)
+	return err
 }
 
 func hashPassword(password string) (string, error) {
