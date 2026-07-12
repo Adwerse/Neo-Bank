@@ -5,6 +5,10 @@ services:
       dockerfile: gateway/Dockerfile
     ports:
       - "8080:8080"
+    environment:
+      JWT_SECRET: neobank_dev_jwt_secret_change_me
+    depends_on:
+      - auth-svc
 
   auth-svc:
     build:
