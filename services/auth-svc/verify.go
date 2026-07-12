@@ -78,15 +78,36 @@ func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string
 		return 0, err
 	}
 
+	outcome, err := consumeVerificationCode(ctx, tx, userID, "email_verify", code)
+	if err != nil {
+		return 0, err
+	}
+	if outcome != verifyOK {
+		return outcome, tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx, "UPDATE users SET status = 'active', updated_at = now() WHERE id = $1", userID); err != nil {
+		return 0, err
+	}
+	return verifyOK, tx.Commit(ctx)
+}
+
+// consumeVerificationCode looks up the newest unused verification_codes row
+// for (userID, purpose), checks its expiry and remaining attempts, and
+// compares the supplied code against the stored hash — decrementing
+// attempts_remaining on a wrong guess or marking the row used on a match.
+// Callers must already be inside a transaction and are responsible for
+// committing and for any purpose-specific side effect on verifyOK.
+func consumeVerificationCode(ctx context.Context, tx pgx.Tx, userID, purpose, code string) (verifyOutcome, error) {
 	var codeID, storedHash string
 	var expiresAt time.Time
 	var attemptsRemaining int
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT id, code_hash, expires_at, attempts_remaining
 		 FROM verification_codes
-		 WHERE user_id = $1 AND purpose = 'email_verify' AND used_at IS NULL
+		 WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL
 		 ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-		userID,
+		userID, purpose,
 	).Scan(&codeID, &storedHash, &expiresAt, &attemptsRemaining)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return verifyNoActiveCode, nil
@@ -96,10 +117,10 @@ func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string
 	}
 
 	if time.Now().After(expiresAt) {
-		return verifyCodeExpired, tx.Commit(ctx)
+		return verifyCodeExpired, nil
 	}
 	if attemptsRemaining <= 0 {
-		return verifyTooManyAttempts, tx.Commit(ctx)
+		return verifyTooManyAttempts, nil
 	}
 
 	if hashCode(code) != storedHash {
@@ -109,16 +130,13 @@ func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string
 		); err != nil {
 			return 0, err
 		}
-		return verifyWrongCode, tx.Commit(ctx)
+		return verifyWrongCode, nil
 	}
 
 	if _, err := tx.Exec(ctx, "UPDATE verification_codes SET used_at = now() WHERE id = $1", codeID); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(ctx, "UPDATE users SET status = 'active', updated_at = now() WHERE id = $1", userID); err != nil {
-		return 0, err
-	}
-	return verifyOK, tx.Commit(ctx)
+	return verifyOK, nil
 }
 
 type resendOutcome int
@@ -206,7 +224,7 @@ func resendVerificationCode(ctx context.Context, pool *pgxpool.Pool, email, code
 		return resendNotPending, nil
 	}
 
-	if err := invalidateAndIssueCode(ctx, tx, userID, codeHash); err != nil {
+	if err := invalidateAndIssueCode(ctx, tx, userID, "email_verify", codeHash); err != nil {
 		return 0, err
 	}
 	return resendOK, tx.Commit(ctx)

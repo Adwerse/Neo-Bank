@@ -24,7 +24,8 @@ const (
 	accessTokenTTL  = 15 * time.Minute
 	refreshTokenTTL = 7 * 24 * time.Hour
 
-	refreshKeyPrefix = "refresh:"
+	refreshKeyPrefix     = "refresh:"
+	userRefreshKeyPrefix = "user_refresh:"
 )
 
 type loginRequest struct {
@@ -171,9 +172,17 @@ func logoutHandler(rdb *redis.Client) http.HandlerFunc {
 			return
 		}
 
-		if err := rdb.Del(r.Context(), refreshKeyPrefix+req.RefreshToken).Err(); err != nil {
+		ctx := r.Context()
+		userID, err := rdb.GetDel(ctx, refreshKeyPrefix+req.RefreshToken).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
+		}
+		if err == nil {
+			if err := rdb.SRem(ctx, userRefreshKeyPrefix+userID, req.RefreshToken).Err(); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+				return
+			}
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -221,6 +230,10 @@ func consumeRefreshToken(ctx context.Context, rdb *redis.Client, pool *pgxpool.P
 		return authUser{}, refreshInvalidToken, nil
 	}
 	if err != nil {
+		return authUser{}, 0, err
+	}
+
+	if err := rdb.SRem(ctx, userRefreshKeyPrefix+userID, token).Err(); err != nil {
 		return authUser{}, 0, err
 	}
 
@@ -278,7 +291,13 @@ func issueTokenPair(ctx context.Context, rdb *redis.Client, jwtSecret string, us
 		return tokenPairResponse{}, err
 	}
 
-	if err := rdb.Set(ctx, refreshKeyPrefix+refreshToken, user.ID, refreshTokenTTL).Err(); err != nil {
+	userSetKey := userRefreshKeyPrefix + user.ID
+	if _, err := rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Set(ctx, refreshKeyPrefix+refreshToken, user.ID, refreshTokenTTL)
+		pipe.SAdd(ctx, userSetKey, refreshToken)
+		pipe.Expire(ctx, userSetKey, refreshTokenTTL)
+		return nil
+	}); err != nil {
 		return tokenPairResponse{}, err
 	}
 

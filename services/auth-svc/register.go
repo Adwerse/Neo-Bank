@@ -128,27 +128,27 @@ func registerUserAndIssueCode(ctx context.Context, pool *pgxpool.Pool, email, pa
 		}
 	}
 
-	if err := invalidateAndIssueCode(ctx, tx, userID, codeHash); err != nil {
+	if err := invalidateAndIssueCode(ctx, tx, userID, "email_verify", codeHash); err != nil {
 		return false, err
 	}
 
 	return false, tx.Commit(ctx)
 }
 
-// invalidateAndIssueCode invalidates any unused email_verify codes for the
-// user and inserts a fresh one with a new 10-minute expiry. Callers must
-// already be inside a transaction.
-func invalidateAndIssueCode(ctx context.Context, tx pgx.Tx, userID, codeHash string) error {
+// invalidateAndIssueCode invalidates any unused codes of the given purpose
+// for the user and inserts a fresh one with a new 10-minute expiry. Callers
+// must already be inside a transaction.
+func invalidateAndIssueCode(ctx context.Context, tx pgx.Tx, userID, purpose, codeHash string) error {
 	if _, err := tx.Exec(ctx,
-		"UPDATE verification_codes SET used_at = now() WHERE user_id = $1 AND purpose = 'email_verify' AND used_at IS NULL",
-		userID,
+		"UPDATE verification_codes SET used_at = now() WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL",
+		userID, purpose,
 	); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx,
 		`INSERT INTO verification_codes (user_id, purpose, code_hash, expires_at, attempts_remaining)
-		 VALUES ($1, 'email_verify', $2, now() + interval '10 minutes', 5)`,
-		userID, codeHash,
+		 VALUES ($1, $2, $3, now() + interval '10 minutes', 5)`,
+		userID, purpose, codeHash,
 	)
 	return err
 }

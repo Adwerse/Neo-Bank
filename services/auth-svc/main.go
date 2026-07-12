@@ -77,6 +77,8 @@ func main() {
 	http.HandleFunc("/login", loginHandler(pool, rdb, jwtSecret))
 	http.HandleFunc("/refresh", refreshHandler(pool, rdb, jwtSecret))
 	http.HandleFunc("/logout", logoutHandler(rdb))
+	http.HandleFunc("/forgot-password", forgotPasswordHandler(pool, rdb, smtpAddr, smtpFrom))
+	http.HandleFunc("/reset-password", resetPasswordHandler(pool, rdb))
 
 	log.Printf("auth-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
