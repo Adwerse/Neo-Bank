@@ -13,10 +13,12 @@ import (
 )
 
 const (
-	defaultPort      = "8081"
-	defaultSMTPAddr  = "mailpit:1025"
-	defaultSMTPFrom  = "noreply@neobank.local"
-	defaultRedisAddr = "redis:6379"
+	defaultPort         = "8081"
+	defaultSMTPAddr     = "mailpit:1025"
+	defaultSMTPFrom     = "noreply@neobank.local"
+	defaultRedisAddr    = "redis:6379"
+	defaultKafkaBrokers = "kafka:9092"
+	defaultKafkaTopic   = "user.events"
 )
 
 func main() {
@@ -36,6 +38,14 @@ func main() {
 	if redisAddr == "" {
 		redisAddr = defaultRedisAddr
 	}
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	if kafkaBrokers == "" {
+		kafkaBrokers = defaultKafkaBrokers
+	}
+	kafkaTopic := os.Getenv("KAFKA_TOPIC")
+	if kafkaTopic == "" {
+		kafkaTopic = defaultKafkaTopic
+	}
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 		log.Fatal("auth-svc: JWT_SECRET environment variable is required")
@@ -49,6 +59,9 @@ func main() {
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	defer rdb.Close()
+
+	kafkaWriter := newKafkaWriter(kafkaBrokers, kafkaTopic)
+	defer kafkaWriter.Close()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -72,7 +85,7 @@ func main() {
 	})
 
 	http.HandleFunc("/register", registerHandler(pool, smtpAddr, smtpFrom))
-	http.HandleFunc("/verify-email", verifyEmailHandler(pool))
+	http.HandleFunc("/verify-email", verifyEmailHandler(pool, kafkaWriter))
 	http.HandleFunc("/resend-verification", resendVerificationHandler(pool, rdb, smtpAddr, smtpFrom))
 	http.HandleFunc("/login", loginHandler(pool, rdb, jwtSecret))
 	http.HandleFunc("/refresh", refreshHandler(pool, rdb, jwtSecret))

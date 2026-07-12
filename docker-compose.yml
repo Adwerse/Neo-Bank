@@ -21,6 +21,8 @@ services:
       SMTP_ADDR: mailpit:1025
       SMTP_FROM: noreply@neobank.local
       REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: user.events
       JWT_SECRET: neobank_dev_jwt_secret_change_me
     depends_on:
       postgres:
@@ -104,6 +106,7 @@ services:
       KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
       KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
       ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka_data:/bitnami/kafka
 

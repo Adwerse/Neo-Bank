@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/mail"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 )
 
 const resendCooldown = 60 * time.Second
@@ -26,7 +28,7 @@ const (
 	verifyWrongCode
 )
 
-func verifyEmailHandler(pool *pgxpool.Pool) http.HandlerFunc {
+func verifyEmailHandler(pool *pgxpool.Pool, kafkaWriter *kafka.Writer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -39,7 +41,8 @@ func verifyEmailHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		outcome, err := verifyEmailCode(r.Context(), pool, req.Email, req.Code)
+		ctx := r.Context()
+		outcome, userID, err := verifyEmailCode(ctx, pool, req.Email, req.Code)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
@@ -47,6 +50,14 @@ func verifyEmailHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		switch outcome {
 		case verifyOK:
+			// The activation already committed — that's the guarantee that
+			// matters. A Kafka hiccup here shouldn't turn into a 500 that
+			// falsely tells the client verification failed; log it instead
+			// so it's visible a downstream consumer may have missed this
+			// activation.
+			if err := publishUserActivated(ctx, kafkaWriter, userID, req.Email); err != nil {
+				log.Printf("auth-svc: failed to publish user.activated event for user %s: %v", userID, err)
+			}
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"status": "active"})
 		case verifyUserNotFound:
@@ -63,33 +74,32 @@ func verifyEmailHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string) (verifyOutcome, error) {
+func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string) (outcome verifyOutcome, userID string, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer tx.Rollback(ctx)
 
-	var userID string
 	if err := tx.QueryRow(ctx, "SELECT id FROM users WHERE email = $1", email).Scan(&userID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return verifyUserNotFound, nil
+			return verifyUserNotFound, "", nil
 		}
-		return 0, err
+		return 0, "", err
 	}
 
-	outcome, err := consumeVerificationCode(ctx, tx, userID, "email_verify", code)
+	outcome, err = consumeVerificationCode(ctx, tx, userID, "email_verify", code)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if outcome != verifyOK {
-		return outcome, tx.Commit(ctx)
+		return outcome, "", tx.Commit(ctx)
 	}
 
 	if _, err := tx.Exec(ctx, "UPDATE users SET status = 'active', updated_at = now() WHERE id = $1", userID); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return verifyOK, tx.Commit(ctx)
+	return verifyOK, userID, tx.Commit(ctx)
 }
 
 // consumeVerificationCode looks up the newest unused verification_codes row

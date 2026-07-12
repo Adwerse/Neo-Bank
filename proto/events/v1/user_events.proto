@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "neobank/proto/gen/go/events/v1;eventsv1";
+
+// UserActivated is published once a user's account transitions to
+// status = 'active' (today: only on a successful POST /verify-email).
+message UserActivated {
+  string user_id = 1;
+  string email = 2;
+  google.protobuf.Timestamp occurred_at = 3;
+}

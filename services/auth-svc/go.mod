@@ -6,7 +6,14 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/redis/go-redis/v9 v9.21.0
+	github.com/segmentio/kafka-go v0.4.51
 	golang.org/x/crypto v0.54.0
+	google.golang.org/protobuf v1.36.11
+)
+
+require (
+	github.com/klauspost/compress v1.15.9 // indirect
+	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 )
 
 require (
@@ -18,4 +25,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	neobank/proto/gen/go v0.0.0
 )
+
+replace neobank/proto/gen/go => ../../proto/gen/go
