@@ -69,6 +69,10 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "accounts-svc"})
 	})
 
+	http.HandleFunc("GET /accounts/me", meAccountHandler(pool))
+	http.HandleFunc("GET /accounts/{id}", getAccountHandler(pool))
+	http.HandleFunc("PATCH /accounts/{id}/status", updateAccountStatusHandler(pool))
+
 	log.Printf("accounts-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
