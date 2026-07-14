@@ -54,7 +54,11 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"service": "accounts-svc"})
 	})
 
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	// Method-qualified (not bare "/healthz") so it doesn't create an
+	// unresolvable ambiguity with "GET /{id}" below: an unqualified exact
+	// path matches every method, which Go's ServeMux refuses to rank
+	// against a method-scoped wildcard at registration time.
+	http.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
@@ -69,9 +73,13 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "accounts-svc"})
 	})
 
-	http.HandleFunc("GET /accounts/me", meAccountHandler(pool))
-	http.HandleFunc("GET /accounts/{id}", getAccountHandler(pool))
-	http.HandleFunc("PATCH /accounts/{id}/status", updateAccountStatusHandler(pool))
+	// Root-relative, matching auth-svc's convention: the gateway's reverse
+	// proxy strips the "/accounts" prefix before forwarding here (see
+	// gateway/proxy.go's newProxy/StripPrefix), so these routes must not
+	// repeat it themselves.
+	http.HandleFunc("GET /me", meAccountHandler(pool))
+	http.HandleFunc("GET /{id}", getAccountHandler(pool))
+	http.HandleFunc("PATCH /{id}/status", updateAccountStatusHandler(pool))
 
 	log.Printf("accounts-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
