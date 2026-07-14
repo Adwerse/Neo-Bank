@@ -12,4 +12,5 @@ message UserActivated {
   string user_id = 1;
   string email = 2;
   google.protobuf.Timestamp occurred_at = 3;
+  string event_id = 4;
 }

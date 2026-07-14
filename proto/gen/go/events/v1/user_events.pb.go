@@ -29,6 +29,7 @@ type UserActivated struct {
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	Email         string                 `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`
 	OccurredAt    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
+	EventId       string                 `protobuf:"bytes,4,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -84,16 +85,24 @@ func (x *UserActivated) GetOccurredAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *UserActivated) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
 var File_events_v1_user_events_proto protoreflect.FileDescriptor
 
 const file_events_v1_user_events_proto_rawDesc = "" +
 	"\n" +
-	"\x1bevents/v1/user_events.proto\x12\tevents.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"{\n" +
+	"\x1bevents/v1/user_events.proto\x12\tevents.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x96\x01\n" +
 	"\rUserActivated\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12;\n" +
 	"\voccurred_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"occurredAtB)Z'neobank/proto/gen/go/events/v1;eventsv1b\x06proto3"
+	"occurredAt\x12\x19\n" +
+	"\bevent_id\x18\x04 \x01(\tR\aeventIdB)Z'neobank/proto/gen/go/events/v1;eventsv1b\x06proto3"
 
 var (
 	file_events_v1_user_events_proto_rawDescOnce sync.Once

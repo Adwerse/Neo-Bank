@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,10 +52,16 @@ func newKafkaWriter(brokers, topic string) *kafka.Writer {
 // (write the event row in the same DB transaction, relay it to Kafka from a
 // separate process) would close that gap; deliberately out of scope here.
 func publishUserActivated(ctx context.Context, w *kafka.Writer, userID, email string) error {
+	eventID, err := generateEventID()
+	if err != nil {
+		return err
+	}
+
 	payload, err := proto.Marshal(&eventsv1.UserActivated{
 		UserId:     userID,
 		Email:      email,
 		OccurredAt: timestamppb.New(time.Now()),
+		EventId:    eventID,
 	})
 	if err != nil {
 		return err
@@ -63,4 +71,27 @@ func publishUserActivated(ctx context.Context, w *kafka.Writer, userID, email st
 		Key:   []byte(userID),
 		Value: payload,
 	})
+}
+
+// generateEventID returns a random UUIDv4 (RFC 4122), hand-rolled from
+// crypto/rand like this repo's other small random-value generators
+// (generateCode and generateRefreshToken in register.go/login.go,
+// generateAccountNumber in accounts-svc/accounts.go) rather than adding
+// google/uuid as a new dependency. This is the first place in the repo a
+// UUID is minted in Go rather than by Postgres's gen_random_uuid() — the
+// event needs its id before it ever reaches Kafka, so it can't come from
+// the database.
+//
+// Trade-off, stated rather than silently decided: a well-tested library
+// removes the small risk of getting the version/variant bit-twiddling
+// wrong; this repo has consistently chosen to hand-roll this class of
+// problem instead, so this continues that convention.
+func generateEventID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := crand.Read(b); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10xx (RFC 4122)
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

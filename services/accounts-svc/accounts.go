@@ -45,6 +45,13 @@ const (
 	statusUpdateInvalidTransition
 )
 
+type accountCreateOutcome int
+
+const (
+	accountCreated accountCreateOutcome = iota
+	accountAlreadyExists
+)
+
 var validAccountStatuses = map[string]struct{}{
 	"active": {}, "frozen": {}, "closed": {},
 }
@@ -69,26 +76,31 @@ func isNotFoundErr(err error) bool {
 // one — an expected, non-error outcome given the random number space, not a
 // sign anything is wrong.
 //
-// A collision on user_id (accounts.user_id UNIQUE) is not retried or
-// swallowed: it's returned to the caller like any other error. That user
-// already has an account, almost certainly because this UserActivated
-// event was redelivered (at-least-once Kafka semantics, or a crash after
-// insert but before offset commit). No idempotency/dedup handling is added
-// here — the caller logs the error and leaves the offset uncommitted, for
-// a future idempotency layer to special-case.
-func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string) error {
+// A collision on user_id (accounts.user_id UNIQUE) is idempotency layer 1:
+// the INSERT targets it explicitly via ON CONFLICT (user_id) DO NOTHING, so
+// a redelivered UserActivated event (at-least-once Kafka semantics, or a
+// crash after insert but before offset commit) is a safe, logged no-op —
+// accountAlreadyExists, not an error. Layer 2 (the processed_events table,
+// see handleUserActivated in kafka.go) is a faster-path complement to this,
+// not a replacement: this layer alone is what actually prevents a duplicate
+// row from ever being created, in every case including ones layer 2's
+// bookkeeping doesn't fully cover.
+func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (accountCreateOutcome, error) {
 	for attempt := 0; attempt < maxAccountNumberAttempts; attempt++ {
 		accountNumber, err := generateAccountNumber()
 		if err != nil {
-			return fmt.Errorf("generate account number: %w", err)
+			return 0, fmt.Errorf("generate account number: %w", err)
 		}
 
-		_, err = pool.Exec(ctx,
-			"INSERT INTO accounts (user_id, account_number) VALUES ($1, $2)",
+		tag, err := pool.Exec(ctx,
+			"INSERT INTO accounts (user_id, account_number) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
 			userID, accountNumber,
 		)
 		if err == nil {
-			return nil
+			if tag.RowsAffected() == 0 {
+				return accountAlreadyExists, nil
+			}
+			return accountCreated, nil
 		}
 
 		var pgErr *pgconn.PgError
@@ -96,9 +108,9 @@ func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string
 			pgErr.ConstraintName == accountsAccountNumberConstraint {
 			continue // regenerate and retry
 		}
-		return err // user_id collision, or any other error — not retried
+		return 0, err
 	}
-	return fmt.Errorf("failed to generate a unique account number after %d attempts", maxAccountNumberAttempts)
+	return 0, fmt.Errorf("failed to generate a unique account number after %d attempts", maxAccountNumberAttempts)
 }
 
 // generateAccountNumber returns a synthetic account number of the form
@@ -178,4 +190,29 @@ func updateAccountStatus(ctx context.Context, pool *pgxpool.Pool, id, newStatus 
 		return Account{}, 0, err
 	}
 	return acc, statusUpdateOK, tx.Commit(ctx)
+}
+
+// isEventProcessed reports whether eventID is already recorded in
+// processed_events — idempotency layer 2's fast-path check, see
+// handleUserActivated in kafka.go for how this combines with layer 1.
+func isEventProcessed(ctx context.Context, pool *pgxpool.Pool, eventID string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM processed_events WHERE event_id = $1)",
+		eventID,
+	).Scan(&exists)
+	return exists, err
+}
+
+// markEventProcessed records eventID as processed. ON CONFLICT DO NOTHING
+// isn't load-bearing for the current single-instance consumer (there's
+// never a concurrent call for the same event within one process), but is
+// cheap insurance against a future multi-replica deployment turning a
+// duplicate bookkeeping write into a crash instead of a harmless no-op.
+func markEventProcessed(ctx context.Context, pool *pgxpool.Pool, eventID string) error {
+	_, err := pool.Exec(ctx,
+		"INSERT INTO processed_events (event_id) VALUES ($1) ON CONFLICT (event_id) DO NOTHING",
+		eventID,
+	)
+	return err
 }

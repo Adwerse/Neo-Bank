@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 
@@ -29,13 +30,12 @@ func newKafkaReader(brokers, topic, groupID string) *kafka.Reader {
 // runUserActivatedConsumer fetches UserActivated events and turns each one
 // into an accounts row, one message at a time. It deliberately uses
 // FetchMessage + an explicit CommitMessages (not the auto-committing
-// ReadMessage) so the offset is only advanced after createAccountForUser
+// ReadMessage) so the offset is only advanced after handleUserActivated
 // has actually succeeded — a crash or DB error between fetch and commit
 // leaves the message uncommitted and it will be redelivered, giving
-// at-least-once processing at the cost of possible reprocessing (a
-// redelivery surfaces as a user_id unique-violation from createAccountForUser
-// and is deliberately left unhandled beyond logging — idempotency is a
-// later prompt's concern).
+// at-least-once processing. handleUserActivated is idempotent (two layers,
+// see its doc comment), so a redelivery is a safe, logged no-op rather than
+// a stuck or duplicate-creating consumer.
 func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
 	for {
 		msg, err := reader.FetchMessage(ctx)
@@ -56,8 +56,8 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 			continue
 		}
 
-		if err := createAccountForUser(ctx, pool, event.GetUserId()); err != nil {
-			log.Printf("accounts-svc: failed to create account for user %s: %v", event.GetUserId(), err)
+		if err := handleUserActivated(ctx, pool, &event); err != nil {
+			log.Printf("accounts-svc: failed to handle UserActivated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
 			continue // do not commit — message will be redelivered
 		}
 
@@ -65,4 +65,80 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 			log.Printf("accounts-svc: failed to commit offset for user %s: %v", event.GetUserId(), err)
 		}
 	}
+}
+
+// handleUserActivated processes one UserActivated event idempotently. It is
+// safe to call more than once for the same event_id — that's the whole
+// point: Kafka redelivery (crash between the DB write and the offset
+// commit, or ordinary at-least-once semantics) must be a safe, logged
+// no-op, not a stuck or duplicate-creating consumer.
+//
+// Ordering is deliberate and load-bearing:
+//  1. Check processed_events first (fast path): if event_id is already
+//     recorded, the account for this user is already known to exist —
+//     nothing further to do.
+//  2. Only then attempt to create the account, via createAccountForUser's
+//     own idempotent ON CONFLICT (user_id) path — which reports whether it
+//     freshly created the row or found one already there.
+//  3. Only after step 2 has confirmed the account row exists — either way —
+//     mark processed_events. This is deliberately the LAST step, strictly
+//     after the work it attests to has actually landed.
+//
+// Why step 3 must be last, not first: if processed_events were written
+// before step 2 ran, a real, transient failure inside createAccountForUser
+// (a dropped connection, not a user_id collision) would still leave the
+// offset uncommitted so Kafka redelivers — but processed_events would
+// already show it as done, so the redelivery would wrongly skip it, and
+// that user would never get an account. Writing processed_events last
+// closes that gap: a crash or error anywhere before it leaves
+// processed_events empty, so redelivery always genuinely retries the real
+// work.
+//
+// The two writes (accounts, processed_events) are deliberately not wrapped
+// in one SQL transaction: doing so would require SAVEPOINT/ROLLBACK TO
+// SAVEPOINT around every iteration of createAccountForUser's
+// account-number-collision retry loop (Postgres aborts an entire
+// transaction on any statement error, including an expected, retried
+// collision). That complexity buys nothing here — this consumer is
+// single-threaded and strictly sequential (FetchMessage is called one
+// message at a time, no concurrent handleUserActivated calls within the
+// process), and layer 1 (accounts.user_id UNIQUE + ON CONFLICT DO NOTHING)
+// already absorbs every gap this two-step ordering could otherwise leave.
+func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, event *eventsv1.UserActivated) error {
+	eventID := event.GetEventId()
+	userID := event.GetUserId()
+
+	if eventID == "" {
+		// Defensive: only reachable from a producer that hasn't picked up
+		// the event_id field yet, or a hand-crafted message. Skip the
+		// processed_events fast-path/bookkeeping entirely rather than bind
+		// an empty string to a UUID column (which Postgres would reject
+		// with 22P02 on every redelivery — a new poison-message class).
+		// Falls back to layer 1 alone for this one message.
+		log.Printf("accounts-svc: UserActivated for user %s has no event_id, skipping processed_events bookkeeping", userID)
+		_, err := createAccountForUser(ctx, pool, userID)
+		return err
+	}
+
+	processed, err := isEventProcessed(ctx, pool, eventID)
+	if err != nil {
+		return fmt.Errorf("check processed_events for event %s: %w", eventID, err)
+	}
+	if processed {
+		log.Printf("accounts-svc: event %s already processed, skipping (redelivery)", eventID)
+		return nil
+	}
+
+	outcome, err := createAccountForUser(ctx, pool, userID)
+	if err != nil {
+		return fmt.Errorf("create account for user %s: %w", userID, err)
+	}
+	if outcome == accountAlreadyExists {
+		log.Printf("accounts-svc: account for user %s already exists (redelivery of event %s), not recreating", userID, eventID)
+	}
+
+	if err := markEventProcessed(ctx, pool, eventID); err != nil {
+		return fmt.Errorf("mark event %s processed: %w", eventID, err)
+	}
+	return nil
 }
