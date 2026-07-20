@@ -52,6 +52,11 @@ services:
       dockerfile: services/ledger-svc/Dockerfile
     ports:
       - "8083:8083"
+    environment:
+      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   transfers-svc:
     build:
