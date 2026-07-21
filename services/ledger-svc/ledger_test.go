@@ -44,7 +44,8 @@ func randomUUID(t *testing.T) string {
 }
 
 // insertLedgerAccount creates a ledger_accounts row for accountID and
-// registers cleanup of it (and any entries against it) once the test ends.
+// registers cleanup of it (and any entries or cached balance against it)
+// once the test ends.
 func insertLedgerAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accountID string) string {
 	t.Helper()
 	var ledgerAccountID string
@@ -59,6 +60,9 @@ func insertLedgerAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		cleanupCtx := context.Background()
 		if _, err := pool.Exec(cleanupCtx, "DELETE FROM entries WHERE ledger_account_id = $1", ledgerAccountID); err != nil {
 			t.Logf("cleanup: delete entries for ledger_account_id=%s: %v", ledgerAccountID, err)
+		}
+		if _, err := pool.Exec(cleanupCtx, "DELETE FROM account_balances WHERE ledger_account_id = $1", ledgerAccountID); err != nil {
+			t.Logf("cleanup: delete account_balances for ledger_account_id=%s: %v", ledgerAccountID, err)
 		}
 		if _, err := pool.Exec(cleanupCtx, "DELETE FROM ledger_accounts WHERE id = $1", ledgerAccountID); err != nil {
 			t.Logf("cleanup: delete ledger_account id=%s: %v", ledgerAccountID, err)
@@ -97,12 +101,30 @@ func TestGetBalance(t *testing.T) {
 	insertEntry(t, ctx, pool, randomUUID(t), testLedgerID, -3000)
 	insertEntry(t, ctx, pool, randomUUID(t), counterpartyLedgerID, 3000)
 
+	// insertEntry writes only the log; seed the cache to match, mirroring
+	// what a real balance-affecting write (executeTransfer) would have left
+	// behind, so getBalance is reading account_balances in a consistent
+	// state rather than exercising the "no cache row yet" fallback.
+	setAccountBalance(t, ctx, pool, testLedgerID, 7000)
+
 	balance, err := getBalance(ctx, pool, testAccountID)
 	if err != nil {
 		t.Fatalf("getBalance: unexpected error: %v", err)
 	}
 	if balance != 7000 {
 		t.Errorf("getBalance = %d, want 7000", balance)
+	}
+
+	var naiveSum int64
+	err = pool.QueryRow(ctx,
+		"SELECT COALESCE(SUM(amount), 0)::bigint FROM entries WHERE ledger_account_id = $1",
+		testLedgerID,
+	).Scan(&naiveSum)
+	if err != nil {
+		t.Fatalf("naive sum query: %v", err)
+	}
+	if balance != naiveSum {
+		t.Errorf("getBalance = %d, naive SUM(entries) = %d, want equal", balance, naiveSum)
 	}
 }
 
@@ -145,15 +167,39 @@ func entryCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAcc
 	return count
 }
 
+// setAccountBalance directly overwrites ledgerAccountID's cached balance in
+// account_balances, bypassing any recomputation. A raw fixture helper for
+// establishing a starting cache state, either consistent with entries
+// already written (mirroring what a real write already leaves behind) or
+// deliberately wrong (to test that rebuildBalance fixes drift).
+func setAccountBalance(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAccountID string, balance int64) {
+	t.Helper()
+	_, err := pool.Exec(ctx,
+		`INSERT INTO account_balances (ledger_account_id, balance, updated_at)
+		 VALUES ($1, $2, now())
+		 ON CONFLICT (ledger_account_id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = EXCLUDED.updated_at`,
+		ledgerAccountID, balance,
+	)
+	if err != nil {
+		t.Fatalf("set account_balances: %v", err)
+	}
+}
+
 // fundAccount gives ledgerAccountID a starting balance by inserting a
 // balanced pair against a throwaway counterparty account, preserving the
-// global SUM(entries) = 0 invariant in the shared dev database.
+// global SUM(entries) = 0 invariant in the shared dev database, and seeds
+// account_balances for both sides to match — insertEntry only writes the
+// log, so without this the cache would start empty (not merely zero) and
+// executeTransfer's incremental delta update would land on the wrong
+// baseline.
 func fundAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAccountID string, amount int64) {
 	t.Helper()
 	counterpartyAccountID := randomUUID(t)
 	counterpartyLedgerID := insertLedgerAccount(t, ctx, pool, counterpartyAccountID)
 	insertEntry(t, ctx, pool, randomUUID(t), ledgerAccountID, amount)
 	insertEntry(t, ctx, pool, randomUUID(t), counterpartyLedgerID, -amount)
+	setAccountBalance(t, ctx, pool, ledgerAccountID, amount)
+	setAccountBalance(t, ctx, pool, counterpartyLedgerID, -amount)
 }
 
 func TestExecuteTransfer_Success(t *testing.T) {
@@ -329,5 +375,105 @@ func TestExecuteTransfer_ToAccountNotFound(t *testing.T) {
 	}
 	if outcome != transferToAccountNotFound {
 		t.Errorf("executeTransfer outcome = %v, want transferToAccountNotFound", outcome)
+	}
+}
+
+// TestRebuildBalance_MatchesIncrementalCache covers the DoD requirement
+// that after a series of transfers, rebuildBalance's from-scratch
+// recomputation agrees with the value account_balances accumulated
+// incrementally via executeTransfer's deltas — proof the cache and the log
+// it's derived from have stayed in sync.
+func TestRebuildBalance_MatchesIncrementalCache(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUID(t)
+	ledgerID := insertLedgerAccount(t, ctx, pool, accountID)
+	fundAccount(t, ctx, pool, ledgerID, 10000)
+
+	counterpartyID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, counterpartyID)
+
+	for _, amount := range []int64{4000, 1000, 500} {
+		_, outcome, err := executeTransfer(ctx, pool, accountID, counterpartyID, amount)
+		if err != nil {
+			t.Fatalf("executeTransfer(%d): unexpected error: %v", amount, err)
+		}
+		if outcome != transferOK {
+			t.Fatalf("executeTransfer(%d) outcome = %v, want transferOK", amount, outcome)
+		}
+	}
+
+	const wantBalance = 10000 - 4000 - 1000 - 500
+	incremental, err := getBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("getBalance: unexpected error: %v", err)
+	}
+	if incremental != wantBalance {
+		t.Fatalf("incrementally-cached balance = %d, want %d", incremental, wantBalance)
+	}
+
+	rebuilt, err := rebuildBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("rebuildBalance: unexpected error: %v", err)
+	}
+	if rebuilt != incremental {
+		t.Errorf("rebuildBalance = %d, want %d (same as incrementally-accumulated cache)", rebuilt, incremental)
+	}
+
+	afterRebuild, err := getBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("getBalance after rebuild: unexpected error: %v", err)
+	}
+	if afterRebuild != incremental {
+		t.Errorf("getBalance after rebuild = %d, want %d", afterRebuild, incremental)
+	}
+}
+
+// TestRebuildBalance_FixesDrift proves the cache is genuinely derived from
+// (and repairable from) the log: entries are written directly, bypassing
+// account_balances entirely, and the cache is then set to a deliberately
+// wrong value. rebuildBalance must ignore that wrong value and recompute
+// from entries — the log wins, per the stated design principle.
+func TestRebuildBalance_FixesDrift(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUID(t)
+	ledgerID := insertLedgerAccount(t, ctx, pool, accountID)
+
+	insertEntry(t, ctx, pool, randomUUID(t), ledgerID, 5000)
+	insertEntry(t, ctx, pool, randomUUID(t), ledgerID, -1200)
+	setAccountBalance(t, ctx, pool, ledgerID, 999999) // deliberately wrong
+
+	if got, err := getBalance(ctx, pool, accountID); err != nil || got != 999999 {
+		t.Fatalf("precondition: getBalance = %d, err=%v, want drifted 999999", got, err)
+	}
+
+	const wantBalance = 5000 - 1200
+	rebuilt, err := rebuildBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("rebuildBalance: unexpected error: %v", err)
+	}
+	if rebuilt != wantBalance {
+		t.Errorf("rebuildBalance = %d, want %d (recomputed from entries log)", rebuilt, wantBalance)
+	}
+
+	fixed, err := getBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("getBalance after rebuild: unexpected error: %v", err)
+	}
+	if fixed != wantBalance {
+		t.Errorf("getBalance after rebuild = %d, want %d", fixed, wantBalance)
+	}
+}
+
+func TestRebuildBalance_NotFound(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	_, err := rebuildBalance(ctx, pool, randomUUID(t))
+	if !errors.Is(err, ErrLedgerAccountNotFound) {
+		t.Fatalf("rebuildBalance for a nonexistent account_id = %v, want ErrLedgerAccountNotFound", err)
 	}
 }

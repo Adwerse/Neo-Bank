@@ -16,33 +16,77 @@ import (
 // valid state, not an error.
 var ErrLedgerAccountNotFound = errors.New("ledger account not found")
 
-// getBalance computes accountID's balance by summing its entries. The
-// balance is never stored as a mutable field — it is always derived from
-// the append-only entries log, which is the essence of event sourcing:
-// state is derived from history, never cached alongside it.
-//
-// SUM(amount) is cast to bigint in SQL because Postgres's SUM(bigint)
-// returns numeric, which pgx cannot scan directly into an int64.
+// getBalance reads accountID's balance from account_balances, a cache/
+// projection of the entries log kept up to date by executeTransfer (and
+// repairable from the log at any time via rebuildBalance). The entries log
+// remains the sole source of truth — account_balances just avoids an O(n)
+// SUM over potentially thousands of entries on every read. A missing
+// account_balances row (an account that exists but has never been the
+// target of a balance-affecting write) is a valid zero balance, not an
+// error, matching the old SUM-based behavior for zero-entry accounts.
 func getBalance(ctx context.Context, pool *pgxpool.Pool, accountID string) (int64, error) {
-	var ledgerAccountID string
+	var balance int64
 	err := pool.QueryRow(ctx,
-		"SELECT id FROM ledger_accounts WHERE account_id = $1",
+		`SELECT COALESCE(ab.balance, 0)
+		 FROM ledger_accounts la
+		 LEFT JOIN account_balances ab ON ab.ledger_account_id = la.id
+		 WHERE la.account_id = $1`,
 		accountID,
-	).Scan(&ledgerAccountID)
+	).Scan(&balance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrLedgerAccountNotFound
 	}
 	if err != nil {
-		return 0, fmt.Errorf("look up ledger account: %w", err)
+		return 0, fmt.Errorf("look up account balance: %w", err)
+	}
+	return balance, nil
+}
+
+// rebuildBalance recomputes accountID's balance from the entries log —
+// the source of truth — and overwrites account_balances with the result,
+// fixing any drift between the cache and the log. It locks the ledger
+// account FOR UPDATE first, same as executeTransfer, so it can't race a
+// concurrent transfer: either it runs before the transfer's lock is
+// acquired (and sees a balance the transfer will then correctly update),
+// or after the transfer commits (and its SUM(entries) already reflects
+// the transfer's entries).
+func rebuildBalance(ctx context.Context, pool *pgxpool.Pool, accountID string) (int64, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	ledgerAccountID, found, err := lockLedgerAccount(ctx, tx, accountID)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, ErrLedgerAccountNotFound
 	}
 
 	var balance int64
-	err = pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		"SELECT COALESCE(SUM(amount), 0)::bigint FROM entries WHERE ledger_account_id = $1",
 		ledgerAccountID,
 	).Scan(&balance)
 	if err != nil {
 		return 0, fmt.Errorf("sum entries: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO account_balances (ledger_account_id, balance, updated_at)
+		 VALUES ($1, $2, now())
+		 ON CONFLICT (ledger_account_id)
+		 DO UPDATE SET balance = EXCLUDED.balance, updated_at = EXCLUDED.updated_at`,
+		ledgerAccountID, balance,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("write rebuilt balance: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit rebuild: %w", err)
 	}
 	return balance, nil
 }
@@ -161,8 +205,35 @@ func executeTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toA
 		return "", 0, fmt.Errorf("insert credit entry: %w", err)
 	}
 
+	if err := applyBalanceDelta(ctx, tx, fromLedgerAccountID, -amount); err != nil {
+		return "", 0, err
+	}
+	if err := applyBalanceDelta(ctx, tx, toLedgerAccountID, amount); err != nil {
+		return "", 0, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return "", 0, fmt.Errorf("commit transfer: %w", err)
 	}
 	return transactionID, transferOK, nil
+}
+
+// applyBalanceDelta adds delta to ledgerAccountID's cached balance in
+// account_balances within tx, creating the row (seeded at delta) if this is
+// the account's first balance-affecting write. Safe to call without an
+// extra lock because callers only ever invoke it for accounts they have
+// already locked FOR UPDATE via lockLedgerAccount within the same tx, so no
+// concurrent writer can be racing this update.
+func applyBalanceDelta(ctx context.Context, tx pgx.Tx, ledgerAccountID string, delta int64) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO account_balances (ledger_account_id, balance, updated_at)
+		 VALUES ($1, $2, now())
+		 ON CONFLICT (ledger_account_id)
+		 DO UPDATE SET balance = account_balances.balance + EXCLUDED.balance, updated_at = now()`,
+		ledgerAccountID, delta,
+	)
+	if err != nil {
+		return fmt.Errorf("update account_balances: %w", err)
+	}
+	return nil
 }
