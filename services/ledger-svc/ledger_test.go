@@ -131,3 +131,203 @@ func TestGetBalance_ZeroForAccountWithNoEntries(t *testing.T) {
 		t.Errorf("getBalance = %d, want 0 (account exists but has no entries)", balance)
 	}
 }
+
+// entryCount returns how many entries rows exist for ledgerAccountID, used
+// to assert that a rejected transfer wrote nothing at all (not just that
+// balances are unchanged, which a bogus offsetting pair could also satisfy).
+func entryCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAccountID string) int {
+	t.Helper()
+	var count int
+	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM entries WHERE ledger_account_id = $1", ledgerAccountID).Scan(&count)
+	if err != nil {
+		t.Fatalf("count entries: %v", err)
+	}
+	return count
+}
+
+// fundAccount gives ledgerAccountID a starting balance by inserting a
+// balanced pair against a throwaway counterparty account, preserving the
+// global SUM(entries) = 0 invariant in the shared dev database.
+func fundAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAccountID string, amount int64) {
+	t.Helper()
+	counterpartyAccountID := randomUUID(t)
+	counterpartyLedgerID := insertLedgerAccount(t, ctx, pool, counterpartyAccountID)
+	insertEntry(t, ctx, pool, randomUUID(t), ledgerAccountID, amount)
+	insertEntry(t, ctx, pool, randomUUID(t), counterpartyLedgerID, -amount)
+}
+
+func TestExecuteTransfer_Success(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	fromAccountID := randomUUID(t)
+	toAccountID := randomUUID(t)
+	fromLedgerID := insertLedgerAccount(t, ctx, pool, fromAccountID)
+	toLedgerID := insertLedgerAccount(t, ctx, pool, toAccountID)
+	fundAccount(t, ctx, pool, fromLedgerID, 10000)
+
+	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 3000)
+	if err != nil {
+		t.Fatalf("executeTransfer: unexpected error: %v", err)
+	}
+	if outcome != transferOK {
+		t.Fatalf("executeTransfer outcome = %v, want transferOK", outcome)
+	}
+	if transactionID == "" {
+		t.Fatal("executeTransfer: transactionID is empty on success")
+	}
+
+	fromBalance, err := getBalance(ctx, pool, fromAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(from): unexpected error: %v", err)
+	}
+	if fromBalance != 7000 {
+		t.Errorf("from balance = %d, want 7000", fromBalance)
+	}
+	toBalance, err := getBalance(ctx, pool, toAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(to): unexpected error: %v", err)
+	}
+	if toBalance != 3000 {
+		t.Errorf("to balance = %d, want 3000", toBalance)
+	}
+
+	rows, err := pool.Query(ctx, "SELECT ledger_account_id, amount FROM entries WHERE transaction_id = $1", transactionID)
+	if err != nil {
+		t.Fatalf("query entries for transaction_id=%s: %v", transactionID, err)
+	}
+	defer rows.Close()
+	var sum int64
+	var n int
+	for rows.Next() {
+		var ledgerAccountID string
+		var amount int64
+		if err := rows.Scan(&ledgerAccountID, &amount); err != nil {
+			t.Fatalf("scan entry: %v", err)
+		}
+		switch ledgerAccountID {
+		case fromLedgerID:
+			if amount != -3000 {
+				t.Errorf("from entry amount = %d, want -3000", amount)
+			}
+		case toLedgerID:
+			if amount != 3000 {
+				t.Errorf("to entry amount = %d, want 3000", amount)
+			}
+		default:
+			t.Errorf("unexpected ledger_account_id %s in transaction %s", ledgerAccountID, transactionID)
+		}
+		sum += amount
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate entries: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("entries for transaction_id=%s: got %d rows, want 2", transactionID, n)
+	}
+	if sum != 0 {
+		t.Errorf("SUM(entries) for transaction_id=%s = %d, want 0", transactionID, sum)
+	}
+}
+
+func TestExecuteTransfer_InsufficientFunds(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	fromAccountID := randomUUID(t)
+	toAccountID := randomUUID(t)
+	fromLedgerID := insertLedgerAccount(t, ctx, pool, fromAccountID)
+	toLedgerID := insertLedgerAccount(t, ctx, pool, toAccountID)
+	fundAccount(t, ctx, pool, fromLedgerID, 1000)
+
+	fromCountBefore := entryCount(t, ctx, pool, fromLedgerID)
+	toCountBefore := entryCount(t, ctx, pool, toLedgerID)
+
+	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 5000)
+	if err != nil {
+		t.Fatalf("executeTransfer: unexpected error: %v", err)
+	}
+	if outcome != transferInsufficientFunds {
+		t.Fatalf("executeTransfer outcome = %v, want transferInsufficientFunds", outcome)
+	}
+	if transactionID != "" {
+		t.Errorf("executeTransfer: transactionID = %q, want empty on failure", transactionID)
+	}
+
+	fromBalance, err := getBalance(ctx, pool, fromAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(from): unexpected error: %v", err)
+	}
+	if fromBalance != 1000 {
+		t.Errorf("from balance = %d, want unchanged 1000", fromBalance)
+	}
+	toBalance, err := getBalance(ctx, pool, toAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(to): unexpected error: %v", err)
+	}
+	if toBalance != 0 {
+		t.Errorf("to balance = %d, want unchanged 0", toBalance)
+	}
+
+	if got := entryCount(t, ctx, pool, fromLedgerID); got != fromCountBefore {
+		t.Errorf("from entry count = %d, want unchanged %d", got, fromCountBefore)
+	}
+	if got := entryCount(t, ctx, pool, toLedgerID); got != toCountBefore {
+		t.Errorf("to entry count = %d, want unchanged %d", got, toCountBefore)
+	}
+}
+
+func TestExecuteTransfer_InvalidAmount(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	fromAccountID := randomUUID(t)
+	toAccountID := randomUUID(t)
+
+	for _, amount := range []int64{0, -100} {
+		transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, amount)
+		if err != nil {
+			t.Fatalf("executeTransfer(amount=%d): unexpected error: %v", amount, err)
+		}
+		if outcome != transferInvalidAmount {
+			t.Errorf("executeTransfer(amount=%d) outcome = %v, want transferInvalidAmount", amount, outcome)
+		}
+		if transactionID != "" {
+			t.Errorf("executeTransfer(amount=%d): transactionID = %q, want empty", amount, transactionID)
+		}
+	}
+}
+
+func TestExecuteTransfer_FromAccountNotFound(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	toAccountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, toAccountID)
+
+	_, outcome, err := executeTransfer(ctx, pool, randomUUID(t), toAccountID, 100)
+	if err != nil {
+		t.Fatalf("executeTransfer: unexpected error: %v", err)
+	}
+	if outcome != transferFromAccountNotFound {
+		t.Errorf("executeTransfer outcome = %v, want transferFromAccountNotFound", outcome)
+	}
+}
+
+func TestExecuteTransfer_ToAccountNotFound(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	fromAccountID := randomUUID(t)
+	fromLedgerID := insertLedgerAccount(t, ctx, pool, fromAccountID)
+	fundAccount(t, ctx, pool, fromLedgerID, 1000)
+
+	_, outcome, err := executeTransfer(ctx, pool, fromAccountID, randomUUID(t), 100)
+	if err != nil {
+		t.Fatalf("executeTransfer: unexpected error: %v", err)
+	}
+	if outcome != transferToAccountNotFound {
+		t.Errorf("executeTransfer outcome = %v, want transferToAccountNotFound", outcome)
+	}
+}
