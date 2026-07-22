@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -191,8 +192,9 @@ func setAccountBalance(t *testing.T, ctx context.Context, pool *pgxpool.Pool, le
 // account_balances for both sides to match — insertEntry only writes the
 // log, so without this the cache would start empty (not merely zero) and
 // executeTransfer's incremental delta update would land on the wrong
-// baseline.
-func fundAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAccountID string, amount int64) {
+// baseline. Returns the counterparty's ledger_accounts id, for tests that
+// need to include it in their own scoped sum-zero checks.
+func fundAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAccountID string, amount int64) string {
 	t.Helper()
 	counterpartyAccountID := randomUUID(t)
 	counterpartyLedgerID := insertLedgerAccount(t, ctx, pool, counterpartyAccountID)
@@ -200,6 +202,7 @@ func fundAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ledgerAc
 	insertEntry(t, ctx, pool, randomUUID(t), counterpartyLedgerID, -amount)
 	setAccountBalance(t, ctx, pool, ledgerAccountID, amount)
 	setAccountBalance(t, ctx, pool, counterpartyLedgerID, -amount)
+	return counterpartyLedgerID
 }
 
 func TestExecuteTransfer_Success(t *testing.T) {
@@ -475,5 +478,123 @@ func TestRebuildBalance_NotFound(t *testing.T) {
 	_, err := rebuildBalance(ctx, pool, randomUUID(t))
 	if !errors.Is(err, ErrLedgerAccountNotFound) {
 		t.Fatalf("rebuildBalance for a nonexistent account_id = %v, want ErrLedgerAccountNotFound", err)
+	}
+}
+
+// TestExecuteTransfer_ConcurrentOverdraftPrevention is the proof that
+// executeTransfer's FOR UPDATE locking (see the concurrency doc comment on
+// executeTransfer in ledger.go) actually serializes concurrent debits
+// against the same account, rather than merely claiming to. It fires
+// goroutines concurrently instead of exercising the locking logic
+// sequentially — a sequential call sequence would pass even with the
+// locking code deleted entirely, since removing FOR UPDATE only produces
+// wrong results under genuine concurrent access to the same account.
+//
+// 20 goroutines each try to withdraw 1000 from an account funded with
+// exactly 10000 — enough for exactly 10 of them. Without the lock, two (or
+// more) goroutines could both compute SUM(entries) before either commits
+// its debit, both see the same pre-debit balance, both conclude there's
+// enough, and both proceed: the account overdraws. With the lock, every
+// goroutine but one blocks on its SELECT ... FOR UPDATE for the account's
+// ledger_accounts row until the transaction currently holding it commits
+// or rolls back — so every balance check is always against fully
+// up-to-date, already-committed state. Exactly 10 succeed, exactly 10 see
+// insufficient funds, and the account can never go negative.
+func TestExecuteTransfer_ConcurrentOverdraftPrevention(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	const (
+		startingBalance = 10000
+		amount          = 1000
+		attempts        = 20
+		wantSucceeded   = startingBalance / amount
+	)
+
+	fromAccountID := randomUUID(t)
+	fromLedgerID := insertLedgerAccount(t, ctx, pool, fromAccountID)
+	counterpartyLedgerID := fundAccount(t, ctx, pool, fromLedgerID, startingBalance)
+
+	toAccountIDs := make([]string, attempts)
+	toLedgerIDs := make([]string, attempts)
+	for i := range toAccountIDs {
+		toAccountIDs[i] = randomUUID(t)
+		toLedgerIDs[i] = insertLedgerAccount(t, ctx, pool, toAccountIDs[i])
+	}
+
+	// Each goroutine writes only to its own index — no shared mutable
+	// state besides these pre-sized slices, so no extra synchronization
+	// is needed to safely collect results.
+	outcomes := make([]transferOutcome, attempts)
+	errs := make([]error, attempts)
+
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountIDs[i], amount)
+			outcomes[i] = outcome
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	var succeeded, insufficientFunds int
+	for i, outcome := range outcomes {
+		if errs[i] != nil {
+			// FOR UPDATE blocks rather than aborting, so this should never
+			// happen — unlike a SERIALIZABLE-based approach, there's no
+			// 40001 serialization_failure to retry here. A non-nil error
+			// means the locking isn't behaving as designed.
+			t.Fatalf("goroutine %d: unexpected error: %v", i, errs[i])
+		}
+		switch outcome {
+		case transferOK:
+			succeeded++
+		case transferInsufficientFunds:
+			insufficientFunds++
+		default:
+			t.Fatalf("goroutine %d: unexpected outcome %v", i, outcome)
+		}
+	}
+
+	if succeeded != wantSucceeded {
+		t.Errorf("succeeded = %d, want %d", succeeded, wantSucceeded)
+	}
+	if insufficientFunds != attempts-wantSucceeded {
+		t.Errorf("insufficientFunds = %d, want %d", insufficientFunds, attempts-wantSucceeded)
+	}
+
+	finalBalance, err := getBalance(ctx, pool, fromAccountID)
+	if err != nil {
+		t.Fatalf("getBalance: unexpected error: %v", err)
+	}
+	if finalBalance < 0 {
+		t.Fatalf("account went negative: balance = %d — the race prevention failed", finalBalance)
+	}
+	if finalBalance != 0 {
+		t.Errorf("final balance = %d, want exactly 0", finalBalance)
+	}
+
+	// Global SUM(entries) = 0, scoped to exactly the ledger accounts this
+	// test touched: the shared dev database holds other tests' and other
+	// services' balanced entries too, so summing the whole table would be
+	// correct in principle but fragile to unrelated concurrent state.
+	// Every entry among these accounts came from a balanced pair entirely
+	// contained within this set (the initial funding, and each transfer
+	// attempt), so the scoped sum is exactly as meaningful a check of the
+	// invariant as a true global one.
+	scopedLedgerIDs := append([]string{fromLedgerID, counterpartyLedgerID}, toLedgerIDs...)
+	var totalSum int64
+	err = pool.QueryRow(ctx,
+		"SELECT COALESCE(SUM(amount), 0)::bigint FROM entries WHERE ledger_account_id = ANY($1::uuid[])",
+		scopedLedgerIDs,
+	).Scan(&totalSum)
+	if err != nil {
+		t.Fatalf("sum entries across storm accounts: %v", err)
+	}
+	if totalSum != 0 {
+		t.Errorf("SUM(entries) across all accounts touched by this test = %d, want 0", totalSum)
 	}
 }
