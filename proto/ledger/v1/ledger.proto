@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "neobank/proto/gen/go/ledger/v1;ledgerv1";
+
+// LedgerService is ledger-svc's internal service-to-service contract.
+// Not exposed through the gateway — the only intended caller is
+// transfers-svc, which speaks to ledger-svc directly inside the cluster.
+service LedgerService {
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+  rpc ExecuteTransfer(ExecuteTransferRequest) returns (ExecuteTransferResponse);
+  rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
+}
+
+message GetBalanceRequest {
+  string account_id = 1;
+}
+
+message GetBalanceResponse {
+  int64 balance = 1;
+}
+
+message ExecuteTransferRequest {
+  string from_account_id = 1;
+  string to_account_id = 2;
+  int64 amount = 3;
+}
+
+message ExecuteTransferResponse {
+  string transaction_id = 1;
+}
+
+message GetHistoryRequest {
+  string account_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message GetHistoryResponse {
+  repeated Entry entries = 1;
+}
+
+// Entry is one row of an account's entries log, newest first.
+message Entry {
+  string transaction_id = 1;
+  int64 amount = 2;
+  google.protobuf.Timestamp created_at = 3;
+}

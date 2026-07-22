@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,6 +16,10 @@ import (
 // account that exists but has no entries (or entries summing to zero) is a
 // valid state, not an error.
 var ErrLedgerAccountNotFound = errors.New("ledger account not found")
+
+// ErrInvalidPagination indicates a non-positive limit or negative offset
+// was passed to getHistory.
+var ErrInvalidPagination = errors.New("invalid pagination")
 
 // getBalance reads accountID's balance from account_balances, a cache/
 // projection of the entries log kept up to date by executeTransfer (and
@@ -40,6 +45,67 @@ func getBalance(ctx context.Context, pool *pgxpool.Pool, accountID string) (int6
 		return 0, fmt.Errorf("look up account balance: %w", err)
 	}
 	return balance, nil
+}
+
+// LedgerEntry is one row of an account's entries log, as returned by
+// getHistory.
+type LedgerEntry struct {
+	TransactionID string
+	Amount        int64
+	CreatedAt     time.Time
+}
+
+// getHistory returns accountID's entries, newest first, paginated via
+// limit/offset — the log grows without bound, so an unpaginated read would
+// eventually scan an account's entire history on every call. Ties in
+// created_at are broken by id: both entries of a single executeTransfer
+// share the same timestamp (Postgres's now() is fixed for the duration of
+// a transaction), so created_at alone isn't a stable enough sort key to
+// paginate over without risking skipped or duplicated rows across pages.
+func getHistory(ctx context.Context, pool *pgxpool.Pool, accountID string, limit, offset int32) ([]LedgerEntry, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("%w: limit must be positive, got %d", ErrInvalidPagination, limit)
+	}
+	if offset < 0 {
+		return nil, fmt.Errorf("%w: offset must be non-negative, got %d", ErrInvalidPagination, offset)
+	}
+
+	var ledgerAccountID string
+	err := pool.QueryRow(ctx,
+		"SELECT id FROM ledger_accounts WHERE account_id = $1",
+		accountID,
+	).Scan(&ledgerAccountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrLedgerAccountNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("look up ledger account: %w", err)
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT transaction_id, amount, created_at FROM entries
+		 WHERE ledger_account_id = $1
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT $2 OFFSET $3`,
+		ledgerAccountID, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query entries: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]LedgerEntry, 0, limit)
+	for rows.Next() {
+		var e LedgerEntry
+		if err := rows.Scan(&e.TransactionID, &e.Amount, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan entry: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate entries: %w", err)
+	}
+	return entries, nil
 }
 
 // rebuildBalance recomputes accountID's balance from the entries log —

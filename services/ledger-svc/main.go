@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
-	"net/http"
+	"net"
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"neobank/pkg/health"
+
+	ledgerv1 "neobank/proto/gen/go/ledger/v1"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 )
 
 const defaultPort = "8083"
@@ -30,15 +35,26 @@ func main() {
 	}
 	defer pool.Close()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotImplemented)
-		json.NewEncoder(w).Encode(map[string]string{"service": "ledger-svc"})
-	})
-	http.HandleFunc("/healthz", health.Handler("ledger-svc"))
+	lis, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("ledger-svc: failed to listen on :%s: %v", port, err)
+	}
 
-	log.Printf("ledger-svc listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	grpcServer := grpc.NewServer()
+	ledgerv1.RegisterLedgerServiceServer(grpcServer, &ledgerServer{pool: pool})
+
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
+
+	// Reflection lets grpcurl (and similar tools) list/describe/call RPCs
+	// without needing the .proto files on hand — this is an internal-only
+	// service (no gateway route, no client-facing use), so the usual
+	// tradeoff against exposing reflection publicly doesn't apply here.
+	reflection.Register(grpcServer)
+
+	log.Printf("ledger-svc listening on :%s (gRPC)", port)
+	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatal(err)
 	}
 }

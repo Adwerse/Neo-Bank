@@ -70,6 +70,35 @@ docker compose logs -f accounts-svc
 
 Проверено вручную на этом стеке (`bitnamilegacy/kafka:3.7.1`): после шага 3 в логах появляется `accounts-svc: event <event_id> already processed, skipping (redelivery)`, а `SELECT count(*) FROM accounts WHERE user_id = '<user_id>'` остаётся `1`. Дополнительно проверен и уровень 1 отдельно: если вручную удалить строку из `processed_events` (`DELETE FROM processed_events WHERE event_id = '<event_id>'`) и повторить шаги 1–3, лог показывает уже другую ветку — `account for user <user_id> already exists (redelivery of event <event_id>), not recreating` — то есть дедупликация срабатывает и без `processed_events`, только на `ON CONFLICT (user_id)`; при этом строка в `processed_events` восстанавливается (самолечение), а счёт по-прежнему один. Оффсет консьюмера в обоих случаях в итоге закоммичен (`kafka-consumer-groups.sh --describe` показывает `LAG 0`), т.е. дубль не оставляет группу «застрявшей».
 
+## ledger-svc: внутренний gRPC API
+
+`ledger-svc` считает и хранит балансы (`account_balances` — кэш поверх лога `entries`, всегда пересчитываемый из него), исполняет атомарные переводы между двумя счетами и отдаёт историю проводок. У него **нет** публичного HTTP API и **нет** маршрута в `gateway` — это осознанно: единственный клиент ledger-svc — `transfers-svc` (со спринта 5), который сам отвечает за аутентификацию и авторизацию перевода до вызова ledger. Здесь нет ни `X-User-Id`, ни какой-либо другой клиентской идентичности — это внутренний, service-to-service контракт.
+
+Протокол — gRPC, а не HTTP: это вызов между сервисами внутри кластера, а не браузерный запрос, и `buf.gen.yaml` в репозитории уже настроен на генерацию grpc-стабов (`protoc-gen-go-grpc`), так что добавить контракт стоило дёшево.
+
+Контракт — `proto/ledger/v1/ledger.proto` (`ledger.v1.LedgerService`):
+- `GetBalance(account_id) → balance` — O(1) чтение из `account_balances`.
+- `ExecuteTransfer(from_account_id, to_account_id, amount) → transaction_id` — атомарный перевод; бизнес-ошибки («недостаточно средств», «аккаунт не найден» — отдельно для `from`/`to`, «невалидная сумма») возвращаются как grpc-статусы (`FailedPrecondition`, `NotFound`, `InvalidArgument`), а не как поле в успешном ответе — это gRPC-идиоматичный эквивалент HTTP-кода + JSON `{"error": ...}` в остальных сервисах репозитория.
+- `GetHistory(account_id, limit, offset) → entries[]` — постранично, новые сверху (`ORDER BY created_at DESC, id DESC`; `id` — tie-breaker, потому что обе проводки одного перевода получают одинаковый `created_at`: `now()` внутри одной транзакции Postgres фиксирован на её начало).
+
+Генерация Go-кода из `.proto`: `buf generate` из корня репозитория (нужны локально `buf`, `protoc-gen-go`, `protoc-gen-go-grpc`).
+
+Сервер дополнительно регистрирует стандартный grpc health-check (`grpc.health.v1.Health`) вместо HTTP `/healthz` и grpc reflection — для internal-only сервиса без внешних потребителей компромисс «reflection раскрывает контракт» не действует, а reflection избавляет от необходимости раздавать `.proto`-файлы, чтобы дёргать сервис через `grpcurl`.
+
+### Проверка вручную
+```bash
+grpcurl -plaintext localhost:8083 list
+
+grpcurl -plaintext -d '{"account_id": "<uuid>"}' \
+  localhost:8083 ledger.v1.LedgerService/GetBalance
+
+grpcurl -plaintext -d '{"from_account_id": "<uuid>", "to_account_id": "<uuid>", "amount": 1000}' \
+  localhost:8083 ledger.v1.LedgerService/ExecuteTransfer
+
+grpcurl -plaintext -d '{"account_id": "<uuid>", "limit": 10, "offset": 0}' \
+  localhost:8083 ledger.v1.LedgerService/GetHistory
+```
+
 ## Статус
 На этом шаге описана только структура репозитория и `docker-compose.yml`.
 Следующие шаги добавят Go-код сервисов, интеграцию с инфраструктурой (Postgres/Redis/Kafka) и CI.

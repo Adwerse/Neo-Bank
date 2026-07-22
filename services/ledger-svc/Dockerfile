@@ -1,6 +1,6 @@
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY pkg/health ./pkg/health
+COPY proto/gen/go ./proto/gen/go
 COPY services/ledger-svc ./services/ledger-svc
 WORKDIR /src/services/ledger-svc
 RUN go build -o /out/server .
