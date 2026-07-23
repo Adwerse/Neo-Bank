@@ -6,6 +6,7 @@
 - `gateway/` — единая точка входа (API Gateway)
 - `services/` — микросервисы: `auth-svc`, `accounts-svc`, `ledger-svc`, `transfers-svc`, `fraud-svc`, `notifications-svc`
 - `proto/` — общие protobuf-контракты между сервисами
+- `frontend/` — SPA (Vite + React + TypeScript), см. «Фронтенд» ниже
 - `.github/workflows/` — CI-пайплайны
 
 ## Инфраструктура (dev)
@@ -143,6 +144,41 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
     go run ./cmd/devtopup --account-id <accounts.id> --amount 50000
   ```
   После этого `GET /accounts/me` для того же пользователя показывает `"balance": 50000`.
+
+## Фронтенд
+
+`frontend/` — SPA на Vite + React + TypeScript, обращается к бэкенду через Gateway (`http://localhost:8080`). На этом шаге это только каркас: роутинг и структура проекта, без настоящих форм, API-клиента и авторизации — это следующие шаги.
+
+### Запуск (dev)
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Поднимает dev-сервер на `http://localhost:5173` (порт по умолчанию у Vite). Бэкенд (в первую очередь Gateway) поднимается отдельно, `docker compose up`.
+
+### Структура — feature-based, не по типам файлов
+```
+frontend/src/
+├── app/           — роутинг (react-router), провайдеры (react-query), layout-shell
+├── features/
+│   ├── auth/      — components/ (LoginPage, RegisterPage); hooks/, api.ts появятся вместе с реальными формами
+│   └── accounts/  — components/ (DashboardPage); hooks/, api.ts появятся вместе с реальными запросами
+└── shared/
+    ├── ui/        — переиспользуемые примитивы: Button, Input, Card, tokens.css
+    └── api-client/ — HTTP-слой; появится вместе с первым реальным API-вызовом (следующий шаг)
+```
+Принцип: фича несёт свои компоненты, хуки и вызовы API рядом, а не разложена по `components/`, `hooks/`, `api/` на верхнем уровне репозитория.
+
+Стили — CSS Modules (`*.module.css`), без отдельной библиотеки: работают у Vite из коробки, и классы уже естественно скопированы по компонентам — то же самое разбиение, что и у feature-based структуры. Общие токены (цвета, отступы, radius, шрифт) — `shared/ui/tokens.css`, CSS custom properties с поддержкой `prefers-color-scheme: dark`.
+
+### Dev-прокси и CORS
+У Gateway нет префикса `/api` — маршруты у него `/auth/*`, `/accounts/*` и т.д. напрямую (`gateway/proxy.go`). Фронт обращается к `/api/*`; dev-сервер Vite (`frontend/vite.config.ts`) перехватывает `/api/*`, снимает префикс `/api` и проксирует остаток на `http://localhost:8080`. Например, `GET /api/accounts/me` с фронта уходит на Gateway как `GET /accounts/me`.
+
+Это полностью убирает проблему CORS в разработке: браузер видит только один origin (dev-сервер Vite), запрос к Gateway идёт со стороны самого dev-сервера, а не напрямую из браузера. **В продакшене так же работать не будет** — там нужно либо отдавать собранный статик (`npm run build` → `frontend/dist/`) через сам Gateway (тогда фронт и API снова на одном origin), либо явно выставить CORS-заголовки на Gateway, если фронт и бэкенд остаются на разных origin. Этот выбор — не часть текущего шага.
+
+### Маршруты
+`/register`, `/login`, `/dashboard` — сейчас пустые страницы-заглушки (заголовок внутри `Card`), нужны только чтобы проверить, что роутинг работает. `/` редиректит на `/login`.
 
 ## Статус
 На этом шаге описана только структура репозитория и `docker-compose.yml`.
