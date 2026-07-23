@@ -1,0 +1,467 @@
+openapi: 3.0.3
+info:
+  title: Neo-Bank Gateway API
+  version: 0.1.0
+  description: >
+    HTTP contract exposed by the Gateway (services/gateway) to browser
+    clients. /auth/* proxies to auth-svc, /accounts/* proxies to
+    accounts-svc — see gateway/proxy.go for the routing table and
+    gateway/middleware.go for which paths require a bearer token.
+
+    Only endpoints the frontend actually consumes are documented here, not
+    every route accounts-svc happens to expose behind the Gateway (e.g.
+    GET /accounts/{id} and PATCH /accounts/{id}/status are internal/ops
+    surface, not used by this client, and intentionally left out).
+servers:
+  - url: http://localhost:8080
+    description: >
+      Gateway, local dev. The frontend dev server never talks here
+      directly — it proxies /api/* to this origin, stripping /api first
+      (see frontend/vite.config.ts).
+
+security: []
+
+paths:
+  /auth/register:
+    post:
+      operationId: registerUser
+      summary: Register a new user; sends an email verification code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Registration accepted, pending email verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Email already registered to an active or suspended user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/verify-email:
+    post:
+      operationId: verifyEmail
+      summary: Redeem an email verification code, activating the account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailRequest'
+      responses:
+        '200':
+          description: Account activated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: >
+            Invalid body, unknown user, no active code, expired code, too
+            many failed attempts, or wrong code — all reported the same
+            way to keep this response uniform.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/resend-verification:
+    post:
+      operationId: resendVerification
+      summary: Reissue an email verification code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailRequest'
+      responses:
+        '200':
+          description: A new code was sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Exchange credentials for an access/refresh token pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid email or password.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Credentials are correct but the email isn't verified yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      summary: >
+        Exchange a refresh token for a new access/refresh pair. Refresh
+        tokens are single-use — rotated on every call, the old one is
+        invalidated the instant this succeeds.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: New token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: >
+            Refresh token is invalid, expired, already used, or the
+            account is no longer active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Invalidate a refresh token. Requires a valid access token.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: >
+            Logged out. Returned even if the refresh token was already
+            invalid or missing — logout is deliberately lenient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      summary: >
+        Request a password reset code. Always returns the same response
+        whether or not the email is registered, to avoid leaking account
+        existence.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailRequest'
+      responses:
+        '200':
+          description: Uniform response, regardless of whether the email exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/reset-password:
+    post:
+      operationId: resetPassword
+      summary: Redeem a password reset code and set a new password.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Password changed; all existing sessions were revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: >
+            Invalid body, password too short, or an invalid/expired/
+            already-used reset code — all reported the same way, for the
+            same enumeration-avoidance reason as /auth/forgot-password.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /accounts/me:
+    get:
+      operationId: getMe
+      summary: The caller's own account, including its current ledger balance.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Account and balance.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountWithBalance'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No account exists for this user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: >
+            ledger-svc is temporarily unreachable. Deliberately not a 200
+            with a zero balance — a fake zero is worse than an honest
+            "unavailable" in a banking product.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequest:
+      description: Malformed request body or invalid field value.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing, invalid, or expired bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Rate-limited; wait before retrying.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+      example:
+        error: invalid credentials
+
+    StatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+      example:
+        status: active
+
+    MessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    EmailRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+
+    VerifyEmailRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+          description: 6-digit numeric code, expires 10 minutes after issue.
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token]
+      properties:
+        access_token:
+          type: string
+          description: JWT, 15 minute TTL.
+        refresh_token:
+          type: string
+          description: >
+            Opaque, single-use, 7 day TTL. Rotated on every /auth/refresh
+            call — the previous value stops working the instant a new one
+            is issued.
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    ResetPasswordRequest:
+      type: object
+      required: [email, code, new_password]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+        new_password:
+          type: string
+          minLength: 8
+
+    AccountWithBalance:
+      type: object
+      required:
+        - id
+        - user_id
+        - account_number
+        - status
+        - created_at
+        - updated_at
+        - balance
+        - currency
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        account_number:
+          type: string
+        status:
+          type: string
+          enum: [active, frozen, closed]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        balance:
+          type: integer
+          format: int64
+          description: >
+            Minor units (cents). Formatting ("123.45 €") is the
+            frontend's job, not the API's.
+        currency:
+          type: string
+          example: EUR
