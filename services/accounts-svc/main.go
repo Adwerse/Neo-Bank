@@ -9,6 +9,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 const (
@@ -16,6 +20,7 @@ const (
 	defaultKafkaBrokers = "kafka:9092"
 	defaultKafkaTopic   = "user.events"
 	kafkaConsumerGroup  = "accounts-svc"
+	defaultLedgerAddr   = "ledger-svc:8083"
 )
 
 func main() {
@@ -31,6 +36,10 @@ func main() {
 	if kafkaTopic == "" {
 		kafkaTopic = defaultKafkaTopic
 	}
+	ledgerAddr := os.Getenv("LEDGER_GRPC_ADDR")
+	if ledgerAddr == "" {
+		ledgerAddr = defaultLedgerAddr
+	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	if err := runMigrations(databaseURL); err != nil {
@@ -43,10 +52,22 @@ func main() {
 	}
 	defer pool.Close()
 
+	// grpc.NewClient is lazy: it does not block on a live ledger-svc here, it
+	// dials on the first RPC and reconnects on its own — matching how the
+	// Postgres and Kafka clients above tolerate a not-yet-ready dependency at
+	// startup. ledger-svc speaks plaintext gRPC inside the cluster (no TLS),
+	// same as its own server setup.
+	ledgerConn, err := grpc.NewClient(ledgerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("accounts-svc: failed to create ledger gRPC client for %s: %v", ledgerAddr, err)
+	}
+	defer ledgerConn.Close()
+	ledgerClient := ledgerv1.NewLedgerServiceClient(ledgerConn)
+
 	kafkaReader := newKafkaReader(kafkaBrokers, kafkaTopic, kafkaConsumerGroup)
 	defer kafkaReader.Close()
 
-	go runUserActivatedConsumer(context.Background(), kafkaReader, pool)
+	go runUserActivatedConsumer(context.Background(), kafkaReader, pool, ledgerClient)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -77,7 +98,7 @@ func main() {
 	// proxy strips the "/accounts" prefix before forwarding here (see
 	// gateway/proxy.go's newProxy/StripPrefix), so these routes must not
 	// repeat it themselves.
-	http.HandleFunc("GET /me", meAccountHandler(pool))
+	http.HandleFunc("GET /me", meAccountHandler(pool, ledgerClient))
 	http.HandleFunc("GET /{id}", getAccountHandler(pool))
 	http.HandleFunc("PATCH /{id}/status", updateAccountStatusHandler(pool))
 

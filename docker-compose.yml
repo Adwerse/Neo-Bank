@@ -42,9 +42,12 @@ services:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: user.events
+      LEDGER_GRPC_ADDR: ledger-svc:8083
     depends_on:
       postgres:
         condition: service_healthy
+      ledger-svc:
+        condition: service_started
 
   ledger-svc:
     build:

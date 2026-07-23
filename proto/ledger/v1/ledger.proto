@@ -13,6 +13,12 @@ service LedgerService {
   rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
   rpc ExecuteTransfer(ExecuteTransferRequest) returns (ExecuteTransferResponse);
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
+  // CreateLedgerAccount is idempotent: if a ledger account already exists
+  // for account_id (account_id is UNIQUE), it returns the existing one
+  // rather than erroring. Its intended caller is accounts-svc, which calls
+  // it once per new account created off a UserActivated Kafka event — an
+  // at-least-once, redelivery-prone path, hence the idempotency requirement.
+  rpc CreateLedgerAccount(CreateLedgerAccountRequest) returns (CreateLedgerAccountResponse);
 }
 
 message GetBalanceRequest {
@@ -48,4 +54,13 @@ message Entry {
   string transaction_id = 1;
   int64 amount = 2;
   google.protobuf.Timestamp created_at = 3;
+}
+
+message CreateLedgerAccountRequest {
+  string account_id = 1;
+}
+
+message CreateLedgerAccountResponse {
+  string account_id = 1;
+  google.protobuf.Timestamp created_at = 2;
 }

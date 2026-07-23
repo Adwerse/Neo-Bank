@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	eventsv1 "neobank/proto/gen/go/events/v1"
+	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 // newKafkaReader constructs accounts-svc's consumer for the user.events
@@ -36,7 +37,7 @@ func newKafkaReader(brokers, topic, groupID string) *kafka.Reader {
 // at-least-once processing. handleUserActivated is idempotent (two layers,
 // see its doc comment), so a redelivery is a safe, logged no-op rather than
 // a stuck or duplicate-creating consumer.
-func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
+func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient) {
 	for {
 		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
@@ -56,7 +57,7 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 			continue
 		}
 
-		if err := handleUserActivated(ctx, pool, &event); err != nil {
+		if err := handleUserActivated(ctx, pool, ledgerClient, &event); err != nil {
 			log.Printf("accounts-svc: failed to handle UserActivated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
 			continue // do not commit — message will be redelivered
 		}
@@ -75,36 +76,45 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 //
 // Ordering is deliberate and load-bearing:
 //  1. Check processed_events first (fast path): if event_id is already
-//     recorded, the account for this user is already known to exist —
-//     nothing further to do.
+//     recorded, the account (and its ledger account) for this user are
+//     already known to exist — nothing further to do.
 //  2. Only then attempt to create the account, via createAccountForUser's
 //     own idempotent ON CONFLICT (user_id) path — which reports whether it
-//     freshly created the row or found one already there.
-//  3. Only after step 2 has confirmed the account row exists — either way —
-//     mark processed_events. This is deliberately the LAST step, strictly
-//     after the work it attests to has actually landed.
+//     freshly created the row or found one already there, and returns its id.
+//  3. Create the matching ledger account in ledger-svc via
+//     CreateLedgerAccount(account_id) — itself idempotent (returns the
+//     existing ledger account on a repeat), so a redelivery is a safe no-op.
+//     If this call fails (ledger-svc down, network blip), the whole handler
+//     returns an error: the offset is NOT committed and Kafka redelivers,
+//     which — thanks to the idempotency at every layer — safely re-runs the
+//     work. This is exactly the case at-least-once + idempotency is for.
+//  4. Only after steps 2 and 3 have both succeeded — the account row and its
+//     ledger account both confirmed to exist — mark processed_events. This is
+//     deliberately the LAST step, strictly after the work it attests to has
+//     actually landed.
 //
-// Why step 3 must be last, not first: if processed_events were written
-// before step 2 ran, a real, transient failure inside createAccountForUser
-// (a dropped connection, not a user_id collision) would still leave the
+// Why step 4 must be last, not first: if processed_events were written
+// before steps 2–3 ran, a real, transient failure (a dropped connection to
+// Postgres or to ledger-svc, not a benign duplicate) would still leave the
 // offset uncommitted so Kafka redelivers — but processed_events would
 // already show it as done, so the redelivery would wrongly skip it, and
-// that user would never get an account. Writing processed_events last
-// closes that gap: a crash or error anywhere before it leaves
-// processed_events empty, so redelivery always genuinely retries the real
-// work.
+// that user would end up without an account or without a ledger account
+// forever. Writing processed_events last closes that gap: a crash or error
+// anywhere before it leaves processed_events empty, so redelivery always
+// genuinely retries the real work.
 //
-// The two writes (accounts, processed_events) are deliberately not wrapped
-// in one SQL transaction: doing so would require SAVEPOINT/ROLLBACK TO
-// SAVEPOINT around every iteration of createAccountForUser's
-// account-number-collision retry loop (Postgres aborts an entire
-// transaction on any statement error, including an expected, retried
-// collision). That complexity buys nothing here — this consumer is
+// The DB writes (accounts, processed_events) and the ledger RPC are
+// deliberately not wrapped in one SQL transaction: a cross-service RPC can't
+// be, and even the two local writes wouldn't benefit — doing so would
+// require SAVEPOINT/ROLLBACK TO SAVEPOINT around every iteration of
+// createAccountForUser's account-number-collision retry loop (Postgres aborts
+// an entire transaction on any statement error, including an expected,
+// retried collision). That complexity buys nothing here — this consumer is
 // single-threaded and strictly sequential (FetchMessage is called one
 // message at a time, no concurrent handleUserActivated calls within the
-// process), and layer 1 (accounts.user_id UNIQUE + ON CONFLICT DO NOTHING)
-// already absorbs every gap this two-step ordering could otherwise leave.
-func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, event *eventsv1.UserActivated) error {
+// process), and the idempotency at each layer already absorbs every gap this
+// step ordering could otherwise leave.
+func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, event *eventsv1.UserActivated) error {
 	eventID := event.GetEventId()
 	userID := event.GetUserId()
 
@@ -114,10 +124,13 @@ func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, event *eventsv
 		// processed_events fast-path/bookkeeping entirely rather than bind
 		// an empty string to a UUID column (which Postgres would reject
 		// with 22P02 on every redelivery — a new poison-message class).
-		// Falls back to layer 1 alone for this one message.
+		// Falls back to the per-layer idempotency alone for this one message.
 		log.Printf("accounts-svc: UserActivated for user %s has no event_id, skipping processed_events bookkeeping", userID)
-		_, err := createAccountForUser(ctx, pool, userID)
-		return err
+		_, accountID, err := createAccountForUser(ctx, pool, userID)
+		if err != nil {
+			return err
+		}
+		return createLedgerAccountForAccount(ctx, ledgerClient, accountID)
 	}
 
 	processed, err := isEventProcessed(ctx, pool, eventID)
@@ -129,7 +142,7 @@ func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, event *eventsv
 		return nil
 	}
 
-	outcome, err := createAccountForUser(ctx, pool, userID)
+	outcome, accountID, err := createAccountForUser(ctx, pool, userID)
 	if err != nil {
 		return fmt.Errorf("create account for user %s: %w", userID, err)
 	}
@@ -137,8 +150,24 @@ func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, event *eventsv
 		log.Printf("accounts-svc: account for user %s already exists (redelivery of event %s), not recreating", userID, eventID)
 	}
 
+	if err := createLedgerAccountForAccount(ctx, ledgerClient, accountID); err != nil {
+		return fmt.Errorf("create ledger account for account %s (user %s, event %s): %w", accountID, userID, eventID, err)
+	}
+
 	if err := markEventProcessed(ctx, pool, eventID); err != nil {
 		return fmt.Errorf("mark event %s processed: %w", eventID, err)
+	}
+	return nil
+}
+
+// createLedgerAccountForAccount asks ledger-svc to get-or-create the ledger
+// account for accountID. It is idempotent on ledger-svc's side (CreateLedgerAccount
+// returns the existing account on a repeat), so calling it again after a
+// redelivery is safe. A returned error means the offset must not be committed.
+func createLedgerAccountForAccount(ctx context.Context, ledgerClient ledgerv1.LedgerServiceClient, accountID string) error {
+	_, err := ledgerClient.CreateLedgerAccount(ctx, &ledgerv1.CreateLedgerAccountRequest{AccountId: accountID})
+	if err != nil {
+		return fmt.Errorf("ledger CreateLedgerAccount: %w", err)
 	}
 	return nil
 }

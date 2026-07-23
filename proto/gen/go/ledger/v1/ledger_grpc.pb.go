@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	LedgerService_GetBalance_FullMethodName      = "/ledger.v1.LedgerService/GetBalance"
-	LedgerService_ExecuteTransfer_FullMethodName = "/ledger.v1.LedgerService/ExecuteTransfer"
-	LedgerService_GetHistory_FullMethodName      = "/ledger.v1.LedgerService/GetHistory"
+	LedgerService_GetBalance_FullMethodName          = "/ledger.v1.LedgerService/GetBalance"
+	LedgerService_ExecuteTransfer_FullMethodName     = "/ledger.v1.LedgerService/ExecuteTransfer"
+	LedgerService_GetHistory_FullMethodName          = "/ledger.v1.LedgerService/GetHistory"
+	LedgerService_CreateLedgerAccount_FullMethodName = "/ledger.v1.LedgerService/CreateLedgerAccount"
 )
 
 // LedgerServiceClient is the client API for LedgerService service.
@@ -35,6 +36,12 @@ type LedgerServiceClient interface {
 	GetBalance(ctx context.Context, in *GetBalanceRequest, opts ...grpc.CallOption) (*GetBalanceResponse, error)
 	ExecuteTransfer(ctx context.Context, in *ExecuteTransferRequest, opts ...grpc.CallOption) (*ExecuteTransferResponse, error)
 	GetHistory(ctx context.Context, in *GetHistoryRequest, opts ...grpc.CallOption) (*GetHistoryResponse, error)
+	// CreateLedgerAccount is idempotent: if a ledger account already exists
+	// for account_id (account_id is UNIQUE), it returns the existing one
+	// rather than erroring. Its intended caller is accounts-svc, which calls
+	// it once per new account created off a UserActivated Kafka event — an
+	// at-least-once, redelivery-prone path, hence the idempotency requirement.
+	CreateLedgerAccount(ctx context.Context, in *CreateLedgerAccountRequest, opts ...grpc.CallOption) (*CreateLedgerAccountResponse, error)
 }
 
 type ledgerServiceClient struct {
@@ -75,6 +82,16 @@ func (c *ledgerServiceClient) GetHistory(ctx context.Context, in *GetHistoryRequ
 	return out, nil
 }
 
+func (c *ledgerServiceClient) CreateLedgerAccount(ctx context.Context, in *CreateLedgerAccountRequest, opts ...grpc.CallOption) (*CreateLedgerAccountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateLedgerAccountResponse)
+	err := c.cc.Invoke(ctx, LedgerService_CreateLedgerAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LedgerServiceServer is the server API for LedgerService service.
 // All implementations must embed UnimplementedLedgerServiceServer
 // for forward compatibility.
@@ -86,6 +103,12 @@ type LedgerServiceServer interface {
 	GetBalance(context.Context, *GetBalanceRequest) (*GetBalanceResponse, error)
 	ExecuteTransfer(context.Context, *ExecuteTransferRequest) (*ExecuteTransferResponse, error)
 	GetHistory(context.Context, *GetHistoryRequest) (*GetHistoryResponse, error)
+	// CreateLedgerAccount is idempotent: if a ledger account already exists
+	// for account_id (account_id is UNIQUE), it returns the existing one
+	// rather than erroring. Its intended caller is accounts-svc, which calls
+	// it once per new account created off a UserActivated Kafka event — an
+	// at-least-once, redelivery-prone path, hence the idempotency requirement.
+	CreateLedgerAccount(context.Context, *CreateLedgerAccountRequest) (*CreateLedgerAccountResponse, error)
 	mustEmbedUnimplementedLedgerServiceServer()
 }
 
@@ -104,6 +127,9 @@ func (UnimplementedLedgerServiceServer) ExecuteTransfer(context.Context, *Execut
 }
 func (UnimplementedLedgerServiceServer) GetHistory(context.Context, *GetHistoryRequest) (*GetHistoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetHistory not implemented")
+}
+func (UnimplementedLedgerServiceServer) CreateLedgerAccount(context.Context, *CreateLedgerAccountRequest) (*CreateLedgerAccountResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateLedgerAccount not implemented")
 }
 func (UnimplementedLedgerServiceServer) mustEmbedUnimplementedLedgerServiceServer() {}
 func (UnimplementedLedgerServiceServer) testEmbeddedByValue()                       {}
@@ -180,6 +206,24 @@ func _LedgerService_GetHistory_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LedgerService_CreateLedgerAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateLedgerAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).CreateLedgerAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_CreateLedgerAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).CreateLedgerAccount(ctx, req.(*CreateLedgerAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // LedgerService_ServiceDesc is the grpc.ServiceDesc for LedgerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -198,6 +242,10 @@ var LedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetHistory",
 			Handler:    _LedgerService_GetHistory_Handler,
+		},
+		{
+			MethodName: "CreateLedgerAccount",
+			Handler:    _LedgerService_CreateLedgerAccount_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

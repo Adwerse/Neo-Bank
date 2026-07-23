@@ -74,33 +74,43 @@ func isNotFoundErr(err error) bool {
 // generated account number, retrying with a newly generated number (up to
 // maxAccountNumberAttempts times) if that number collides with an existing
 // one — an expected, non-error outcome given the random number space, not a
-// sign anything is wrong.
+// sign anything is wrong. It returns the account's id in both outcomes:
+// handleUserActivated needs it to create the matching ledger account, and on
+// a redelivery (accountAlreadyExists) that ledger call may still be pending,
+// so the id is required there too, not just on a fresh create.
 //
 // A collision on user_id (accounts.user_id UNIQUE) is idempotency layer 1:
 // the INSERT targets it explicitly via ON CONFLICT (user_id) DO NOTHING, so
 // a redelivered UserActivated event (at-least-once Kafka semantics, or a
 // crash after insert but before offset commit) is a safe, logged no-op —
-// accountAlreadyExists, not an error. Layer 2 (the processed_events table,
-// see handleUserActivated in kafka.go) is a faster-path complement to this,
-// not a replacement: this layer alone is what actually prevents a duplicate
-// row from ever being created, in every case including ones layer 2's
-// bookkeeping doesn't fully cover.
-func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (accountCreateOutcome, error) {
+// accountAlreadyExists, not an error. On that conflict DO NOTHING inserts no
+// row, so RETURNING yields none; a follow-up SELECT fetches the existing id.
+// Layer 2 (the processed_events table, see handleUserActivated in kafka.go)
+// is a faster-path complement to this, not a replacement: this layer alone is
+// what actually prevents a duplicate row from ever being created, in every
+// case including ones layer 2's bookkeeping doesn't fully cover.
+func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (accountCreateOutcome, string, error) {
 	for attempt := 0; attempt < maxAccountNumberAttempts; attempt++ {
 		accountNumber, err := generateAccountNumber()
 		if err != nil {
-			return 0, fmt.Errorf("generate account number: %w", err)
+			return 0, "", fmt.Errorf("generate account number: %w", err)
 		}
 
-		tag, err := pool.Exec(ctx,
-			"INSERT INTO accounts (user_id, account_number) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
+		var accountID string
+		err = pool.QueryRow(ctx,
+			"INSERT INTO accounts (user_id, account_number) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING RETURNING id",
 			userID, accountNumber,
-		)
+		).Scan(&accountID)
 		if err == nil {
-			if tag.RowsAffected() == 0 {
-				return accountAlreadyExists, nil
+			return accountCreated, accountID, nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			// user_id conflict: the account already exists. Fetch its id.
+			var existingID string
+			if serr := pool.QueryRow(ctx, "SELECT id FROM accounts WHERE user_id = $1", userID).Scan(&existingID); serr != nil {
+				return 0, "", fmt.Errorf("look up existing account for user %s: %w", userID, serr)
 			}
-			return accountCreated, nil
+			return accountAlreadyExists, existingID, nil
 		}
 
 		var pgErr *pgconn.PgError
@@ -108,9 +118,9 @@ func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string
 			pgErr.ConstraintName == accountsAccountNumberConstraint {
 			continue // regenerate and retry
 		}
-		return 0, err
+		return 0, "", err
 	}
-	return 0, fmt.Errorf("failed to generate a unique account number after %d attempts", maxAccountNumberAttempts)
+	return 0, "", fmt.Errorf("failed to generate a unique account number after %d attempts", maxAccountNumberAttempts)
 }
 
 // generateAccountNumber returns a synthetic account number of the form

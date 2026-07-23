@@ -379,6 +379,102 @@ func (x *Entry) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+type CreateLedgerAccountRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccountId     string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateLedgerAccountRequest) Reset() {
+	*x = CreateLedgerAccountRequest{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateLedgerAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateLedgerAccountRequest) ProtoMessage() {}
+
+func (x *CreateLedgerAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateLedgerAccountRequest.ProtoReflect.Descriptor instead.
+func (*CreateLedgerAccountRequest) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *CreateLedgerAccountRequest) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+type CreateLedgerAccountResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccountId     string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateLedgerAccountResponse) Reset() {
+	*x = CreateLedgerAccountResponse{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateLedgerAccountResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateLedgerAccountResponse) ProtoMessage() {}
+
+func (x *CreateLedgerAccountResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateLedgerAccountResponse.ProtoReflect.Descriptor instead.
+func (*CreateLedgerAccountResponse) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CreateLedgerAccountResponse) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *CreateLedgerAccountResponse) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
 var File_ledger_v1_ledger_proto protoreflect.FileDescriptor
 
 const file_ledger_v1_ledger_proto_rawDesc = "" +
@@ -406,13 +502,22 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\x12\x16\n" +
 	"\x06amount\x18\x02 \x01(\x03R\x06amount\x129\n" +
 	"\n" +
-	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt2\xff\x01\n" +
+	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\";\n" +
+	"\x1aCreateLedgerAccountRequest\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\"w\n" +
+	"\x1bCreateLedgerAccountResponse\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\x129\n" +
+	"\n" +
+	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt2\xe5\x02\n" +
 	"\rLedgerService\x12I\n" +
 	"\n" +
 	"GetBalance\x12\x1c.ledger.v1.GetBalanceRequest\x1a\x1d.ledger.v1.GetBalanceResponse\x12X\n" +
 	"\x0fExecuteTransfer\x12!.ledger.v1.ExecuteTransferRequest\x1a\".ledger.v1.ExecuteTransferResponse\x12I\n" +
 	"\n" +
-	"GetHistory\x12\x1c.ledger.v1.GetHistoryRequest\x1a\x1d.ledger.v1.GetHistoryResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
+	"GetHistory\x12\x1c.ledger.v1.GetHistoryRequest\x1a\x1d.ledger.v1.GetHistoryResponse\x12d\n" +
+	"\x13CreateLedgerAccount\x12%.ledger.v1.CreateLedgerAccountRequest\x1a&.ledger.v1.CreateLedgerAccountResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
 
 var (
 	file_ledger_v1_ledger_proto_rawDescOnce sync.Once
@@ -426,31 +531,36 @@ func file_ledger_v1_ledger_proto_rawDescGZIP() []byte {
 	return file_ledger_v1_ledger_proto_rawDescData
 }
 
-var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_ledger_v1_ledger_proto_goTypes = []any{
-	(*GetBalanceRequest)(nil),       // 0: ledger.v1.GetBalanceRequest
-	(*GetBalanceResponse)(nil),      // 1: ledger.v1.GetBalanceResponse
-	(*ExecuteTransferRequest)(nil),  // 2: ledger.v1.ExecuteTransferRequest
-	(*ExecuteTransferResponse)(nil), // 3: ledger.v1.ExecuteTransferResponse
-	(*GetHistoryRequest)(nil),       // 4: ledger.v1.GetHistoryRequest
-	(*GetHistoryResponse)(nil),      // 5: ledger.v1.GetHistoryResponse
-	(*Entry)(nil),                   // 6: ledger.v1.Entry
-	(*timestamppb.Timestamp)(nil),   // 7: google.protobuf.Timestamp
+	(*GetBalanceRequest)(nil),           // 0: ledger.v1.GetBalanceRequest
+	(*GetBalanceResponse)(nil),          // 1: ledger.v1.GetBalanceResponse
+	(*ExecuteTransferRequest)(nil),      // 2: ledger.v1.ExecuteTransferRequest
+	(*ExecuteTransferResponse)(nil),     // 3: ledger.v1.ExecuteTransferResponse
+	(*GetHistoryRequest)(nil),           // 4: ledger.v1.GetHistoryRequest
+	(*GetHistoryResponse)(nil),          // 5: ledger.v1.GetHistoryResponse
+	(*Entry)(nil),                       // 6: ledger.v1.Entry
+	(*CreateLedgerAccountRequest)(nil),  // 7: ledger.v1.CreateLedgerAccountRequest
+	(*CreateLedgerAccountResponse)(nil), // 8: ledger.v1.CreateLedgerAccountResponse
+	(*timestamppb.Timestamp)(nil),       // 9: google.protobuf.Timestamp
 }
 var file_ledger_v1_ledger_proto_depIdxs = []int32{
 	6, // 0: ledger.v1.GetHistoryResponse.entries:type_name -> ledger.v1.Entry
-	7, // 1: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
-	0, // 2: ledger.v1.LedgerService.GetBalance:input_type -> ledger.v1.GetBalanceRequest
-	2, // 3: ledger.v1.LedgerService.ExecuteTransfer:input_type -> ledger.v1.ExecuteTransferRequest
-	4, // 4: ledger.v1.LedgerService.GetHistory:input_type -> ledger.v1.GetHistoryRequest
-	1, // 5: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
-	3, // 6: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
-	5, // 7: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
-	5, // [5:8] is the sub-list for method output_type
-	2, // [2:5] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	9, // 1: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
+	9, // 2: ledger.v1.CreateLedgerAccountResponse.created_at:type_name -> google.protobuf.Timestamp
+	0, // 3: ledger.v1.LedgerService.GetBalance:input_type -> ledger.v1.GetBalanceRequest
+	2, // 4: ledger.v1.LedgerService.ExecuteTransfer:input_type -> ledger.v1.ExecuteTransferRequest
+	4, // 5: ledger.v1.LedgerService.GetHistory:input_type -> ledger.v1.GetHistoryRequest
+	7, // 6: ledger.v1.LedgerService.CreateLedgerAccount:input_type -> ledger.v1.CreateLedgerAccountRequest
+	1, // 7: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
+	3, // 8: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
+	5, // 9: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
+	8, // 10: ledger.v1.LedgerService.CreateLedgerAccount:output_type -> ledger.v1.CreateLedgerAccountResponse
+	7, // [7:11] is the sub-list for method output_type
+	3, // [3:7] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_ledger_v1_ledger_proto_init() }
@@ -464,7 +574,7 @@ func file_ledger_v1_ledger_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ledger_v1_ledger_proto_rawDesc), len(file_ledger_v1_ledger_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

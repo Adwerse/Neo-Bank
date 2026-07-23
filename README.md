@@ -16,7 +16,7 @@ Postgres, Redis и Kafka подняты в `docker-compose.yml`. `auth-svc` ис
 ## События (Kafka)
 `auth-svc` публикует событие `UserActivated` в топик `user.events` сразу после успешного `POST /verify-email` (в момент, когда `users.status` переходит в `active`). Контракт — `proto/events/v1/user_events.proto` (`events.v1.UserActivated`: `user_id`, `email`, `occurred_at`, `event_id`), сериализация бинарным protobuf. Ключ сообщения — `user_id`: это гарантирует, что все события одного пользователя попадают в одну партицию и обрабатываются по порядку. `event_id` — случайный UUIDv4, генерируется в auth-svc на каждую публикацию (`generateEventID` в `services/auth-svc/kafka.go`) и используется accounts-svc для дедупликации при повторной доставке (см. «Идемпотентность» ниже).
 
-`accounts-svc` — consumer этого топика (consumer group `accounts-svc`): на `UserActivated` создаёт строку в `accounts` со сгенерированным номером счёта и `status = 'active'`.
+`accounts-svc` — consumer этого топика (consumer group `accounts-svc`): на `UserActivated` создаёт строку в `accounts` со сгенерированным номером счёта и `status = 'active'`, а **сразу после этого** — вызывает `ledger-svc` `CreateLedgerAccount(account_id)` по gRPC, чтобы у нового счёта появился ledger-аккаунт (адрес ledger — env `LEDGER_GRPC_ADDR`, дефолт `ledger-svc:8083`). Порядок фиксации важен: если вызов ledger упал, offset события **не** коммитится — Kafka передоставит сообщение, а идемпотентность (consumer'а и самого `CreateLedgerAccount`) делает повтор безопасным. Это ровно тот случай, ради которого строились at-least-once + идемпотентность.
 
 Топик создаётся автоматически брокером при первой публикации (`KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"` задано явно в `docker-compose.yml`, хотя это и так поведение Kafka по умолчанию) — отдельного шага инициализации топика нет. auth-svc не блокирует старт на доступности Kafka: продюсер (`segmentio/kafka-go`) подключается лениво при первой записи и переподключается сам, как и клиенты Postgres/Redis.
 
@@ -42,6 +42,8 @@ docker compose exec kafka kafka-console-consumer.sh \
 2. **`processed_events`** (миграция `000002`, `event_id UUID PRIMARY KEY, processed_at TIMESTAMPTZ`) — быстрый путь для уже обработанных событий: перед обработкой consumer проверяет, есть ли `event_id` в таблице, и если да — пропускает работу целиком, даже не трогая `accounts`. Запись в `processed_events` делается **последним** шагом, строго после того, как строка в `accounts` подтверждённо существует (создана только что или уже была). Это осознанно: если бы событие помечалось обработанным *до* реальной обработки, а обработка затем упала бы по-настоящему (не из-за дубля, а по другой причине), оффсет не закоммитился бы, Kafka передоставила бы сообщение — но `processed_events` уже говорила бы «готово», и повтор был бы ложно пропущен, а пользователь остался бы без счёта навсегда. Запись последним шагом закрывает эту дыру: любой сбой до неё оставляет `processed_events` пустой, и повтор всегда по-настоящему переобрабатывается.
 
 Оба INSERT'а (`accounts`, затем `processed_events`) сознательно не обёрнуты в одну транзакцию: consumer однопоточный и последовательный (`FetchMessage` вызывается строго по одному сообщению за раз, без конкурентной обработки внутри процесса), гонок между сообщениями нет — а уровень 1 сам по себе делает пересоздание строки безопасным, даже если запись в `processed_events` не успела произойти или потерялась.
+
+Между созданием счёта и записью в `processed_events` вклинивается ещё один шаг — вызов `ledger-svc` `CreateLedgerAccount(account_id)` (см. выше). `processed_events` по-прежнему пишется **последним**, строго после того, как и строка `accounts`, и ledger-аккаунт подтверждённо существуют. Если ledger-вызов падает (сервис недоступен, сетевой сбой), обработчик возвращает ошибку, offset не коммитится, Kafka передоставляет — а идемпотентность самого `CreateLedgerAccount` (`ON CONFLICT (account_id)` → возвращает существующий) делает повтор безопасным. Кросс-сервисный RPC в одну SQL-транзакцию с локальными записями обернуть нельзя в принципе — за корректность повтора отвечает именно идемпотентность на каждом уровне, а не общая транзакция.
 
 ### Проверка идемпотентности вручную
 
@@ -113,6 +115,34 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
   go test ./... -run TestExecuteTransfer_ConcurrentOverdraftPrevention -count=20 -v
 ```
 (`-race` здесь не годится — он ловит гонки по памяти Go, а не гонки по блокировкам строк в Postgres, которые как раз и проверяются; сама горутина в тесте не имеет разделяемого мутируемого состояния — каждая пишет только в свой индекс среза.)
+
+## accounts-svc: баланс в `GET /accounts/me`
+
+`GET /accounts/me` (через Gateway, с валидным токеном) возвращает счёт пользователя **вместе с балансом**. Баланс — авторитетный, живёт в `ledger-svc`; accounts-svc получает его вызовом `GetBalance(account_id)` по gRPC (`account_id` = `accounts.id` = `ledger_accounts.account_id`).
+
+Формат: `balance` — целое число в **минимальных единицах** (центах), плюс отдельное поле `currency` (сейчас всегда `"EUR"` — в ledger нет измерения валюты, а форматирование `"123.45 €"` — работа фронта, не API):
+```json
+{ "id": "...", "user_id": "...", "account_number": "NB...", "status": "active",
+  "created_at": "...", "updated_at": "...", "balance": 50000, "currency": "EUR" }
+```
+У нового пользователя ledger-аккаунт уже создан (через Kafka-обработчик выше), проводок нет → `balance: 0`.
+
+Если `ledger-svc` временно недоступен (`Unavailable`/`DeadlineExceeded`), эндпоинт возвращает **503**, а не `200` с нулевым балансом: показать фейковый ноль вместо настоящего баланса в банке хуже, чем честно сказать «сервис недоступен».
+
+## Dev-инструменты
+
+> Только для локальной разработки. Не путь для прода.
+
+- `services/ledger-svc/cmd/seed` — наполняет локальную БД примерными ledger-данными (genesis + два счёта, см. заголовок файла).
+- `services/ledger-svc/cmd/devtopup` — **пополнение счёта пользователя** до появления Stripe (спринт 9). Переводит `--amount` центов с genesis-аккаунта на `--account-id` (это `accounts.id`) через **обычный `ExecuteTransfer`** ledger-svc — тот же реальный путь (локи, проверка баланса, обновление кэша), что и у продового перевода. Единственное, что не может пройти через `ExecuteTransfer` — эмиссия денег (источник ушёл бы в минус, а `ExecuteTransfer` это запрещает): поэтому, когда у genesis не хватает средств, инструмент **чеканит** деньги в genesis прямой сбалансированной вставкой в БД (external → genesis, чтобы `SUM(entries)=0` сохранялся), и только потом делает настоящий перевод. Именно эта прямая эмиссия — причина, почему это dev-инструмент, а не HTTP-эндпоинт.
+
+  ```bash
+  # из services/ledger-svc, ledger-svc должен быть запущен (docker compose up ledger-svc)
+  DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  LEDGER_GRPC_ADDR="localhost:8083" \
+    go run ./cmd/devtopup --account-id <accounts.id> --amount 50000
+  ```
+  После этого `GET /accounts/me` для того же пользователя показывает `"balance": 50000`.
 
 ## Статус
 На этом шаге описана только структура репозитория и `docker-compose.yml`.

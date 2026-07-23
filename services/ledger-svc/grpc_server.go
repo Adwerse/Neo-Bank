@@ -82,3 +82,19 @@ func (s *ledgerServer) GetHistory(ctx context.Context, req *ledgerv1.GetHistoryR
 	}
 	return resp, nil
 }
+
+func (s *ledgerServer) CreateLedgerAccount(ctx context.Context, req *ledgerv1.CreateLedgerAccountRequest) (*ledgerv1.CreateLedgerAccountResponse, error) {
+	acc, err := createLedgerAccount(ctx, s.pool, req.GetAccountId())
+	if err != nil {
+		// A duplicate account_id is not an error here — createLedgerAccount's
+		// upsert returns the existing row. Reaching this branch means a
+		// genuine DB failure (bad connection, malformed account_id), not a
+		// benign redelivery.
+		log.Printf("ledger-svc: CreateLedgerAccount: %v", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	return &ledgerv1.CreateLedgerAccountResponse{
+		AccountId: acc.AccountID,
+		CreatedAt: timestamppb.New(acc.CreatedAt),
+	}, nil
+}

@@ -83,6 +83,51 @@ func insertEntry(t *testing.T, ctx context.Context, pool *pgxpool.Pool, transact
 	}
 }
 
+// TestCreateLedgerAccount_CreatesThenIdempotent proves CreateLedgerAccount's
+// idempotency contract: the first call creates the ledger_accounts row, and a
+// second call for the same account_id returns the same row rather than
+// erroring on the account_id UNIQUE constraint — the property accounts-svc
+// relies on when a redelivered UserActivated event re-runs the call.
+func TestCreateLedgerAccount_CreatesThenIdempotent(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUID(t)
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "DELETE FROM ledger_accounts WHERE account_id = $1", accountID); err != nil {
+			t.Logf("cleanup: delete ledger_account account_id=%s: %v", accountID, err)
+		}
+	})
+
+	first, err := createLedgerAccount(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("createLedgerAccount (first call): unexpected error: %v", err)
+	}
+	if first.AccountID != accountID {
+		t.Errorf("first.AccountID = %q, want %q", first.AccountID, accountID)
+	}
+
+	second, err := createLedgerAccount(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("createLedgerAccount (second call): unexpected error: %v", err)
+	}
+	if second.AccountID != first.AccountID {
+		t.Errorf("second.AccountID = %q, want %q (same account)", second.AccountID, first.AccountID)
+	}
+	if !second.CreatedAt.Equal(first.CreatedAt) {
+		t.Errorf("second.CreatedAt = %v, want %v (existing row returned, not recreated)", second.CreatedAt, first.CreatedAt)
+	}
+
+	// Exactly one row exists — the second call did not insert a duplicate.
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM ledger_accounts WHERE account_id = $1", accountID).Scan(&count); err != nil {
+		t.Fatalf("count ledger_accounts: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("ledger_accounts rows for account_id=%s = %d, want 1", accountID, count)
+	}
+}
+
 func TestGetBalance(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()

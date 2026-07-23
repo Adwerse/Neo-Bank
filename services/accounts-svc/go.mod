@@ -9,7 +9,10 @@ require (
 	google.golang.org/protobuf v1.36.11
 )
 
-require neobank/proto/gen/go v0.0.0
+require (
+	google.golang.org/grpc v1.75.0
+	neobank/proto/gen/go v0.0.0
+)
 
 require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
@@ -25,6 +28,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
 )
 
 replace neobank/proto/gen/go => ../../proto/gen/go

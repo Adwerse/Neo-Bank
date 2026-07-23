@@ -47,6 +47,38 @@ func getBalance(ctx context.Context, pool *pgxpool.Pool, accountID string) (int6
 	return balance, nil
 }
 
+// LedgerAccount is a ledger_accounts row, as returned by createLedgerAccount.
+type LedgerAccount struct {
+	AccountID string
+	CreatedAt time.Time
+}
+
+// createLedgerAccount gets-or-creates the ledger_accounts row for accountID
+// and returns it. It is idempotent: a second call for the same account_id
+// returns the existing row rather than erroring, relying on the
+// account_id UNIQUE constraint. This is the same upsert as the seed tool's
+// ensureLedgerAccount (cmd/seed) — the ON CONFLICT ... DO UPDATE is a no-op
+// write (account_id rewritten to itself) purely so RETURNING still yields
+// the existing row on a repeat call, where DO NOTHING would return no rows.
+//
+// Idempotency matters because the caller (accounts-svc) invokes this off an
+// at-least-once Kafka event that can be redelivered: a redelivery must be a
+// safe no-op, not a duplicate-key error.
+func createLedgerAccount(ctx context.Context, pool *pgxpool.Pool, accountID string) (LedgerAccount, error) {
+	var acc LedgerAccount
+	err := pool.QueryRow(ctx,
+		`INSERT INTO ledger_accounts (account_id)
+		 VALUES ($1)
+		 ON CONFLICT (account_id) DO UPDATE SET account_id = EXCLUDED.account_id
+		 RETURNING account_id, created_at`,
+		accountID,
+	).Scan(&acc.AccountID, &acc.CreatedAt)
+	if err != nil {
+		return LedgerAccount{}, fmt.Errorf("upsert ledger account: %w", err)
+	}
+	return acc, nil
+}
+
 // LedgerEntry is one row of an account's entries log, as returned by
 // getHistory.
 type LedgerEntry struct {
