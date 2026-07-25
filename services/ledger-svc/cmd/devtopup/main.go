@@ -180,9 +180,9 @@ func ensureGenesisFunded(ctx context.Context, conn *pgx.Conn, amount int64) erro
 	if _, err := tx.Exec(ctx,
 		`WITH txn AS (SELECT gen_random_uuid() AS id)
 		 INSERT INTO entries (transaction_id, ledger_account_id, amount)
-		 SELECT txn.id, $1, $2 FROM txn
+		 SELECT txn.id, $1::uuid, $2::bigint FROM txn
 		 UNION ALL
-		 SELECT txn.id, $3, $4 FROM txn`,
+		 SELECT txn.id, $3::uuid, $4::bigint FROM txn`,
 		genesisLedgerID, mint, externalLedgerID, -mint,
 	); err != nil {
 		return fmt.Errorf("insert mint entries: %w", err)
