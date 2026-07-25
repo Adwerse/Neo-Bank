@@ -1,4 +1,5 @@
-import { NavLink, Outlet } from 'react-router'
+import { NavLink, Outlet, useNavigate } from 'react-router'
+import { useAuth } from '../features/auth/AuthContext'
 import styles from './Layout.module.css'
 
 const navItems = [
@@ -8,6 +9,14 @@ const navItems = [
 ]
 
 export function Layout() {
+  const { status, logout } = useAuth()
+  const navigate = useNavigate()
+
+  async function handleLogout() {
+    await logout()
+    navigate('/login', { replace: true })
+  }
+
   return (
     <div className={styles.shell}>
       <header className={styles.header}>
@@ -22,6 +31,11 @@ export function Layout() {
               {item.label}
             </NavLink>
           ))}
+          {status === 'authenticated' && (
+            <button type="button" className={styles.navButton} onClick={handleLogout}>
+              Logout
+            </button>
+          )}
         </nav>
       </header>
       <main className={styles.main}>

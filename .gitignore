@@ -1,0 +1,5 @@
+# Compiled Go service binaries (each services/*/Dockerfile builds its own;
+# these are never meant to be committed — see services/auth-svc/auth-svc.exe
+# for the 28MB cautionary tale that prompted this file).
+*.exe
+/services/*/server

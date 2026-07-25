@@ -103,26 +103,58 @@ async function performRefresh(): Promise<string> {
     throw new ApiError(401, null, 'no refresh token available')
   }
 
+  try {
+    const pair = await redeemRefreshToken(refreshToken)
+    tokenStore.setTokenPair(pair)
+    return pair.access_token
+  } catch (err) {
+    // An authoritative rejection from the refresh endpoint itself (invalid,
+    // expired, or already-used token; suspended account) is the one case
+    // that genuinely means the session is over. A network failure to even
+    // reach this endpoint is deliberately handled the same way here — this
+    // path only ever runs reactively off a 401 from an already-authenticated
+    // request, so by this point the session is presumed over either way.
+    tokenStore.clearTokens()
+    redirectToLogin()
+    throw err
+  }
+}
+
+async function redeemRefreshToken(refreshToken: string): Promise<TokenPair> {
   const res = await fetch(`${BASE_URL}/auth/refresh`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
   })
-
   if (!res.ok) {
-    // An authoritative rejection from the refresh endpoint itself (invalid,
-    // expired, or already-used token; suspended account) is the one case
-    // that genuinely means the session is over. A network failure to even
-    // reach this endpoint (below) is deliberately handled differently.
-    const err = await toApiError(res)
-    tokenStore.clearTokens()
-    redirectToLogin()
-    throw err
+    throw await toApiError(res)
   }
+  return parseBody<TokenPair>(res)
+}
 
-  const pair = await parseBody<TokenPair>(res)
-  tokenStore.setTokenPair(pair)
-  return pair.access_token
+// Called once at app startup to silently re-establish a session from the
+// stored refresh token — the access token itself is memory-only and never
+// survives a reload. Goes through the same single-flight getOrStartRefresh
+// as the reactive 401 path (not redeemRefreshToken directly): React
+// StrictMode double-invokes mount effects in dev, which would otherwise
+// fire two concurrent bootstrap calls racing to redeem the same
+// single-use refresh token — one would always lose, and depending on
+// timing could clear the tokens the other just set. Sharing the mutex
+// means only one redeem ever happens no matter how many callers ask.
+//
+// A plain "never logged in" visitor short-circuits before any of that:
+// with no stored refresh token, this returns false without touching
+// getOrStartRefresh, so performRefresh's own redirect-on-failure path
+// never fires for that case — only for a refresh token that existed but
+// was genuinely rejected.
+export async function bootstrapSession(): Promise<boolean> {
+  if (!tokenStore.getRefreshToken()) return false
+  try {
+    await getOrStartRefresh()
+    return true
+  } catch {
+    return false
+  }
 }
 
 function redirectToLogin(): void {
