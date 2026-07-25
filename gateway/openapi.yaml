@@ -334,6 +334,11 @@ components:
       properties:
         error:
           type: string
+        attempts_remaining:
+          type: integer
+          description: >
+            Only present on /auth/verify-email wrong-code responses — the
+            number of guesses left before the code is locked out.
       example:
         error: invalid credentials
 

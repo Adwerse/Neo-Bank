@@ -42,7 +42,7 @@ func verifyEmailHandler(pool *pgxpool.Pool, kafkaWriter *kafka.Writer) http.Hand
 		}
 
 		ctx := r.Context()
-		outcome, userID, err := verifyEmailCode(ctx, pool, req.Email, req.Code)
+		outcome, userID, attemptsRemaining, err := verifyEmailCode(ctx, pool, req.Email, req.Code)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
@@ -69,46 +69,53 @@ func verifyEmailHandler(pool *pgxpool.Pool, kafkaWriter *kafka.Writer) http.Hand
 		case verifyTooManyAttempts:
 			writeJSONError(w, http.StatusBadRequest, "too many failed attempts, request a new code")
 		case verifyWrongCode:
-			writeJSONError(w, http.StatusBadRequest, "invalid verification code")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error":              "invalid verification code",
+				"attempts_remaining": attemptsRemaining,
+			})
 		}
 	}
 }
 
-func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string) (outcome verifyOutcome, userID string, err error) {
+func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string) (outcome verifyOutcome, userID string, attemptsRemaining int, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return 0, "", err
+		return 0, "", 0, err
 	}
 	defer tx.Rollback(ctx)
 
 	if err := tx.QueryRow(ctx, "SELECT id FROM users WHERE email = $1", email).Scan(&userID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return verifyUserNotFound, "", nil
+			return verifyUserNotFound, "", 0, nil
 		}
-		return 0, "", err
+		return 0, "", 0, err
 	}
 
-	outcome, err = consumeVerificationCode(ctx, tx, userID, "email_verify", code)
+	outcome, attemptsRemaining, err = consumeVerificationCode(ctx, tx, userID, "email_verify", code)
 	if err != nil {
-		return 0, "", err
+		return 0, "", 0, err
 	}
 	if outcome != verifyOK {
-		return outcome, "", tx.Commit(ctx)
+		return outcome, "", attemptsRemaining, tx.Commit(ctx)
 	}
 
 	if _, err := tx.Exec(ctx, "UPDATE users SET status = 'active', updated_at = now() WHERE id = $1", userID); err != nil {
-		return 0, "", err
+		return 0, "", 0, err
 	}
-	return verifyOK, userID, tx.Commit(ctx)
+	return verifyOK, userID, 0, tx.Commit(ctx)
 }
 
 // consumeVerificationCode looks up the newest unused verification_codes row
 // for (userID, purpose), checks its expiry and remaining attempts, and
 // compares the supplied code against the stored hash — decrementing
 // attempts_remaining on a wrong guess or marking the row used on a match.
-// Callers must already be inside a transaction and are responsible for
-// committing and for any purpose-specific side effect on verifyOK.
-func consumeVerificationCode(ctx context.Context, tx pgx.Tx, userID, purpose, code string) (verifyOutcome, error) {
+// The returned attemptsRemaining is only meaningful for verifyWrongCode (the
+// post-decrement count the client should be told about); other outcomes
+// return 0. Callers must already be inside a transaction and are
+// responsible for committing and for any purpose-specific side effect on
+// verifyOK.
+func consumeVerificationCode(ctx context.Context, tx pgx.Tx, userID, purpose, code string) (verifyOutcome, int, error) {
 	var codeID, storedHash string
 	var expiresAt time.Time
 	var attemptsRemaining int
@@ -120,33 +127,34 @@ func consumeVerificationCode(ctx context.Context, tx pgx.Tx, userID, purpose, co
 		userID, purpose,
 	).Scan(&codeID, &storedHash, &expiresAt, &attemptsRemaining)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return verifyNoActiveCode, nil
+		return verifyNoActiveCode, 0, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	if time.Now().After(expiresAt) {
-		return verifyCodeExpired, nil
+		return verifyCodeExpired, 0, nil
 	}
 	if attemptsRemaining <= 0 {
-		return verifyTooManyAttempts, nil
+		return verifyTooManyAttempts, 0, nil
 	}
 
 	if hashCode(code) != storedHash {
-		if _, err := tx.Exec(ctx,
-			"UPDATE verification_codes SET attempts_remaining = attempts_remaining - 1 WHERE id = $1",
+		var remaining int
+		if err := tx.QueryRow(ctx,
+			"UPDATE verification_codes SET attempts_remaining = attempts_remaining - 1 WHERE id = $1 RETURNING attempts_remaining",
 			codeID,
-		); err != nil {
-			return 0, err
+		).Scan(&remaining); err != nil {
+			return 0, 0, err
 		}
-		return verifyWrongCode, nil
+		return verifyWrongCode, remaining, nil
 	}
 
 	if _, err := tx.Exec(ctx, "UPDATE verification_codes SET used_at = now() WHERE id = $1", codeID); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return verifyOK, nil
+	return verifyOK, 0, nil
 }
 
 type resendOutcome int

@@ -168,6 +168,8 @@ export interface components {
          */
         Error: {
             error: string;
+            /** @description Only present on /auth/verify-email wrong-code responses — the number of guesses left before the code is locked out. */
+            attempts_remaining?: number;
         };
         /**
          * @example {

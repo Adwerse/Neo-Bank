@@ -181,7 +181,7 @@ func resetPassword(ctx context.Context, pool *pgxpool.Pool, email, code, newPass
 		return 0, "", err
 	}
 
-	outcome, err = consumeVerificationCode(ctx, tx, userID, "password_reset", code)
+	outcome, _, err = consumeVerificationCode(ctx, tx, userID, "password_reset", code)
 	if err != nil {
 		return 0, "", err
 	}
