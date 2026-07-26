@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 type createTransferRequest struct {
-	IdempotencyKey         string `json:"idempotency_key"`
-	SenderAccountID        string `json:"sender_account_id"`
 	RecipientAccountNumber string `json:"recipient_account_number"`
 	Amount                 int64  `json:"amount"`
 }
@@ -25,26 +28,58 @@ type createTransferResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
+// resolveSenderAccountID looks up the calling user's own account_id from the
+// gateway-injected X-User-Id header — the sender is always the authenticated
+// caller, never a client-supplied value, so a client can never send money
+// from an account that isn't theirs. Returns ("", nil) if no account exists
+// for this user yet (a real but rare state — see accounts-svc's own GET /me
+// 404 for the same case).
+func resolveSenderAccountID(ctx context.Context, accountsClient accountsv1.AccountsServiceClient, userID string) (string, error) {
+	acc, err := accountsClient.GetAccountByUserID(ctx, &accountsv1.GetAccountByUserIDRequest{UserId: userID})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return "", nil
+		}
+		return "", fmt.Errorf("resolve sender account: %w", err)
+	}
+	return acc.GetAccountId(), nil
+}
+
 // createTransferHandler is registered at "POST /" — transfers-svc's mux is
 // root-relative because the gateway strips the "/transfers" prefix before
-// forwarding, same convention as accounts-svc. sender_account_id is taken
-// directly from the request body for now; deriving it from the gateway's
-// X-User-Id header instead is a later sprint.
+// forwarding, same convention as accounts-svc. The sender is always the
+// authenticated caller (resolved from X-User-Id, which the gateway injects
+// from the JWT and strips from anything the client sent), never taken from
+// the request body — a client must never be able to send money "as" someone
+// else. Idempotency-Key is a required header, not a body field, matching
+// the HTTP convention for this kind of retry-safety token.
 func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, ledgerClient ledgerv1.LedgerServiceClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+
+		idempotencyKey := r.Header.Get("Idempotency-Key")
+		if idempotencyKey == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing Idempotency-Key header")
+			return
+		}
+
+		senderAccountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if senderAccountID == "" {
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		}
 
 		var req createTransferRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		if req.IdempotencyKey == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing idempotency_key")
-			return
-		}
 
-		transfer, outcome, err := createTransfer(r.Context(), pool, accountsClient, req.IdempotencyKey, req.SenderAccountID, req.RecipientAccountNumber, req.Amount)
+		transfer, outcome, err := createTransfer(r.Context(), pool, accountsClient, idempotencyKey, senderAccountID, req.RecipientAccountNumber, req.Amount)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
@@ -94,6 +129,86 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(createTransferResponse{Transfer: settled})
 	}
+}
+
+// transferHistoryEntry enriches a raw Transfer with which side of it
+// accountID was on and the counterparty's human-readable account_number —
+// the recipient was always identified by account_number throughout this
+// project, so history should show that too, not a bare account_id UUID.
+type transferHistoryEntry struct {
+	Transfer
+	Direction                 string `json:"direction"` // "sent" | "received"
+	CounterpartyAccountNumber string `json:"counterparty_account_number"`
+}
+
+// listTransfersHandler is registered at "GET /" (external GET /transfers).
+// Pagination is via ?limit=&offset=, defaulted/clamped rather than
+// rejected — this is the caller's own history, not a security-sensitive
+// input.
+func listTransfersHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if accountID == "" {
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		}
+
+		limit, offset := parsePagination(r)
+
+		transfers, err := getTransfersForAccount(r.Context(), pool, accountID, limit, offset)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+
+		// Memoized per request: the same counterparty can appear in
+		// multiple rows on one page.
+		accountNumberCache := map[string]string{}
+		entries := make([]transferHistoryEntry, 0, len(transfers))
+		for _, t := range transfers {
+			entry := transferHistoryEntry{Transfer: t}
+			counterpartyID := t.RecipientAccountID
+			if t.SenderAccountID == accountID {
+				entry.Direction = "sent"
+			} else {
+				entry.Direction = "received"
+				counterpartyID = t.SenderAccountID
+			}
+			number, ok := accountNumberCache[counterpartyID]
+			if !ok {
+				acc, err := accountsClient.GetAccountByID(r.Context(), &accountsv1.GetAccountByIDRequest{AccountId: counterpartyID})
+				if err != nil {
+					writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+					return
+				}
+				number = acc.GetAccountNumber()
+				accountNumberCache[counterpartyID] = number
+			}
+			entry.CounterpartyAccountNumber = number
+			entries = append(entries, entry)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(entries)
+	}
+}
+
+func parsePagination(r *http.Request) (limit, offset int32) {
+	const defaultLimit, maxLimit = 20, 100
+	limit = defaultLimit
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= maxLimit {
+		limit = int32(v)
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
+		offset = int32(v)
+	}
+	return limit, offset
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {

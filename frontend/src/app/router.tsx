@@ -7,6 +7,7 @@ import { ForgotPasswordPage } from '../features/auth/components/ForgotPasswordPa
 import { ResetPasswordPage } from '../features/auth/components/ResetPasswordPage'
 import { RequireAuth, RequireGuest } from '../features/auth/components/RouteGuards'
 import { DashboardPage } from '../features/accounts/components/DashboardPage'
+import { TransfersPage } from '../features/transfers/components/TransfersPage'
 
 export const router = createBrowserRouter([
   {
@@ -37,6 +38,14 @@ export const router = createBrowserRouter([
         element: (
           <RequireAuth>
             <DashboardPage />
+          </RequireAuth>
+        ),
+      },
+      {
+        path: 'transfers',
+        element: (
+          <RequireAuth>
+            <TransfersPage />
           </RequireAuth>
         ),
       },

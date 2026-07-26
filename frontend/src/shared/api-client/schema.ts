@@ -157,6 +157,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The caller's own transfer history (sent and received), newest first. */
+        get: operations["listTransfers"];
+        put?: never;
+        /** Create a transfer from the caller's own account to a recipient identified by account_number. sender_account_id is never taken from the request body — it's derived from the bearer token. */
+        post: operations["createTransfer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -236,6 +254,47 @@ export interface components {
             balance: number;
             /** @example EUR */
             currency: string;
+        };
+        CreateTransferRequest: {
+            recipient_account_number: string;
+            /**
+             * Format: int64
+             * @description Minor units (cents), must be positive.
+             */
+            amount: number;
+        };
+        Transfer: {
+            /** Format: uuid */
+            id: string;
+            idempotency_key: string;
+            /** Format: uuid */
+            sender_account_id: string;
+            /** Format: uuid */
+            recipient_account_id: string;
+            /** Format: int64 */
+            amount: number;
+            /** @enum {string} */
+            status: "pending" | "completed" | "failed";
+            /** @description Only present when status is failed, e.g. "insufficient_funds", "account_not_found", "invalid_amount", "ledger_internal_error". */
+            failure_reason?: string;
+            /**
+             * Format: uuid
+             * @description Only present when status is completed.
+             */
+            ledger_transaction_id?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        TransferResult: components["schemas"]["Transfer"] & {
+            /** @description Only present when the outcome is uncertain (202) — e.g. "transfer status unknown, still processing". */
+            message?: string;
+        };
+        TransferHistoryEntry: components["schemas"]["Transfer"] & {
+            /** @enum {string} */
+            direction: "sent" | "received";
+            counterparty_account_number: string;
         };
     };
     responses: {
@@ -584,6 +643,115 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+        };
+    };
+    listTransfers: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Transfer history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransferHistoryEntry"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description The caller has no account yet. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createTransfer: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Client-generated UUID for this transfer attempt. Retrying the exact same attempt (network failure, no response received) must reuse the same key; a genuinely new transfer needs a new one. */
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTransferRequest"];
+            };
+        };
+        responses: {
+            /** @description A transfer with this Idempotency-Key already existed — its current state is returned as-is, without moving money again. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransferResult"];
+                };
+            };
+            /** @description A definite outcome was reached (completed or failed). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransferResult"];
+                };
+            };
+            /** @description ledger-svc did not respond definitively (timeout/unreachable). The transfer is left pending — status unknown, neither success nor failure. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransferResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description Recipient not found, or the caller has no account yet. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Recipient account is closed, or sender account is not active. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Idempotency-Key was already used with different parameters. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
         };
     };
 }

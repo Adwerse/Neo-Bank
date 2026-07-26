@@ -1,7 +1,7 @@
 import type { HTMLAttributes } from 'react'
 import styles from './Banner.module.css'
 
-type BannerVariant = 'warning' | 'danger'
+type BannerVariant = 'warning' | 'danger' | 'success'
 
 interface BannerProps extends HTMLAttributes<HTMLDivElement> {
   variant: BannerVariant

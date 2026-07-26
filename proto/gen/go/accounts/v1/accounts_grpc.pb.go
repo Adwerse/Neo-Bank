@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	AccountsService_ResolveAccountByNumber_FullMethodName = "/accounts.v1.AccountsService/ResolveAccountByNumber"
 	AccountsService_GetAccountByID_FullMethodName         = "/accounts.v1.AccountsService/GetAccountByID"
+	AccountsService_GetAccountByUserID_FullMethodName     = "/accounts.v1.AccountsService/GetAccountByUserID"
 )
 
 // AccountsServiceClient is the client API for AccountsService service.
@@ -40,6 +41,10 @@ type AccountsServiceClient interface {
 	// GetAccountByID looks up an account by its internal account_id — used to
 	// check the sender's own account status.
 	GetAccountByID(ctx context.Context, in *GetAccountByIDRequest, opts ...grpc.CallOption) (*GetAccountByIDResponse, error)
+	// GetAccountByUserID looks up an account by the owning user's id — used by
+	// transfers-svc to resolve the authenticated caller's sender account_id
+	// from the gateway-injected X-User-Id header.
+	GetAccountByUserID(ctx context.Context, in *GetAccountByUserIDRequest, opts ...grpc.CallOption) (*GetAccountByUserIDResponse, error)
 }
 
 type accountsServiceClient struct {
@@ -70,6 +75,16 @@ func (c *accountsServiceClient) GetAccountByID(ctx context.Context, in *GetAccou
 	return out, nil
 }
 
+func (c *accountsServiceClient) GetAccountByUserID(ctx context.Context, in *GetAccountByUserIDRequest, opts ...grpc.CallOption) (*GetAccountByUserIDResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAccountByUserIDResponse)
+	err := c.cc.Invoke(ctx, AccountsService_GetAccountByUserID_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AccountsServiceServer is the server API for AccountsService service.
 // All implementations must embed UnimplementedAccountsServiceServer
 // for forward compatibility.
@@ -87,6 +102,10 @@ type AccountsServiceServer interface {
 	// GetAccountByID looks up an account by its internal account_id — used to
 	// check the sender's own account status.
 	GetAccountByID(context.Context, *GetAccountByIDRequest) (*GetAccountByIDResponse, error)
+	// GetAccountByUserID looks up an account by the owning user's id — used by
+	// transfers-svc to resolve the authenticated caller's sender account_id
+	// from the gateway-injected X-User-Id header.
+	GetAccountByUserID(context.Context, *GetAccountByUserIDRequest) (*GetAccountByUserIDResponse, error)
 	mustEmbedUnimplementedAccountsServiceServer()
 }
 
@@ -102,6 +121,9 @@ func (UnimplementedAccountsServiceServer) ResolveAccountByNumber(context.Context
 }
 func (UnimplementedAccountsServiceServer) GetAccountByID(context.Context, *GetAccountByIDRequest) (*GetAccountByIDResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetAccountByID not implemented")
+}
+func (UnimplementedAccountsServiceServer) GetAccountByUserID(context.Context, *GetAccountByUserIDRequest) (*GetAccountByUserIDResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAccountByUserID not implemented")
 }
 func (UnimplementedAccountsServiceServer) mustEmbedUnimplementedAccountsServiceServer() {}
 func (UnimplementedAccountsServiceServer) testEmbeddedByValue()                         {}
@@ -160,6 +182,24 @@ func _AccountsService_GetAccountByID_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AccountsService_GetAccountByUserID_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAccountByUserIDRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AccountsServiceServer).GetAccountByUserID(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AccountsService_GetAccountByUserID_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AccountsServiceServer).GetAccountByUserID(ctx, req.(*GetAccountByUserIDRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AccountsService_ServiceDesc is the grpc.ServiceDesc for AccountsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -174,6 +214,10 @@ var AccountsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetAccountByID",
 			Handler:    _AccountsService_GetAccountByID_Handler,
+		},
+		{
+			MethodName: "GetAccountByUserID",
+			Handler:    _AccountsService_GetAccountByUserID_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

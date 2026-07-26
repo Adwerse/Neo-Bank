@@ -6,6 +6,7 @@ const navItems = [
   { to: '/login', label: 'Login' },
   { to: '/register', label: 'Register' },
   { to: '/dashboard', label: 'Dashboard' },
+  { to: '/transfers', label: 'Transfers' },
 ]
 
 export function Layout() {

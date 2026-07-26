@@ -670,3 +670,44 @@ func TestCreateTransfer_ConcurrentDuplicate(t *testing.T) {
 		t.Errorf("transfers rows = %d, want exactly 1", got)
 	}
 }
+
+func TestGetTransfersForAccount(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountA := randomUUIDForTest(t)
+	accountB := randomUUIDForTest(t)
+	accountC := randomUUIDForTest(t)
+
+	sent := insertPendingTransfer(t, ctx, pool, accountA, accountB, 1000)
+	received := insertPendingTransfer(t, ctx, pool, accountB, accountA, 2000)
+	unrelated := insertPendingTransfer(t, ctx, pool, accountB, accountC, 3000)
+
+	transfers, err := getTransfersForAccount(ctx, pool, accountA, 20, 0)
+	if err != nil {
+		t.Fatalf("getTransfersForAccount: unexpected error: %v", err)
+	}
+
+	ids := make(map[string]bool, len(transfers))
+	for _, tr := range transfers {
+		ids[tr.ID] = true
+	}
+	if !ids[sent.ID] {
+		t.Errorf("expected sent transfer %s in results", sent.ID)
+	}
+	if !ids[received.ID] {
+		t.Errorf("expected received transfer %s in results", received.ID)
+	}
+	if ids[unrelated.ID] {
+		t.Errorf("unrelated transfer %s should not be in accountA's results", unrelated.ID)
+	}
+
+	// Pagination: limit=1 should return exactly one row.
+	limited, err := getTransfersForAccount(ctx, pool, accountA, 1, 0)
+	if err != nil {
+		t.Fatalf("getTransfersForAccount (limit=1): unexpected error: %v", err)
+	}
+	if len(limited) != 1 {
+		t.Errorf("len(limited) = %d, want 1", len(limited))
+	}
+}

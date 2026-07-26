@@ -5,8 +5,9 @@ info:
   description: >
     HTTP contract exposed by the Gateway (services/gateway) to browser
     clients. /auth/* proxies to auth-svc, /accounts/* proxies to
-    accounts-svc — see gateway/proxy.go for the routing table and
-    gateway/middleware.go for which paths require a bearer token.
+    accounts-svc, /transfers/* proxies to transfers-svc — see
+    gateway/proxy.go for the routing table and gateway/middleware.go for
+    which paths require a bearer token.
 
     Only endpoints the frontend actually consumes are documented here, not
     every route accounts-svc happens to expose behind the Gateway (e.g.
@@ -294,6 +295,115 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /transfers:
+    post:
+      operationId: createTransfer
+      summary: >
+        Create a transfer from the caller's own account to a recipient
+        identified by account_number. sender_account_id is never taken from
+        the request body — it's derived from the bearer token.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >
+            Client-generated UUID for this transfer attempt. Retrying the
+            exact same attempt (network failure, no response received) must
+            reuse the same key; a genuinely new transfer needs a new one.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransferRequest'
+      responses:
+        '201':
+          description: A definite outcome was reached (completed or failed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResult'
+        '200':
+          description: >
+            A transfer with this Idempotency-Key already existed — its
+            current state is returned as-is, without moving money again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResult'
+        '202':
+          description: >
+            ledger-svc did not respond definitively (timeout/unreachable).
+            The transfer is left pending — status unknown, neither success
+            nor failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Recipient not found, or the caller has no account yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Recipient account is closed, or sender account is not active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Idempotency-Key was already used with different parameters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      operationId: listTransfers
+      summary: The caller's own transfer history (sent and received), newest first.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Transfer history.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TransferHistoryEntry'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The caller has no account yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -470,3 +580,82 @@ components:
         currency:
           type: string
           example: EUR
+
+    CreateTransferRequest:
+      type: object
+      required: [recipient_account_number, amount]
+      properties:
+        recipient_account_number:
+          type: string
+        amount:
+          type: integer
+          format: int64
+          description: Minor units (cents), must be positive.
+
+    Transfer:
+      type: object
+      required:
+        - id
+        - idempotency_key
+        - sender_account_id
+        - recipient_account_id
+        - amount
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        idempotency_key:
+          type: string
+        sender_account_id:
+          type: string
+          format: uuid
+        recipient_account_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [pending, completed, failed]
+        failure_reason:
+          type: string
+          description: >
+            Only present when status is failed, e.g. "insufficient_funds",
+            "account_not_found", "invalid_amount", "ledger_internal_error".
+        ledger_transaction_id:
+          type: string
+          format: uuid
+          description: Only present when status is completed.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TransferResult:
+      allOf:
+        - $ref: '#/components/schemas/Transfer'
+        - type: object
+          properties:
+            message:
+              type: string
+              description: >
+                Only present when the outcome is uncertain (202) — e.g.
+                "transfer status unknown, still processing".
+
+    TransferHistoryEntry:
+      allOf:
+        - $ref: '#/components/schemas/Transfer'
+        - type: object
+          required: [direction, counterparty_account_number]
+          properties:
+            direction:
+              type: string
+              enum: [sent, received]
+            counterparty_account_number:
+              type: string

@@ -165,6 +165,7 @@ type GetAccountByIDResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AccountId     string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
 	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	AccountNumber string                 `protobuf:"bytes,3,opt,name=account_number,json=accountNumber,proto3" json:"account_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -213,6 +214,109 @@ func (x *GetAccountByIDResponse) GetStatus() string {
 	return ""
 }
 
+func (x *GetAccountByIDResponse) GetAccountNumber() string {
+	if x != nil {
+		return x.AccountNumber
+	}
+	return ""
+}
+
+type GetAccountByUserIDRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetAccountByUserIDRequest) Reset() {
+	*x = GetAccountByUserIDRequest{}
+	mi := &file_accounts_v1_accounts_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAccountByUserIDRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAccountByUserIDRequest) ProtoMessage() {}
+
+func (x *GetAccountByUserIDRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_accounts_v1_accounts_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAccountByUserIDRequest.ProtoReflect.Descriptor instead.
+func (*GetAccountByUserIDRequest) Descriptor() ([]byte, []int) {
+	return file_accounts_v1_accounts_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *GetAccountByUserIDRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type GetAccountByUserIDResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccountId     string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetAccountByUserIDResponse) Reset() {
+	*x = GetAccountByUserIDResponse{}
+	mi := &file_accounts_v1_accounts_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAccountByUserIDResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAccountByUserIDResponse) ProtoMessage() {}
+
+func (x *GetAccountByUserIDResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_accounts_v1_accounts_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAccountByUserIDResponse.ProtoReflect.Descriptor instead.
+func (*GetAccountByUserIDResponse) Descriptor() ([]byte, []int) {
+	return file_accounts_v1_accounts_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *GetAccountByUserIDResponse) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *GetAccountByUserIDResponse) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
 var File_accounts_v1_accounts_proto protoreflect.FileDescriptor
 
 const file_accounts_v1_accounts_proto_rawDesc = "" +
@@ -226,14 +330,22 @@ const file_accounts_v1_accounts_proto_rawDesc = "" +
 	"\x06status\x18\x02 \x01(\tR\x06status\"6\n" +
 	"\x15GetAccountByIDRequest\x12\x1d\n" +
 	"\n" +
-	"account_id\x18\x01 \x01(\tR\taccountId\"O\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\"v\n" +
 	"\x16GetAccountByIDResponse\x12\x1d\n" +
 	"\n" +
 	"account_id\x18\x01 \x01(\tR\taccountId\x12\x16\n" +
-	"\x06status\x18\x02 \x01(\tR\x06status2\xdf\x01\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12%\n" +
+	"\x0eaccount_number\x18\x03 \x01(\tR\raccountNumber\"4\n" +
+	"\x19GetAccountByUserIDRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\"S\n" +
+	"\x1aGetAccountByUserIDResponse\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status2\xc6\x02\n" +
 	"\x0fAccountsService\x12q\n" +
 	"\x16ResolveAccountByNumber\x12*.accounts.v1.ResolveAccountByNumberRequest\x1a+.accounts.v1.ResolveAccountByNumberResponse\x12Y\n" +
-	"\x0eGetAccountByID\x12\".accounts.v1.GetAccountByIDRequest\x1a#.accounts.v1.GetAccountByIDResponseB-Z+neobank/proto/gen/go/accounts/v1;accountsv1b\x06proto3"
+	"\x0eGetAccountByID\x12\".accounts.v1.GetAccountByIDRequest\x1a#.accounts.v1.GetAccountByIDResponse\x12e\n" +
+	"\x12GetAccountByUserID\x12&.accounts.v1.GetAccountByUserIDRequest\x1a'.accounts.v1.GetAccountByUserIDResponseB-Z+neobank/proto/gen/go/accounts/v1;accountsv1b\x06proto3"
 
 var (
 	file_accounts_v1_accounts_proto_rawDescOnce sync.Once
@@ -247,20 +359,24 @@ func file_accounts_v1_accounts_proto_rawDescGZIP() []byte {
 	return file_accounts_v1_accounts_proto_rawDescData
 }
 
-var file_accounts_v1_accounts_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_accounts_v1_accounts_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_accounts_v1_accounts_proto_goTypes = []any{
 	(*ResolveAccountByNumberRequest)(nil),  // 0: accounts.v1.ResolveAccountByNumberRequest
 	(*ResolveAccountByNumberResponse)(nil), // 1: accounts.v1.ResolveAccountByNumberResponse
 	(*GetAccountByIDRequest)(nil),          // 2: accounts.v1.GetAccountByIDRequest
 	(*GetAccountByIDResponse)(nil),         // 3: accounts.v1.GetAccountByIDResponse
+	(*GetAccountByUserIDRequest)(nil),      // 4: accounts.v1.GetAccountByUserIDRequest
+	(*GetAccountByUserIDResponse)(nil),     // 5: accounts.v1.GetAccountByUserIDResponse
 }
 var file_accounts_v1_accounts_proto_depIdxs = []int32{
 	0, // 0: accounts.v1.AccountsService.ResolveAccountByNumber:input_type -> accounts.v1.ResolveAccountByNumberRequest
 	2, // 1: accounts.v1.AccountsService.GetAccountByID:input_type -> accounts.v1.GetAccountByIDRequest
-	1, // 2: accounts.v1.AccountsService.ResolveAccountByNumber:output_type -> accounts.v1.ResolveAccountByNumberResponse
-	3, // 3: accounts.v1.AccountsService.GetAccountByID:output_type -> accounts.v1.GetAccountByIDResponse
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
+	4, // 2: accounts.v1.AccountsService.GetAccountByUserID:input_type -> accounts.v1.GetAccountByUserIDRequest
+	1, // 3: accounts.v1.AccountsService.ResolveAccountByNumber:output_type -> accounts.v1.ResolveAccountByNumberResponse
+	3, // 4: accounts.v1.AccountsService.GetAccountByID:output_type -> accounts.v1.GetAccountByIDResponse
+	5, // 5: accounts.v1.AccountsService.GetAccountByUserID:output_type -> accounts.v1.GetAccountByUserIDResponse
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -277,7 +393,7 @@ func file_accounts_v1_accounts_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_accounts_v1_accounts_proto_rawDesc), len(file_accounts_v1_accounts_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

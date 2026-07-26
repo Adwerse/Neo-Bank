@@ -41,5 +41,17 @@ func (s *accountsServer) GetAccountByID(ctx context.Context, req *accountsv1.Get
 	if !found {
 		return nil, status.Error(codes.NotFound, "account not found")
 	}
-	return &accountsv1.GetAccountByIDResponse{AccountId: acc.ID, Status: acc.Status}, nil
+	return &accountsv1.GetAccountByIDResponse{AccountId: acc.ID, Status: acc.Status, AccountNumber: acc.AccountNumber}, nil
+}
+
+func (s *accountsServer) GetAccountByUserID(ctx context.Context, req *accountsv1.GetAccountByUserIDRequest) (*accountsv1.GetAccountByUserIDResponse, error) {
+	acc, found, err := getAccountByUserID(ctx, s.pool, req.GetUserId())
+	if err != nil {
+		log.Printf("accounts-svc: GetAccountByUserID: %v", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	if !found {
+		return nil, status.Error(codes.NotFound, "account not found")
+	}
+	return &accountsv1.GetAccountByUserIDResponse{AccountId: acc.ID, Status: acc.Status}, nil
 }

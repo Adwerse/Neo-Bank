@@ -17,6 +17,10 @@ service AccountsService {
   // GetAccountByID looks up an account by its internal account_id — used to
   // check the sender's own account status.
   rpc GetAccountByID(GetAccountByIDRequest) returns (GetAccountByIDResponse);
+  // GetAccountByUserID looks up an account by the owning user's id — used by
+  // transfers-svc to resolve the authenticated caller's sender account_id
+  // from the gateway-injected X-User-Id header.
+  rpc GetAccountByUserID(GetAccountByUserIDRequest) returns (GetAccountByUserIDResponse);
 }
 
 message ResolveAccountByNumberRequest {
@@ -33,6 +37,16 @@ message GetAccountByIDRequest {
 }
 
 message GetAccountByIDResponse {
+  string account_id = 1;
+  string status = 2;
+  string account_number = 3;
+}
+
+message GetAccountByUserIDRequest {
+  string user_id = 1;
+}
+
+message GetAccountByUserIDResponse {
   string account_id = 1;
   string status = 2;
 }

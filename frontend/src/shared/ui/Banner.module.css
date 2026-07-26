@@ -13,3 +13,8 @@
   background: var(--color-danger-bg);
   color: var(--color-danger);
 }
+
+.success {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}

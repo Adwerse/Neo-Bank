@@ -101,6 +101,7 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, ledgerClient))
+	mux.HandleFunc("GET /", listTransfersHandler(pool, accountsClient))
 
 	log.Printf("transfers-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {

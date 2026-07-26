@@ -1,0 +1,62 @@
+.list {
+  list-style: none;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 0 var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.amountSent {
+  font-weight: 600;
+  color: var(--color-danger);
+}
+
+.amountReceived {
+  font-weight: 600;
+  color: var(--color-success);
+}
+
+.counterparty {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.status {
+  font-size: 0.875rem;
+  text-align: right;
+}
+
+.date {
+  grid-column: 1 / -1;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.empty {
+  margin: var(--space-4) 0 0;
+  color: var(--color-text-muted);
+}
+
+.skeletonRow {
+  height: 1.5rem;
+  width: 100%;
+  margin-bottom: var(--space-2);
+}
+
+.retryButton {
+  margin-top: var(--space-4);
+}

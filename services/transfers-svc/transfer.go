@@ -166,6 +166,35 @@ func getTransferByIdempotencyKey(ctx context.Context, pool *pgxpool.Pool, idempo
 	return t, true, nil
 }
 
+// getTransfersForAccount returns accountID's transfers (as sender or
+// recipient), newest first, paginated via limit/offset — mirroring
+// ledger-svc's getHistory tie-break reasoning: two entries can share a
+// created_at from the same transaction-local now(), so id is the tie-break.
+func getTransfersForAccount(ctx context.Context, pool *pgxpool.Pool, accountID string, limit, offset int32) ([]Transfer, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at
+		 FROM transfers
+		 WHERE sender_account_id = $1 OR recipient_account_id = $1
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT $2 OFFSET $3`,
+		accountID, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query transfers: %w", err)
+	}
+	defer rows.Close()
+
+	transfers := make([]Transfer, 0, limit)
+	for rows.Next() {
+		var t Transfer
+		if err := rows.Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan transfer: %w", err)
+		}
+		transfers = append(transfers, t)
+	}
+	return transfers, rows.Err()
+}
+
 // reconcileReplay compares an existing transfer found by idempotency key
 // (via the fast path, or because this request lost the insert race) against
 // the CURRENT request's parameters. A mismatch means the key was reused for
