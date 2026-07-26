@@ -72,10 +72,13 @@ services:
     environment:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
       ACCOUNTS_GRPC_ADDR: accounts-svc:9082
+      LEDGER_GRPC_ADDR: ledger-svc:8083
     depends_on:
       postgres:
         condition: service_healthy
       accounts-svc:
+        condition: service_started
+      ledger-svc:
         condition: service_started
 
   fraud-svc:

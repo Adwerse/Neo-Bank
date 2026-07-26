@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 // newTestPool connects to the postgres instance from docker-compose.yml via
@@ -65,6 +66,53 @@ func (f *fakeAccountsClient) ResolveAccountByNumber(ctx context.Context, req *ac
 
 func (f *fakeAccountsClient) GetAccountByID(ctx context.Context, req *accountsv1.GetAccountByIDRequest, opts ...grpc.CallOption) (*accountsv1.GetAccountByIDResponse, error) {
 	return f.getByIDFunc(ctx, req)
+}
+
+// fakeLedgerClient implements ledgerv1.LedgerServiceClient without a live
+// ledger-svc, embedding the real interface as nil so only the one method
+// settleTransfer actually calls needs overriding.
+type fakeLedgerClient struct {
+	ledgerv1.LedgerServiceClient
+	executeTransferFunc func(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error)
+}
+
+func (f *fakeLedgerClient) ExecuteTransfer(ctx context.Context, req *ledgerv1.ExecuteTransferRequest, opts ...grpc.CallOption) (*ledgerv1.ExecuteTransferResponse, error) {
+	return f.executeTransferFunc(ctx, req)
+}
+
+// insertPendingTransfer inserts a transfers row directly (bypassing
+// createTransfer/accountsClient entirely), for tests that are about
+// settleTransfer, not validation.
+func insertPendingTransfer(t *testing.T, ctx context.Context, pool *pgxpool.Pool, senderID, recipientID string, amount int64) Transfer {
+	t.Helper()
+	idempotencyKey := randomUUIDForTest(t)
+	var tr Transfer
+	err := pool.QueryRow(ctx,
+		`INSERT INTO transfers (idempotency_key, sender_account_id, recipient_account_id, amount)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`,
+		idempotencyKey, senderID, recipientID, amount,
+	).Scan(&tr.ID, &tr.IdempotencyKey, &tr.SenderAccountID, &tr.RecipientAccountID, &tr.Amount, &tr.Status, &tr.FailureReason, &tr.LedgerTransactionID, &tr.CreatedAt, &tr.UpdatedAt)
+	if err != nil {
+		t.Fatalf("insert pending transfer: %v", err)
+	}
+	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
+	return tr
+}
+
+// getTransferByID re-reads a transfers row, used to confirm settleTransfer's
+// DB writes (or lack thereof, in the uncertain case).
+func getTransferByID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id string) Transfer {
+	t.Helper()
+	var tr Transfer
+	err := pool.QueryRow(ctx,
+		"SELECT id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at FROM transfers WHERE id = $1",
+		id,
+	).Scan(&tr.ID, &tr.IdempotencyKey, &tr.SenderAccountID, &tr.RecipientAccountID, &tr.Amount, &tr.Status, &tr.FailureReason, &tr.LedgerTransactionID, &tr.CreatedAt, &tr.UpdatedAt)
+	if err != nil {
+		t.Fatalf("get transfer id=%s: %v", id, err)
+	}
+	return tr
 }
 
 // transferCount returns how many transfers rows exist for idempotencyKey,
@@ -266,5 +314,136 @@ func TestCreateTransfer_SenderNotActive(t *testing.T) {
 	}
 	if got := transferCount(t, ctx, pool, idempotencyKey); got != 0 {
 		t.Errorf("transfers rows = %d, want 0", got)
+	}
+}
+
+func TestSettleTransfer_Success(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 1500)
+	wantTransactionID := randomUUIDForTest(t)
+
+	ledgerClient := &fakeLedgerClient{
+		executeTransferFunc: func(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error) {
+			if req.GetFromAccountId() != pending.SenderAccountID || req.GetToAccountId() != pending.RecipientAccountID || req.GetAmount() != pending.Amount {
+				t.Errorf("ExecuteTransfer request = %+v, want from=%s to=%s amount=%d", req, pending.SenderAccountID, pending.RecipientAccountID, pending.Amount)
+			}
+			return &ledgerv1.ExecuteTransferResponse{TransactionId: wantTransactionID}, nil
+		},
+	}
+
+	settled, outcome, err := settleTransfer(ctx, pool, ledgerClient, pending)
+	if err != nil {
+		t.Fatalf("settleTransfer: unexpected error: %v", err)
+	}
+	if outcome != settlementCompleted {
+		t.Fatalf("outcome = %v, want settlementCompleted", outcome)
+	}
+	if settled.Status != "completed" {
+		t.Errorf("settled.Status = %q, want \"completed\"", settled.Status)
+	}
+	if settled.LedgerTransactionID == nil || *settled.LedgerTransactionID != wantTransactionID {
+		t.Errorf("settled.LedgerTransactionID = %v, want %q", settled.LedgerTransactionID, wantTransactionID)
+	}
+
+	row := getTransferByID(t, ctx, pool, pending.ID)
+	if row.Status != "completed" {
+		t.Errorf("row.Status = %q, want \"completed\"", row.Status)
+	}
+}
+
+func TestSettleTransfer_InsufficientFunds(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 5000)
+
+	ledgerClient := &fakeLedgerClient{
+		executeTransferFunc: func(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error) {
+			return nil, status.Error(codes.FailedPrecondition, "insufficient funds")
+		},
+	}
+
+	settled, outcome, err := settleTransfer(ctx, pool, ledgerClient, pending)
+	if err != nil {
+		t.Fatalf("settleTransfer: unexpected error: %v", err)
+	}
+	if outcome != settlementFailed {
+		t.Fatalf("outcome = %v, want settlementFailed", outcome)
+	}
+	if settled.Status != "failed" {
+		t.Errorf("settled.Status = %q, want \"failed\"", settled.Status)
+	}
+	if settled.FailureReason == nil || *settled.FailureReason != failureReasonInsufficientFunds {
+		t.Errorf("settled.FailureReason = %v, want %q", settled.FailureReason, failureReasonInsufficientFunds)
+	}
+
+	row := getTransferByID(t, ctx, pool, pending.ID)
+	if row.Status != "failed" {
+		t.Errorf("row.Status = %q, want \"failed\"", row.Status)
+	}
+}
+
+func TestSettleTransfer_AccountNotFound(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 1000)
+
+	ledgerClient := &fakeLedgerClient{
+		executeTransferFunc: func(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error) {
+			return nil, status.Error(codes.NotFound, "from account not found")
+		},
+	}
+
+	settled, outcome, err := settleTransfer(ctx, pool, ledgerClient, pending)
+	if err != nil {
+		t.Fatalf("settleTransfer: unexpected error: %v", err)
+	}
+	if outcome != settlementFailed {
+		t.Fatalf("outcome = %v, want settlementFailed", outcome)
+	}
+	if settled.FailureReason == nil || *settled.FailureReason != failureReasonAccountNotFound {
+		t.Errorf("settled.FailureReason = %v, want %q", settled.FailureReason, failureReasonAccountNotFound)
+	}
+}
+
+func TestSettleTransfer_Uncertain(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded} {
+		t.Run(code.String(), func(t *testing.T) {
+			pool := newTestPool(t)
+			ctx := context.Background()
+
+			pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 1000)
+
+			ledgerClient := &fakeLedgerClient{
+				executeTransferFunc: func(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error) {
+					return nil, status.Error(code, "simulated transport failure")
+				},
+			}
+
+			settled, outcome, err := settleTransfer(ctx, pool, ledgerClient, pending)
+			if err != nil {
+				t.Fatalf("settleTransfer: unexpected error: %v", err)
+			}
+			if outcome != settlementUncertain {
+				t.Fatalf("outcome = %v, want settlementUncertain", outcome)
+			}
+			if settled.Status != "pending" {
+				t.Errorf("settled.Status = %q, want \"pending\" (unchanged)", settled.Status)
+			}
+
+			row := getTransferByID(t, ctx, pool, pending.ID)
+			if row.Status != "pending" {
+				t.Errorf("row.Status = %q, want \"pending\" (settleTransfer must not write anything when uncertain)", row.Status)
+			}
+			if row.LedgerTransactionID != nil {
+				t.Errorf("row.LedgerTransactionID = %v, want nil", row.LedgerTransactionID)
+			}
+			if row.FailureReason != nil {
+				t.Errorf("row.FailureReason = %v, want nil", row.FailureReason)
+			}
+		})
 	}
 }

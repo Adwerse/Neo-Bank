@@ -13,11 +13,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 const (
 	defaultPort         = "8084"
 	defaultAccountsAddr = "accounts-svc:9082"
+	defaultLedgerAddr   = "ledger-svc:8083"
 )
 
 func main() {
@@ -28,6 +30,10 @@ func main() {
 	accountsAddr := os.Getenv("ACCOUNTS_GRPC_ADDR")
 	if accountsAddr == "" {
 		accountsAddr = defaultAccountsAddr
+	}
+	ledgerAddr := os.Getenv("LEDGER_GRPC_ADDR")
+	if ledgerAddr == "" {
+		ledgerAddr = defaultLedgerAddr
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
@@ -52,6 +58,14 @@ func main() {
 	}
 	defer accountsConn.Close()
 	accountsClient := accountsv1.NewAccountsServiceClient(accountsConn)
+
+	// Same lazy-dial reasoning as accountsConn above.
+	ledgerConn, err := grpc.NewClient(ledgerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("transfers-svc: failed to create ledger gRPC client for %s: %v", ledgerAddr, err)
+	}
+	defer ledgerConn.Close()
+	ledgerClient := ledgerv1.NewLedgerServiceClient(ledgerConn)
 
 	// An explicit mux, not the package-level http.DefaultServeMux: importing
 	// google.golang.org/grpc transitively pulls in golang.org/x/net/trace,
@@ -86,7 +100,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "transfers-svc"})
 	})
 
-	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient))
+	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, ledgerClient))
 
 	log.Printf("transfers-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {

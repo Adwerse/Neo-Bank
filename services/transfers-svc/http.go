@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 type createTransferRequest struct {
@@ -15,12 +16,20 @@ type createTransferRequest struct {
 	Amount                 int64  `json:"amount"`
 }
 
+// createTransferResponse embeds Transfer directly (so its fields flatten
+// into the JSON body) plus an optional Message, populated only when
+// settleTransfer couldn't reach a definite outcome.
+type createTransferResponse struct {
+	Transfer
+	Message string `json:"message,omitempty"`
+}
+
 // createTransferHandler is registered at "POST /" — transfers-svc's mux is
 // root-relative because the gateway strips the "/transfers" prefix before
 // forwarding, same convention as accounts-svc. sender_account_id is taken
 // directly from the request body for now; deriving it from the gateway's
 // X-User-Id header instead is a later sprint.
-func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient) http.HandlerFunc {
+func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, ledgerClient ledgerv1.LedgerServiceClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -59,8 +68,22 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			return
 		}
 
+		settled, settleOutcome, err := settleTransfer(r.Context(), pool, ledgerClient, transfer)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if settleOutcome == settlementUncertain {
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(createTransferResponse{
+				Transfer: settled,
+				Message:  "transfer status unknown, still processing",
+			})
+			return
+		}
+
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(transfer)
+		json.NewEncoder(w).Encode(createTransferResponse{Transfer: settled})
 	}
 }
 

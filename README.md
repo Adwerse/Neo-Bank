@@ -145,6 +145,31 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
   ```
   После этого `GET /accounts/me` для того же пользователя показывает `"balance": 50000`.
 
+## Перевод денег через ledger (transfers-svc)
+
+`transfers-svc` создаёт запись `transfers` в статусе `pending` (валидация: сумма положительна, получатель резолвится через `accounts-svc.ResolveAccountByNumber`, получатель ≠ отправитель, получатель не `closed`, отправитель `active` — баланс здесь **не** проверяется, это сделает `ledger-svc` атомарно), а затем вызывает `ledger-svc.ExecuteTransfer(sender_account_id, recipient_account_id, amount)` и по результату обновляет запись:
+- успех → `status = 'completed'`, `ledger_transaction_id` — id проводки из ответа ledger.
+- `ledger` вернул «недостаточно средств» (`FailedPrecondition`) → `status = 'failed'`, `failure_reason = 'insufficient_funds'`.
+- `ledger` вернул «аккаунт не найден» (`NotFound`) или невалидную сумму (`InvalidArgument`, на практике недостижимо — `transfers-svc` уже проверил сумму раньше) или свою внутреннюю ошибку (`Internal`) → `status = 'failed'` с соответствующей `failure_reason` (`account_not_found` / `invalid_amount` / `ledger_internal_error`) — каждая доменная ошибка размечена явно, а не свалена в один общий `'error'`.
+
+### Честная граница: неопределённый исход
+
+`ledger-svc.ExecuteTransfer` (`services/ledger-svc/ledger.go`) оборачивает свою работу в одну Postgres-транзакцию, которая либо целиком коммитится, либо целиком откатывается (`defer tx.Rollback(ctx)`, `tx.Commit(ctx)` — только на успехе) **до того**, как уйдёт какой-либо gRPC-ответ. Это значит: любой полноценный ответ — успех или один из явных `status.Error(...)`, которые `ledger-svc` возвращает сам (`FailedPrecondition`, `NotFound`, `InvalidArgument`, `Internal`) — говорит совершенно точно, ушли деньги или нет.
+
+`codes.Unavailable`, `codes.DeadlineExceeded` и `codes.Unknown` — принципиально другой случай: `ledger-svc` их сам никогда не возвращает, они возникают только на уровне транспорта (не достучались, либо не дождались ответа за `ledgerCallTimeout` = 5 секунд). Здесь `transfers-svc` **не знает**, исполнился перевод или нет: запрос мог не дойти, а мог дойти, исполниться, и уже ответ потеряться на обратном пути. Пометить `failed` в этом случае — соврать, если деньги реально ушли; пометить `completed` без `transaction_id` — соврать в другую сторону. Поэтому запись остаётся `pending` как есть (никакой записи в БД не делается вообще), а клиенту возвращается `202 Accepted` с телом `{"status": "pending", "message": "transfer status unknown, still processing"}`.
+
+**TODO** (за скоупом этого шага): по-настоящему разрешить неопределённость может только сверка с `ledger-svc` — например, периодический опрос `GetHistory(account_id)` на предмет проводки с ожидаемой суммой в окне времени вокруг `created_at` записи, либо (чище) `ledger-svc` должен научиться принимать идемпотентный request-id и отдавать по нему уже исполненный результат повторно — сейчас `ExecuteTransfer` такого параметра не принимает. Реализация reconciliation-джобы — отдельная задача.
+
+### Проверка вручную
+```bash
+# создать перевод (пока внутренний контракт: sender_account_id передаётся явно,
+# а не выводится из X-User-Id — это следующий шаг)
+curl -s -X POST http://localhost:8084/ \
+  -H "Content-Type: application/json" \
+  -d '{"sender_account_id":"<uuid>","recipient_account_number":"NB...","amount":1000}'
+```
+Успешный перевод — `201` и `"status":"completed"` с заполненным `ledger_transaction_id`; сумма больше баланса — `201` и `"status":"failed","failure_reason":"insufficient_funds"`; оба случая проверяются balance-diff через `GET /accounts/me` обеих сторон (см. `cmd/devtopup` выше — им удобно завести отправителю стартовый баланс).
+
 ## Фронтенд
 
 `frontend/` — SPA на Vite + React + TypeScript, обращается к бэкенду через Gateway (`http://localhost:8080`). Роутинг, структура проекта и типизированный API-слой уже на месте; настоящих форм и экранов пока нет — это следующие шаги.
