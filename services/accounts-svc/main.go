@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -11,12 +12,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 
+	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 const (
 	defaultPort         = "8082"
+	defaultGRPCPort     = "9082"
 	defaultKafkaBrokers = "kafka:9092"
 	defaultKafkaTopic   = "user.events"
 	kafkaConsumerGroup  = "accounts-svc"
@@ -68,6 +74,30 @@ func main() {
 	defer kafkaReader.Close()
 
 	go runUserActivatedConsumer(context.Background(), kafkaReader, pool, ledgerClient)
+
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = defaultGRPCPort
+	}
+	lis, err := net.Listen("tcp", ":"+grpcPort)
+	if err != nil {
+		log.Fatalf("accounts-svc: failed to listen on :%s (gRPC): %v", grpcPort, err)
+	}
+	grpcServer := grpc.NewServer()
+	accountsv1.RegisterAccountsServiceServer(grpcServer, &accountsServer{pool: pool})
+
+	grpcHealthServer := health.NewServer()
+	grpcHealthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, grpcHealthServer)
+
+	reflection.Register(grpcServer)
+
+	go func() {
+		log.Printf("accounts-svc listening on :%s (gRPC)", grpcPort)
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

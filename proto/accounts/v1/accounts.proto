@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package accounts.v1;
+
+option go_package = "neobank/proto/gen/go/accounts/v1;accountsv1";
+
+// AccountsService is accounts-svc's internal service-to-service contract.
+// Not exposed through the gateway — the intended caller is transfers-svc,
+// which needs to resolve a human-entered account_number to an internal
+// account_id, and check either party's account status, without touching
+// accounts-svc's Postgres database directly.
+service AccountsService {
+  // ResolveAccountByNumber looks up an account by its human-readable
+  // account_number (as shown to users), returning its internal account_id
+  // and current status.
+  rpc ResolveAccountByNumber(ResolveAccountByNumberRequest) returns (ResolveAccountByNumberResponse);
+  // GetAccountByID looks up an account by its internal account_id — used to
+  // check the sender's own account status.
+  rpc GetAccountByID(GetAccountByIDRequest) returns (GetAccountByIDResponse);
+}
+
+message ResolveAccountByNumberRequest {
+  string account_number = 1;
+}
+
+message ResolveAccountByNumberResponse {
+  string account_id = 1;
+  string status = 2;
+}
+
+message GetAccountByIDRequest {
+  string account_id = 1;
+}
+
+message GetAccountByIDResponse {
+  string account_id = 1;
+  string status = 2;
+}

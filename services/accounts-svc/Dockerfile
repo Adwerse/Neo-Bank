@@ -8,4 +8,5 @@ RUN go build -o /out/server .
 FROM alpine:latest
 COPY --from=build /out/server /server
 EXPOSE 8082
+EXPOSE 9082
 CMD ["/server"]

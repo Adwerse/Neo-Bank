@@ -38,11 +38,13 @@ services:
       dockerfile: services/accounts-svc/Dockerfile
     ports:
       - "8082:8082"
+      - "9082:9082"
     environment:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: user.events
       LEDGER_GRPC_ADDR: ledger-svc:8083
+      GRPC_PORT: "9082"
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,9 +71,12 @@ services:
       - "8084:8084"
     environment:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      ACCOUNTS_GRPC_ADDR: accounts-svc:9082
     depends_on:
       postgres:
         condition: service_healthy
+      accounts-svc:
+        condition: service_started
 
   fraud-svc:
     build:

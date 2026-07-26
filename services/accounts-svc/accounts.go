@@ -166,6 +166,21 @@ func getAccountByID(ctx context.Context, pool *pgxpool.Pool, id string) (Account
 	return acc, true, nil
 }
 
+func getAccountByAccountNumber(ctx context.Context, pool *pgxpool.Pool, accountNumber string) (Account, bool, error) {
+	var acc Account
+	err := pool.QueryRow(ctx,
+		"SELECT id, user_id, account_number, status, created_at, updated_at FROM accounts WHERE account_number = $1",
+		accountNumber,
+	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
+	if isNotFoundErr(err) {
+		return Account{}, false, nil
+	}
+	if err != nil {
+		return Account{}, false, err
+	}
+	return acc, true, nil
+}
+
 // updateAccountStatus locks the account row, rejects any transition away
 // from "closed" (terminal, including closed -> closed), and otherwise
 // applies newStatus unconditionally — every other from-state may move to
