@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -86,6 +87,25 @@ func (f *fakeLedgerClient) ExecuteTransfer(ctx context.Context, req *ledgerv1.Ex
 func insertPendingTransfer(t *testing.T, ctx context.Context, pool *pgxpool.Pool, senderID, recipientID string, amount int64) Transfer {
 	t.Helper()
 	idempotencyKey := randomUUIDForTest(t)
+	var tr Transfer
+	err := pool.QueryRow(ctx,
+		`INSERT INTO transfers (idempotency_key, sender_account_id, recipient_account_id, amount)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`,
+		idempotencyKey, senderID, recipientID, amount,
+	).Scan(&tr.ID, &tr.IdempotencyKey, &tr.SenderAccountID, &tr.RecipientAccountID, &tr.Amount, &tr.Status, &tr.FailureReason, &tr.LedgerTransactionID, &tr.CreatedAt, &tr.UpdatedAt)
+	if err != nil {
+		t.Fatalf("insert pending transfer: %v", err)
+	}
+	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
+	return tr
+}
+
+// insertPendingTransferWithKey is like insertPendingTransfer but takes an
+// explicit idempotency key instead of a random one, for tests that
+// deliberately reuse the same key across multiple calls.
+func insertPendingTransferWithKey(t *testing.T, ctx context.Context, pool *pgxpool.Pool, idempotencyKey, senderID, recipientID string, amount int64) Transfer {
+	t.Helper()
 	var tr Transfer
 	err := pool.QueryRow(ctx,
 		`INSERT INTO transfers (idempotency_key, sender_account_id, recipient_account_id, amount)
@@ -445,5 +465,208 @@ func TestSettleTransfer_Uncertain(t *testing.T) {
 				t.Errorf("row.FailureReason = %v, want nil", row.FailureReason)
 			}
 		})
+	}
+}
+
+func TestCreateTransfer_IdempotentReplay_SameParams(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	senderID := randomUUIDForTest(t)
+	recipientID := randomUUIDForTest(t)
+	idempotencyKey := randomUUIDForTest(t)
+	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
+
+	accountsClient := &fakeAccountsClient{
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
+			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		},
+		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
+			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: accountStatusActive}, nil
+		},
+	}
+
+	first, outcome1, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000010", 2000)
+	if err != nil {
+		t.Fatalf("createTransfer (first): unexpected error: %v", err)
+	}
+	if outcome1 != createTransferOK {
+		t.Fatalf("first outcome = %v, want createTransferOK", outcome1)
+	}
+
+	second, outcome2, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000010", 2000)
+	if err != nil {
+		t.Fatalf("createTransfer (second): unexpected error: %v", err)
+	}
+	if outcome2 != createTransferReplayed {
+		t.Fatalf("second outcome = %v, want createTransferReplayed", outcome2)
+	}
+	if second.ID != first.ID {
+		t.Errorf("second.ID = %q, want %q (same transfer)", second.ID, first.ID)
+	}
+
+	if got := transferCount(t, ctx, pool, idempotencyKey); got != 1 {
+		t.Errorf("transfers rows = %d, want 1", got)
+	}
+}
+
+func TestCreateTransfer_IdempotentReplay_DifferentParams(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	senderID := randomUUIDForTest(t)
+	recipientID := randomUUIDForTest(t)
+	idempotencyKey := randomUUIDForTest(t)
+	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
+
+	accountsClient := &fakeAccountsClient{
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
+			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		},
+		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
+			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: accountStatusActive}, nil
+		},
+	}
+
+	_, outcome1, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000011", 2000)
+	if err != nil {
+		t.Fatalf("createTransfer (first): unexpected error: %v", err)
+	}
+	if outcome1 != createTransferOK {
+		t.Fatalf("first outcome = %v, want createTransferOK", outcome1)
+	}
+
+	// Same key, different amount.
+	_, outcome2, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000011", 9999)
+	if err != nil {
+		t.Fatalf("createTransfer (reused key, different amount): unexpected error: %v", err)
+	}
+	if outcome2 != createTransferKeyReused {
+		t.Errorf("outcome = %v, want createTransferKeyReused (different amount)", outcome2)
+	}
+
+	// Same key, different sender.
+	_, outcome3, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, randomUUIDForTest(t), "NB0000000011", 2000)
+	if err != nil {
+		t.Fatalf("createTransfer (reused key, different sender): unexpected error: %v", err)
+	}
+	if outcome3 != createTransferKeyReused {
+		t.Errorf("outcome = %v, want createTransferKeyReused (different sender)", outcome3)
+	}
+
+	if got := transferCount(t, ctx, pool, idempotencyKey); got != 1 {
+		t.Errorf("transfers rows = %d, want 1 (mismatched retries must not create rows)", got)
+	}
+}
+
+func TestCreateTransfer_ReplayReturnsCurrentState(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	senderID := randomUUIDForTest(t)
+	recipientID := randomUUIDForTest(t)
+	idempotencyKey := randomUUIDForTest(t)
+
+	pending := insertPendingTransferWithKey(t, ctx, pool, idempotencyKey, senderID, recipientID, 3000)
+	if _, err := markTransferCompleted(ctx, pool, pending.ID, randomUUIDForTest(t)); err != nil {
+		t.Fatalf("markTransferCompleted: %v", err)
+	}
+
+	accountsClient := &fakeAccountsClient{
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
+			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		},
+	}
+
+	replayed, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000012", 3000)
+	if err != nil {
+		t.Fatalf("createTransfer: unexpected error: %v", err)
+	}
+	if outcome != createTransferReplayed {
+		t.Fatalf("outcome = %v, want createTransferReplayed", outcome)
+	}
+	if replayed.Status != "completed" {
+		t.Errorf("replayed.Status = %q, want \"completed\" (must reflect current settled state, not a stale pending snapshot)", replayed.Status)
+	}
+
+	if got := transferCount(t, ctx, pool, idempotencyKey); got != 1 {
+		t.Errorf("transfers rows = %d, want 1", got)
+	}
+}
+
+// TestCreateTransfer_ConcurrentDuplicate is the direct proof for this
+// sprint's core DoD item, mirroring ledger-svc's
+// TestExecuteTransfer_ConcurrentOverdraftPrevention concurrency-test style
+// (services/ledger-svc/ledger_test.go): it fires goroutines concurrently
+// instead of calling createTransfer sequentially, since only genuine
+// concurrent access exercises the race the UNIQUE constraint is meant to
+// catch — a sequential call sequence would pass even without the
+// unique-violation handling in createTransfer at all.
+func TestCreateTransfer_ConcurrentDuplicate(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	senderID := randomUUIDForTest(t)
+	recipientID := randomUUIDForTest(t)
+	idempotencyKey := randomUUIDForTest(t)
+	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
+
+	accountsClient := &fakeAccountsClient{
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
+			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		},
+		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
+			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: accountStatusActive}, nil
+		},
+	}
+
+	const attempts = 20
+	outcomes := make([]createTransferOutcome, attempts)
+	ids := make([]string, attempts)
+	errs := make([]error, attempts)
+
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func(i int) {
+			defer wg.Done()
+			transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000013", 2500)
+			outcomes[i] = outcome
+			ids[i] = transfer.ID
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	var created, replayed int
+	var wonID string
+	for i, outcome := range outcomes {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d: unexpected error: %v", i, errs[i])
+		}
+		switch outcome {
+		case createTransferOK:
+			created++
+			wonID = ids[i]
+		case createTransferReplayed:
+			replayed++
+		default:
+			t.Fatalf("goroutine %d: unexpected outcome %v", i, outcome)
+		}
+	}
+	if created != 1 {
+		t.Errorf("created = %d, want exactly 1", created)
+	}
+	if replayed != attempts-1 {
+		t.Errorf("replayed = %d, want %d", replayed, attempts-1)
+	}
+	for i, id := range ids {
+		if id != wonID {
+			t.Errorf("goroutine %d: transfer id = %q, want %q (same transfer as the winner)", i, id, wonID)
+		}
+	}
+
+	if got := transferCount(t, ctx, pool, idempotencyKey); got != 1 {
+		t.Errorf("transfers rows = %d, want exactly 1", got)
 	}
 }

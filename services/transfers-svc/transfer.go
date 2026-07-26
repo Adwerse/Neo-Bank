@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
-	crand "crypto/rand"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,6 +20,14 @@ const (
 	accountStatusActive = "active"
 	accountStatusClosed = "closed"
 )
+
+const uniqueViolation = "23505"
+
+// transfersIdempotencyKeyConstraint is Postgres's default name for a
+// single-column UNIQUE constraint (<table>_<column>_key), per the
+// transfers migration — not explicitly named there, same convention as
+// accounts-svc's accountsAccountNumberConstraint.
+const transfersIdempotencyKeyConstraint = "transfers_idempotency_key_key"
 
 const ledgerCallTimeout = 5 * time.Second
 
@@ -56,19 +66,38 @@ const (
 	createTransferSelfTransfer
 	createTransferRecipientClosed
 	createTransferSenderNotActive
+	createTransferReplayed  // an existing transfer was found for this idempotency key — do not re-settle, just return its current state
+	createTransferKeyReused // idempotency key reused with different parameters — client bug
 )
 
 // createTransfer validates a transfer request and, on success, inserts a
 // pending transfers row. It never moves any money: ledger-svc's atomic
-// ExecuteTransfer (wired in a later sprint) is the only place a balance is
-// actually checked or changed — checking it here would race that later
-// debit, since the balance could change between this check and the debit.
+// ExecuteTransfer (called separately, after this returns) is the only place
+// a balance is actually checked or changed — checking it here would race
+// that later debit, since the balance could change between this check and
+// the debit.
 //
-// idempotencyKey is caller-supplied purely to satisfy the transfers table's
-// NOT NULL UNIQUE column — there is no dedupe-on-existing-key logic yet
-// (that's a later sprint), so a retried request with a fresh key today
-// simply creates a second row.
+// idempotencyKey is caller-supplied and is the single source of truth for
+// "have I seen this exact request before" — see getTransferByIdempotencyKey
+// and the INSERT's unique-violation handling below for how a retried or
+// concurrently-duplicated request is detected and reconciled rather than
+// creating (or racing to create) a second row.
 func createTransfer(ctx context.Context, pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, idempotencyKey, senderAccountID, recipientAccountNumber string, amount int64) (Transfer, createTransferOutcome, error) {
+	// Fast path: a prior attempt with this exact key already ran (the
+	// common case — client retried after a dropped response). Skip
+	// re-validating and re-calling accounts-svc; just reconcile and return
+	// its current state. This is an optimization, not the correctness
+	// guarantee — see the INSERT's unique-violation handling below for
+	// that: two concurrent requests could both pass this check before
+	// either has inserted, so it alone cannot prevent a duplicate.
+	existing, found, err := getTransferByIdempotencyKey(ctx, pool, idempotencyKey)
+	if err != nil {
+		return Transfer{}, 0, err
+	}
+	if found {
+		return reconcileReplay(ctx, accountsClient, existing, senderAccountID, recipientAccountNumber, amount)
+	}
+
 	if amount <= 0 {
 		return Transfer{}, createTransferInvalidAmount, nil
 	}
@@ -103,9 +132,60 @@ func createTransfer(ctx context.Context, pool *pgxpool.Pool, accountsClient acco
 		idempotencyKey, senderAccountID, recipient.GetAccountId(), amount,
 	).Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation && pgErr.ConstraintName == transfersIdempotencyKeyConstraint {
+			// Lost the race: another request with the same key committed
+			// first. Postgres's constraint is the actual arbiter here, not
+			// the getTransferByIdempotencyKey check above.
+			winner, found, ferr := getTransferByIdempotencyKey(ctx, pool, idempotencyKey)
+			if ferr != nil {
+				return Transfer{}, 0, ferr
+			}
+			if !found {
+				return Transfer{}, 0, fmt.Errorf("idempotency key %s: unique violation but no row found", idempotencyKey)
+			}
+			return reconcileReplay(ctx, accountsClient, winner, senderAccountID, recipientAccountNumber, amount)
+		}
 		return Transfer{}, 0, fmt.Errorf("insert pending transfer: %w", err)
 	}
 	return t, createTransferOK, nil
+}
+
+func getTransferByIdempotencyKey(ctx context.Context, pool *pgxpool.Pool, idempotencyKey string) (Transfer, bool, error) {
+	var t Transfer
+	err := pool.QueryRow(ctx,
+		"SELECT id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at FROM transfers WHERE idempotency_key = $1",
+		idempotencyKey,
+	).Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Transfer{}, false, nil
+	}
+	if err != nil {
+		return Transfer{}, false, err
+	}
+	return t, true, nil
+}
+
+// reconcileReplay compares an existing transfer found by idempotency key
+// (via the fast path, or because this request lost the insert race) against
+// the CURRENT request's parameters. A mismatch means the key was reused for
+// a different transfer — a client bug — and must not silently return
+// someone else's transfer state. recipientAccountNumber is resolved fresh
+// (a cheap, read-only, side-effect-free call) purely to obtain the
+// account_id to compare, not to re-run any business validation — those only
+// apply to a genuinely new transfer, not a replay.
+func reconcileReplay(ctx context.Context, accountsClient accountsv1.AccountsServiceClient, existing Transfer, senderAccountID, recipientAccountNumber string, amount int64) (Transfer, createTransferOutcome, error) {
+	if existing.SenderAccountID != senderAccountID || existing.Amount != amount {
+		return Transfer{}, createTransferKeyReused, nil
+	}
+	recipient, err := accountsClient.ResolveAccountByNumber(ctx, &accountsv1.ResolveAccountByNumberRequest{AccountNumber: recipientAccountNumber})
+	if err != nil {
+		return Transfer{}, 0, fmt.Errorf("resolve recipient account for idempotency check: %w", err)
+	}
+	if recipient.GetAccountId() != existing.RecipientAccountID {
+		return Transfer{}, createTransferKeyReused, nil
+	}
+	return existing, createTransferReplayed, nil
 }
 
 type settlementOutcome int
@@ -211,17 +291,4 @@ func markTransferFailed(ctx context.Context, pool *pgxpool.Pool, id, failureReas
 		return Transfer{}, fmt.Errorf("mark transfer failed: %w", err)
 	}
 	return t, nil
-}
-
-// randomUUID mints a UUID v4 by hand, matching this repo's existing
-// convention (e.g. auth-svc's generateEventID, ledger_test.go's randomUUID)
-// of hand-rolling UUIDs rather than adding a uuid dependency.
-func randomUUID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := crand.Read(b); err != nil {
-		return "", err
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant 10xx (RFC 4122)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

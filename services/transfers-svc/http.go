@@ -11,6 +11,7 @@ import (
 )
 
 type createTransferRequest struct {
+	IdempotencyKey         string `json:"idempotency_key"`
 	SenderAccountID        string `json:"sender_account_id"`
 	RecipientAccountNumber string `json:"recipient_account_number"`
 	Amount                 int64  `json:"amount"`
@@ -38,14 +39,12 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-
-		idempotencyKey, err := randomUUID()
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+		if req.IdempotencyKey == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing idempotency_key")
 			return
 		}
 
-		transfer, outcome, err := createTransfer(r.Context(), pool, accountsClient, idempotencyKey, req.SenderAccountID, req.RecipientAccountNumber, req.Amount)
+		transfer, outcome, err := createTransfer(r.Context(), pool, accountsClient, req.IdempotencyKey, req.SenderAccountID, req.RecipientAccountNumber, req.Amount)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
@@ -65,6 +64,16 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			return
 		case createTransferSenderNotActive:
 			writeJSONError(w, http.StatusConflict, "sender account is not active")
+			return
+		case createTransferKeyReused:
+			writeJSONError(w, http.StatusUnprocessableEntity, "idempotency key already used with different parameters")
+			return
+		case createTransferReplayed:
+			// A prior request with this exact key already ran — return its
+			// current state as-is, without re-triggering settleTransfer.
+			// That's the whole point: a replay must never call ledger twice.
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(createTransferResponse{Transfer: transfer})
 			return
 		}
 
