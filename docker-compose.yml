@@ -87,6 +87,11 @@ services:
       dockerfile: services/fraud-svc/Dockerfile
     ports:
       - "8085:8085"
+    environment:
+      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   notifications-svc:
     build:
