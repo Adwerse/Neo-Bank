@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
@@ -79,6 +80,18 @@ type fakeLedgerClient struct {
 
 func (f *fakeLedgerClient) ExecuteTransfer(ctx context.Context, req *ledgerv1.ExecuteTransferRequest, opts ...grpc.CallOption) (*ledgerv1.ExecuteTransferResponse, error) {
 	return f.executeTransferFunc(ctx, req)
+}
+
+// fakeFraudClient implements fraudv1.FraudServiceClient without a live
+// fraud-svc, embedding the real interface as nil so only the one method
+// checkTransferFraud actually calls needs overriding.
+type fakeFraudClient struct {
+	fraudv1.FraudServiceClient
+	checkTransferFunc func(ctx context.Context, req *fraudv1.CheckTransferRequest) (*fraudv1.CheckTransferResponse, error)
+}
+
+func (f *fakeFraudClient) CheckTransfer(ctx context.Context, req *fraudv1.CheckTransferRequest, opts ...grpc.CallOption) (*fraudv1.CheckTransferResponse, error) {
+	return f.checkTransferFunc(ctx, req)
 }
 
 // insertPendingTransfer inserts a transfers row directly (bypassing
@@ -465,6 +478,145 @@ func TestSettleTransfer_Uncertain(t *testing.T) {
 				t.Errorf("row.FailureReason = %v, want nil", row.FailureReason)
 			}
 		})
+	}
+}
+
+func TestCheckTransferFraud_Approved(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 1000)
+
+	fraudClient := &fakeFraudClient{
+		checkTransferFunc: func(ctx context.Context, req *fraudv1.CheckTransferRequest) (*fraudv1.CheckTransferResponse, error) {
+			if req.GetTransferId() != pending.ID || req.GetAccountId() != pending.SenderAccountID || req.GetAmount() != pending.Amount {
+				t.Errorf("CheckTransfer request = %+v, want transfer_id=%s account_id=%s amount=%d", req, pending.ID, pending.SenderAccountID, pending.Amount)
+			}
+			return &fraudv1.CheckTransferResponse{Decision: "approve", Reason: "no rule triggered"}, nil
+		},
+	}
+
+	checked, outcome, err := checkTransferFraud(ctx, pool, fraudClient, pending)
+	if err != nil {
+		t.Fatalf("checkTransferFraud: unexpected error: %v", err)
+	}
+	if outcome != fraudCheckApproved {
+		t.Fatalf("outcome = %v, want fraudCheckApproved", outcome)
+	}
+	if checked.Status != "pending" {
+		t.Errorf("checked.Status = %q, want \"pending\" (unchanged — settleTransfer writes the terminal state)", checked.Status)
+	}
+
+	row := getTransferByID(t, ctx, pool, pending.ID)
+	if row.Status != "pending" {
+		t.Errorf("row.Status = %q, want \"pending\" (checkTransferFraud must not write anything on approve)", row.Status)
+	}
+}
+
+func TestCheckTransferFraud_Rejected(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 600000)
+
+	fraudClient := &fakeFraudClient{
+		checkTransferFunc: func(ctx context.Context, req *fraudv1.CheckTransferRequest) (*fraudv1.CheckTransferResponse, error) {
+			return &fraudv1.CheckTransferResponse{
+				Decision:      "reject",
+				TriggeredRule: "amount_threshold",
+				Reason:        "amount_threshold: observed 600000 exceeds threshold 500000",
+			}, nil
+		},
+	}
+
+	checked, outcome, err := checkTransferFraud(ctx, pool, fraudClient, pending)
+	if err != nil {
+		t.Fatalf("checkTransferFraud: unexpected error: %v", err)
+	}
+	if outcome != fraudCheckRejected {
+		t.Fatalf("outcome = %v, want fraudCheckRejected", outcome)
+	}
+	if checked.Status != "rejected" {
+		t.Errorf("checked.Status = %q, want \"rejected\"", checked.Status)
+	}
+	if checked.FailureReason == nil || *checked.FailureReason != "amount_threshold" {
+		t.Errorf("checked.FailureReason = %v, want \"amount_threshold\"", checked.FailureReason)
+	}
+
+	row := getTransferByID(t, ctx, pool, pending.ID)
+	if row.Status != "rejected" {
+		t.Errorf("row.Status = %q, want \"rejected\"", row.Status)
+	}
+	if row.FailureReason == nil || *row.FailureReason != "amount_threshold" {
+		t.Errorf("row.FailureReason = %v, want \"amount_threshold\"", row.FailureReason)
+	}
+	if row.LedgerTransactionID != nil {
+		t.Errorf("row.LedgerTransactionID = %v, want nil (ledger must never be called on a fraud reject)", row.LedgerTransactionID)
+	}
+}
+
+func TestCheckTransferFraud_Uncertain(t *testing.T) {
+	for _, code := range []codes.Code{codes.Internal, codes.Unavailable} {
+		t.Run(code.String(), func(t *testing.T) {
+			pool := newTestPool(t)
+			ctx := context.Background()
+
+			pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 1000)
+
+			fraudClient := &fakeFraudClient{
+				checkTransferFunc: func(ctx context.Context, req *fraudv1.CheckTransferRequest) (*fraudv1.CheckTransferResponse, error) {
+					return nil, status.Error(code, "simulated fraud-svc failure")
+				},
+			}
+
+			checked, outcome, err := checkTransferFraud(ctx, pool, fraudClient, pending)
+			if err != nil {
+				t.Fatalf("checkTransferFraud: unexpected error: %v", err)
+			}
+			if outcome != fraudCheckUncertain {
+				t.Fatalf("outcome = %v, want fraudCheckUncertain", outcome)
+			}
+			if checked.Status != "pending" {
+				t.Errorf("checked.Status = %q, want \"pending\" (unchanged)", checked.Status)
+			}
+
+			row := getTransferByID(t, ctx, pool, pending.ID)
+			if row.Status != "pending" {
+				t.Errorf("row.Status = %q, want \"pending\" (checkTransferFraud must not write anything when uncertain)", row.Status)
+			}
+			if row.FailureReason != nil {
+				t.Errorf("row.FailureReason = %v, want nil", row.FailureReason)
+			}
+		})
+	}
+}
+
+func TestCheckTransferFraud_UnexpectedDecision(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	pending := insertPendingTransfer(t, ctx, pool, randomUUIDForTest(t), randomUUIDForTest(t), 1000)
+
+	fraudClient := &fakeFraudClient{
+		checkTransferFunc: func(ctx context.Context, req *fraudv1.CheckTransferRequest) (*fraudv1.CheckTransferResponse, error) {
+			return &fraudv1.CheckTransferResponse{Decision: ""}, nil
+		},
+	}
+
+	checked, outcome, err := checkTransferFraud(ctx, pool, fraudClient, pending)
+	if err != nil {
+		t.Fatalf("checkTransferFraud: unexpected error: %v", err)
+	}
+	if outcome != fraudCheckUncertain {
+		t.Fatalf("outcome = %v, want fraudCheckUncertain (fail closed on an unrecognized decision)", outcome)
+	}
+	if checked.Status != "pending" {
+		t.Errorf("checked.Status = %q, want \"pending\" (unchanged)", checked.Status)
+	}
+
+	row := getTransferByID(t, ctx, pool, pending.ID)
+	if row.Status != "pending" {
+		t.Errorf("row.Status = %q, want \"pending\" (must not write anything on an unrecognized decision)", row.Status)
 	}
 }
 

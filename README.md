@@ -158,21 +158,23 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
 
 `codes.Unavailable`, `codes.DeadlineExceeded` и `codes.Unknown` — принципиально другой случай: `ledger-svc` их сам никогда не возвращает, они возникают только на уровне транспорта (не достучались, либо не дождались ответа за `ledgerCallTimeout` = 5 секунд). Здесь `transfers-svc` **не знает**, исполнился перевод или нет: запрос мог не дойти, а мог дойти, исполниться, и уже ответ потеряться на обратном пути. Пометить `failed` в этом случае — соврать, если деньги реально ушли; пометить `completed` без `transaction_id` — соврать в другую сторону. Поэтому запись остаётся `pending` как есть (никакой записи в БД не делается вообще), а клиенту возвращается `202 Accepted` с телом `{"status": "pending", "message": "transfer status unknown, still processing"}`.
 
-**TODO** (за скоупом этого шага): по-настоящему разрешить неопределённость может только сверка с `ledger-svc` — например, периодический опрос `GetHistory(account_id)` на предмет проводки с ожидаемой суммой в окне времени вокруг `created_at` записи, либо (чище) `ledger-svc` должен научиться принимать идемпотентный request-id и отдавать по нему уже исполненный результат повторно — сейчас `ExecuteTransfer` такого параметра не принимает. Реализация reconciliation-джобы — отдельная задача.
+**TODO** (за скоупом этого шага): по-настоящему разрешить неопределённость может только сверка с `ledger-svc` — например, периодический опрос `GetHistory(account_id)` на предмет проводки с ожидаемой суммой в окне времени вокруг `created_at` записи, либо (чище) `ledger-svc` должен научиться принимать идемпотентный request-id и отдавать по нему уже исполненный результат повторно — сейчас `ExecuteTransfer` такого параметра не принимает. Реализация reconciliation-джобы — отдельная задача. **То же самое «зависшее pending» применимо теперь и к неопределённому исходу fraud-проверки** (см. «fraud-check перед ledger» ниже) — один и тот же класс проблемы в двух местах потока, решается одной и той же будущей reconciliation-задачей, а не отдельно для каждого.
 
 ### Проверка вручную
 ```bash
-# создать перевод (пока внутренний контракт: sender_account_id передаётся явно,
-# а не выводится из X-User-Id — это следующий шаг)
-curl -s -X POST http://localhost:8084/ \
+# через Gateway: sender резолвится из X-User-Id, который Gateway кладёт
+# сам из JWT после /auth/login — см. "API-клиент"/JWT-мидлварь выше
+curl -s -X POST http://localhost:8080/transfers/ \
+  -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
-  -d '{"sender_account_id":"<uuid>","recipient_account_number":"NB...","amount":1000}'
+  -H "Idempotency-Key: <uuid>" \
+  -d '{"recipient_account_number":"NB...","amount":1000}'
 ```
 Успешный перевод — `201` и `"status":"completed"` с заполненным `ledger_transaction_id`; сумма больше баланса — `201` и `"status":"failed","failure_reason":"insufficient_funds"`; оба случая проверяются balance-diff через `GET /accounts/me` обеих сторон (см. `cmd/devtopup` выше — им удобно завести отправителю стартовый баланс).
 
-## fraud-svc: подключение к Postgres, схема (пока без логики проверок)
+## fraud-svc: подключение к Postgres, схема
 
-`fraud-svc` получил Postgres-соединение и схему (`pgx/v5` + `golang-migrate`, тот же паттерн, что и у `ledger-svc`/`accounts-svc`/`transfers-svc`: миграции встроены через `//go:embed migrations/*.sql` и накатываются автоматически при старте, таблица версий миграций — namespaced `schema_migrations_fraud_svc`, т.к. все сервисы делят одну физическую БД `neobank`). Логика проверок появилась следующим шагом (см. «fraud-svc: rule-based скоринг переводов» ниже); в поток переводов сервис пока не встроен — это шаг после.
+`fraud-svc` получил Postgres-соединение и схему (`pgx/v5` + `golang-migrate`, тот же паттерн, что и у `ledger-svc`/`accounts-svc`/`transfers-svc`: миграции встроены через `//go:embed migrations/*.sql` и накатываются автоматически при старте, таблица версий миграций — namespaced `schema_migrations_fraud_svc`, т.к. все сервисы делят одну физическую БД `neobank`). Логика проверок появилась следующим шагом (см. «fraud-svc: rule-based скоринг переводов» ниже), а интеграция в поток перевода — ещё одним шагом после (см. «fraud-check перед ledger» в самом низу).
 
 Две таблицы:
 - **`fraud_rules`** — конфигурация правил (`rule_type` — `amount_threshold` / `velocity_count` / `velocity_sum`, уникален; `enabled`; `threshold_value` — сумма в центах или количество, в зависимости от типа правила; `window_seconds` — окно для velocity-правил, `NULL` для порога по разовой сумме). Мутируемая таблица, редактируется вручную/будущим admin-API.
@@ -189,7 +191,7 @@ curl -s -X POST http://localhost:8084/ \
 
 ## fraud-svc: rule-based скоринг переводов (`CheckTransfer`)
 
-`fraud-svc` теперь считает решения, а не только хранит схему. gRPC-контракт — `proto/fraud/v1/fraud.proto` (`fraud.v1.FraudService.CheckTransfer(transfer_id, account_id, amount) → {decision, triggered_rule, reason}`), сервер поднят на отдельном порту (`GRPC_PORT`, дефолт `9085`) параллельно с уже существующим HTTP (`8085`) — тот же паттерн, что у `accounts-svc` (HTTP и gRPC на разных портах в одном процессе, `grpc.NewServer()` без опций, стандартный `grpc.health.v1.Health` + `reflection.Register`). Пока **никто его не вызывает** — интеграция с `transfers-svc` в потоке перевода — следующий шаг.
+`fraud-svc` теперь считает решения, а не только хранит схему. gRPC-контракт — `proto/fraud/v1/fraud.proto` (`fraud.v1.FraudService.CheckTransfer(transfer_id, account_id, amount) → {decision, triggered_rule, reason}`), сервер поднят на отдельном порту (`GRPC_PORT`, дефолт `9085`) параллельно с уже существующим HTTP (`8085`) — тот же паттерн, что у `accounts-svc` (HTTP и gRPC на разных портах в одном процессе, `grpc.NewServer()` без опций, стандартный `grpc.health.v1.Health` + `reflection.Register`). `transfers-svc` теперь его вызывает — см. «fraud-check перед ledger (transfers-svc → fraud-svc)» в конце этого раздела.
 
 ### Принцип: rule-based, не ML
 
@@ -231,6 +233,72 @@ grpcurl -plaintext -d '{"transfer_id": "<uuid>", "account_id": "<uuid>", "amount
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/fraud-svc/... -v
+```
+
+## fraud-check перед ledger (transfers-svc → fraud-svc)
+
+`transfers-svc` теперь вызывает `fraud-svc.CheckTransfer` как часть создания перевода, **после** того как pending-запись уже вставлена, но **до** вызова `ledger-svc.ExecuteTransfer`:
+
+```
+createTransfer() → pending-запись создана
+        ↓
+checkTransferFraud() → approve   → settleTransfer() как раньше (completed/failed/uncertain)
+                      → reject   → status='rejected', ledger вообще НЕ вызывается
+                      → uncertain (fraud-svc недоступен) → запись остаётся pending, ledger НЕ вызывается
+```
+
+Порядок специально такой, а не «сначала fraud, потом создать запись»: у отклонённого перевода остаётся строка с причиной (пользователь видит в истории, что было и почему заблокировано), но при этом деньги гарантированно не двигались, потому что до вызова ledger дело просто не доходит. Это же делает reject-путь compensation-free — откатывать нечего, потому что трогать было нечего; правильная saga экономит на компенсации, ставя рискованный шаг (ledger) последним.
+
+### `rejected` — новый статус, отдельно от `failed`
+
+`failed` — техническая неудача или недостаток средств (уровень `ledger-svc`); `rejected` — заблокировано fraud-проверкой. Это разные вещи и для пользователя, и для аналитики, поэтому не схлопнуты в один статус: миграция `000003_add_rejected_transfer_status` добавляет `'rejected'` в CHECK на `transfers.status`. Отдельной колонки под причину не заведено — `failure_reason` переиспользован: он и раньше хранил «почему не completed» (коды `ledger-svc`), теперь при `rejected` там лежит `triggered_rule` от fraud (например, `"amount_threshold"`). Колонка `status` сама по себе всегда однозначно говорит, какой словарь смотреть — заводить `rejection_reason` ради чисто косметического разделения означало бы трогать все `RETURNING`/`SELECT` в файле ради нулевой смысловой пользы.
+
+### Fail-closed vs fail-open — осознанный выбор
+
+Если `fraud-svc` недоступен или сам вернул ошибку (`codes.Internal` — единственный код, который он вообще возвращает, других деловых кодов у него, в отличие от `ledger-svc`, нет), у `transfers-svc` есть буквально два варианта:
+
+- **fail-open** — пропустить перевод без проверки. Доступнее (перевод не встаёт колом, если fraud-svc упал), но это дыра: злоумышленник, зная, что можно уронить fraud-svc (или просто попасть в окно реального сбоя), проводит перевод вообще без всякой проверки.
+- **fail-closed** — не пропускать. Безопаснее, но перевод не завершается, пока fraud-svc не ответит.
+
+Выбран **fail-closed**: перевод остаётся `pending` (никакой записи не делается — та же логика, что и у неопределённого исхода `ledger-svc`), клиенту — `202` с `"message": "fraud check unavailable, transfer still pending"`. Деньги в этом случае не двигались вообще: `ledger-svc` ещё не вызывался, поэтому даже откатывать нечего. Настоящий банк выберет именно так: «недоступна проверка на мошенничество» — это состояние, в котором деньги должны стоять на месте, а не состояние, которое молча пропускают ради доступности. Та же причина, по которой `checkTransferFraud` не делает по кодам ошибок разбор наподобие `settleTransfer` (там `ledger-svc` кодирует бизнес-исходы через grpc-статусы, здесь у `fraud-svc` такого нет — любая ошибка равнозначна «не смог посчитать», и это ровно то, что должно приводить к fail-closed, а не к угадыванию).
+
+### Идемпотентность
+
+Fraud-проверка вызывается **строго после** того, как переключатель исходов `createTransfer` в `http.go` уже обработал все ранние `return` (включая `createTransferReplayed`) — то есть ровно там же, где сегодня уже стоит вызов `settleTransfer`. Повтор с тем же `Idempotency-Key` короткоживущим путём возвращает текущее состояние существующей записи и не доходит до вызова fraud вообще — тем же механизмом, что уже не даёт повтору вызвать `ledger` дважды. Замеченный, но не устраняемый на этом шаге нюанс: если запись всё ещё `pending` из-за неопределённого исхода fraud-проверки, повтор так и будет возвращать тот же `pending`-снимок, не пытаясь перепроверить — тот же класс проблемы, что уже описан для неопределённого исхода `ledger-svc` выше, и решается той же будущей reconciliation-задачей, не отдельным патчем здесь.
+
+### Проверка вручную
+```bash
+# легитимный перевод — approve, деньги переходят
+curl -s -X POST http://localhost:8080/transfers/ \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <uuid>" \
+  -d '{"recipient_account_number":"NB...","amount":1000}'
+# {"status":"completed","ledger_transaction_id":"..."}
+
+# перевод выше порога — reject, ledger не вызывается
+curl -s -X POST http://localhost:8080/transfers/ \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <uuid>" \
+  -d '{"recipient_account_number":"NB...","amount":600000}'
+# {"status":"rejected","failure_reason":"amount_threshold"}
+
+# fraud-svc недоступен
+docker compose stop fraud-svc
+curl -s -X POST http://localhost:8080/transfers/ \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <uuid>" \
+  -d '{"recipient_account_number":"NB...","amount":1000}'
+# 202 {"status":"pending","message":"fraud check unavailable, transfer still pending"}
+docker compose start fraud-svc
+```
+Проверено вручную на полном стеке (два реальных пользователя через `/auth/register` → `/auth/verify-email` → `/auth/login`, отправитель профинансирован через `cmd/devtopup`): легитимный перевод — `completed`, в `fraud_checks` строка `approve`; перевод на 600000 — `rejected`/`amount_threshold`, балансы обеих сторон не изменились, `ledger_transaction_id` пуст; шесть быстрых мелких переводов подряд — 6-й `rejected`/`velocity_count`; остановленный `fraud-svc` — `202 pending`, баланс не изменился, `fraud_checks` для этого перевода пуст; повтор того же `Idempotency-Key` (и после reject, и после fraud-недоступности) — тот же ответ, счётчик строк `fraud_checks` для этого `transfer_id` не увеличился.
+
+### Тесты
+
+`services/transfers-svc/transfer_test.go` — `fakeFraudClient` (тот же паттерн, что `fakeAccountsClient`/`fakeLedgerClient`: встраивает реальный интерфейс как nil, переопределяет только `CheckTransfer`). `TestCheckTransferFraud_Approved`/`_Rejected`/`_Uncertain` (таблично по `codes.Internal`/`codes.Unavailable`, доказывая, что fail-closed срабатывает на **любой** ошибке, не только на документированной)/`_UnexpectedDecision` (незнакомое значение `decision` — тоже fail-closed, а не молчаливый approve). Обработчик HTTP отдельно не тестируется — в репозитории вообще нет тестов на уровне HTTP-хендлера/gRPC-сервера (только на уровень бизнес-логики ниже), и гарантия «повтор не вызывает fraud дважды» здесь структурная (ранний `return` до места вызова), а не отдельный тест — то же самое, что уже верно для `settleTransfer`.
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/transfers-svc/... -v
 ```
 
 ## Фронтенд

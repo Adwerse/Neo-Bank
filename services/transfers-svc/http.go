@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
@@ -53,7 +54,7 @@ func resolveSenderAccountID(ctx context.Context, accountsClient accountsv1.Accou
 // the request body — a client must never be able to send money "as" someone
 // else. Idempotency-Key is a required header, not a body field, matching
 // the HTTP convention for this kind of retry-safety token.
-func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, ledgerClient ledgerv1.LedgerServiceClient) http.HandlerFunc {
+func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, fraudClient fraudv1.FraudServiceClient, ledgerClient ledgerv1.LedgerServiceClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -109,6 +110,33 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			// That's the whole point: a replay must never call ledger twice.
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(createTransferResponse{Transfer: transfer})
+			return
+		}
+
+		// Must stay strictly after the outcome switch's early returns above
+		// (createTransferReplayed included) — a replay must never trigger a
+		// second fraud check, both to avoid re-charging an external check
+		// and because a repeat call would itself feed fraud-svc's own
+		// velocity counters.
+		transfer, fraudOutcome, err := checkTransferFraud(r.Context(), pool, fraudClient, transfer)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		switch fraudOutcome {
+		case fraudCheckRejected:
+			// Matches "failed" also returning 201 below: the transfer
+			// resource was created either way, the JSON body's status
+			// field carries the actual news.
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(createTransferResponse{Transfer: transfer})
+			return
+		case fraudCheckUncertain:
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(createTransferResponse{
+				Transfer: transfer,
+				Message:  "fraud check unavailable, transfer still pending",
+			})
 			return
 		}
 

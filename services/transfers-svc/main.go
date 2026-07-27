@@ -13,12 +13,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 const (
 	defaultPort         = "8084"
 	defaultAccountsAddr = "accounts-svc:9082"
+	defaultFraudAddr    = "fraud-svc:9085"
 	defaultLedgerAddr   = "ledger-svc:8083"
 )
 
@@ -30,6 +32,10 @@ func main() {
 	accountsAddr := os.Getenv("ACCOUNTS_GRPC_ADDR")
 	if accountsAddr == "" {
 		accountsAddr = defaultAccountsAddr
+	}
+	fraudAddr := os.Getenv("FRAUD_GRPC_ADDR")
+	if fraudAddr == "" {
+		fraudAddr = defaultFraudAddr
 	}
 	ledgerAddr := os.Getenv("LEDGER_GRPC_ADDR")
 	if ledgerAddr == "" {
@@ -58,6 +64,14 @@ func main() {
 	}
 	defer accountsConn.Close()
 	accountsClient := accountsv1.NewAccountsServiceClient(accountsConn)
+
+	// Same lazy-dial reasoning as accountsConn above.
+	fraudConn, err := grpc.NewClient(fraudAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("transfers-svc: failed to create fraud gRPC client for %s: %v", fraudAddr, err)
+	}
+	defer fraudConn.Close()
+	fraudClient := fraudv1.NewFraudServiceClient(fraudConn)
 
 	// Same lazy-dial reasoning as accountsConn above.
 	ledgerConn, err := grpc.NewClient(ledgerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -100,7 +114,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "transfers-svc"})
 	})
 
-	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, ledgerClient))
+	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, fraudClient, ledgerClient))
 	mux.HandleFunc("GET /", listTransfersHandler(pool, accountsClient))
 
 	log.Printf("transfers-svc listening on :%s", port)

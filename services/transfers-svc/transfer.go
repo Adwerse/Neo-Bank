@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
@@ -30,6 +32,7 @@ const uniqueViolation = "23505"
 const transfersIdempotencyKeyConstraint = "transfers_idempotency_key_key"
 
 const ledgerCallTimeout = 5 * time.Second
+const fraudCallTimeout = 5 * time.Second
 
 const (
 	failureReasonInsufficientFunds = "insufficient_funds"
@@ -51,6 +54,11 @@ type Transfer struct {
 	RecipientAccountID  string    `json:"recipient_account_id"`
 	Amount              int64     `json:"amount"`
 	Status              string    `json:"status"`
+	// FailureReason holds one of two disjoint vocabularies depending on
+	// Status: a ledger failure code (e.g. "insufficient_funds") when
+	// "failed", or fraud-svc's triggered_rule (e.g. "amount_threshold")
+	// when "rejected" — the two statuses are mutually exclusive, so which
+	// vocabulary applies is never ambiguous.
 	FailureReason       *string   `json:"failure_reason,omitempty"`
 	LedgerTransactionID *string   `json:"ledger_transaction_id,omitempty"`
 	CreatedAt           time.Time `json:"created_at"`
@@ -318,6 +326,79 @@ func markTransferFailed(ctx context.Context, pool *pgxpool.Pool, id, failureReas
 	).Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer failed: %w", err)
+	}
+	return t, nil
+}
+
+type fraudCheckOutcome int
+
+const (
+	fraudCheckApproved fraudCheckOutcome = iota
+	fraudCheckRejected
+	fraudCheckUncertain
+)
+
+// checkTransferFraud calls fraud-svc for an already-created pending transfer
+// and, on a definite reject, writes the terminal 'rejected' status itself —
+// mirroring settleTransfer's shape (call + write the terminal state on a
+// definite answer). It must only ever be called for a freshly created
+// transfer, never for a replayed one (see the call site in http.go): a
+// replay must not run fraud-svc a second time, both to avoid double-charging
+// an external check and because a repeated approve/reject call would itself
+// feed fraud-svc's own velocity counters.
+//
+// fraud-svc's contract (services/fraud-svc/grpc_server.go) has exactly one
+// error meaning today: codes.Internal means scoring failed, full stop —
+// there is no ledger-style set of business-error codes to switch on, so any
+// error at all here means "couldn't get an answer," not a specific business
+// outcome. This project fails closed: an unreachable/erroring fraud-svc must
+// not silently approve, so the transfer stays pending, untouched, exactly
+// like settleTransfer's own transport-failure branch — a definite decision
+// is never guessed at.
+func checkTransferFraud(ctx context.Context, pool *pgxpool.Pool, fraudClient fraudv1.FraudServiceClient, transfer Transfer) (Transfer, fraudCheckOutcome, error) {
+	ctx, cancel := context.WithTimeout(ctx, fraudCallTimeout)
+	defer cancel()
+
+	resp, err := fraudClient.CheckTransfer(ctx, &fraudv1.CheckTransferRequest{
+		TransferId: transfer.ID,
+		AccountId:  transfer.SenderAccountID,
+		Amount:     transfer.Amount,
+	})
+	if err != nil {
+		// Do not know whether fraud-svc would have approved or rejected —
+		// leave the row exactly as it is (pending), same as
+		// settleTransfer's transport-failure branch.
+		return transfer, fraudCheckUncertain, nil
+	}
+
+	switch resp.GetDecision() {
+	case "approve":
+		return transfer, fraudCheckApproved, nil
+	case "reject":
+		updated, dbErr := markTransferRejected(ctx, pool, transfer.ID, resp.GetTriggeredRule())
+		if dbErr != nil {
+			return Transfer{}, 0, dbErr
+		}
+		return updated, fraudCheckRejected, nil
+	default:
+		// A contract/version-skew bug (fraud-svc returned neither "approve"
+		// nor "reject"), not a real outcome — worth operator visibility,
+		// unlike a plain transport failure. Fail closed rather than guess.
+		log.Printf("transfers-svc: checkTransferFraud: unexpected decision %q for transfer %s", resp.GetDecision(), transfer.ID)
+		return transfer, fraudCheckUncertain, nil
+	}
+}
+
+func markTransferRejected(ctx context.Context, pool *pgxpool.Pool, id, triggeredRule string) (Transfer, error) {
+	var t Transfer
+	err := pool.QueryRow(ctx,
+		`UPDATE transfers SET status = 'rejected', failure_reason = $1, updated_at = now()
+		 WHERE id = $2
+		 RETURNING id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`,
+		triggeredRule, id,
+	).Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer rejected: %w", err)
 	}
 	return t, nil
 }
