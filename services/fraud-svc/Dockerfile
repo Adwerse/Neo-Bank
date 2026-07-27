@@ -1,6 +1,5 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY pkg/health ./pkg/health
 COPY services/fraud-svc ./services/fraud-svc
 WORKDIR /src/services/fraud-svc
 RUN go build -o /out/server .
