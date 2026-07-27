@@ -172,7 +172,7 @@ curl -s -X POST http://localhost:8084/ \
 
 ## fraud-svc: подключение к Postgres, схема (пока без логики проверок)
 
-`fraud-svc` получил Postgres-соединение и схему (`pgx/v5` + `golang-migrate`, тот же паттерн, что и у `ledger-svc`/`accounts-svc`/`transfers-svc`: миграции встроены через `//go:embed migrations/*.sql` и накатываются автоматически при старте, таблица версий миграций — namespaced `schema_migrations_fraud_svc`, т.к. все сервисы делят одну физическую БД `neobank`). Сам сервис пока ничего не проверяет и не участвует в потоке переводов — это следующий шаг.
+`fraud-svc` получил Postgres-соединение и схему (`pgx/v5` + `golang-migrate`, тот же паттерн, что и у `ledger-svc`/`accounts-svc`/`transfers-svc`: миграции встроены через `//go:embed migrations/*.sql` и накатываются автоматически при старте, таблица версий миграций — namespaced `schema_migrations_fraud_svc`, т.к. все сервисы делят одну физическую БД `neobank`). Логика проверок появилась следующим шагом (см. «fraud-svc: rule-based скоринг переводов» ниже); в поток переводов сервис пока не встроен — это шаг после.
 
 Две таблицы:
 - **`fraud_rules`** — конфигурация правил (`rule_type` — `amount_threshold` / `velocity_count` / `velocity_sum`, уникален; `enabled`; `threshold_value` — сумма в центах или количество, в зависимости от типа правила; `window_seconds` — окно для velocity-правил, `NULL` для порога по разовой сумме). Мутируемая таблица, редактируется вручную/будущим admin-API.
@@ -186,6 +186,52 @@ curl -s -X POST http://localhost:8084/ \
 | `velocity_sum` | 1000000 (€10,000 в центах) | 3600 (1 час) | вывод счёта серией переводов, каждый из которых по отдельности ниже порога разовой суммы |
 
 `GET /healthz` теперь проверяет реальное соединение с Postgres (`SELECT 1` с таймаутом 2с, `503` при ошибке) — как и у остальных Postgres-сервисов, вместо DB-less обработчика из `pkg/health`.
+
+## fraud-svc: rule-based скоринг переводов (`CheckTransfer`)
+
+`fraud-svc` теперь считает решения, а не только хранит схему. gRPC-контракт — `proto/fraud/v1/fraud.proto` (`fraud.v1.FraudService.CheckTransfer(transfer_id, account_id, amount) → {decision, triggered_rule, reason}`), сервер поднят на отдельном порту (`GRPC_PORT`, дефолт `9085`) параллельно с уже существующим HTTP (`8085`) — тот же паттерн, что у `accounts-svc` (HTTP и gRPC на разных портах в одном процессе, `grpc.NewServer()` без опций, стандартный `grpc.health.v1.Health` + `reflection.Register`). Пока **никто его не вызывает** — интеграция с `transfers-svc` в потоке перевода — следующий шаг.
+
+### Принцип: rule-based, не ML
+
+Правила из `fraud_rules` проверяются в фиксированном порядке — `amount_threshold` → `velocity_count` → `velocity_sum` — и **первое сработавшее правило сразу даёт `reject`**, дальше проверка не идёт. Это делает решение объяснимым: `triggered_rule` всегда называет ровно одно правило, а не «какую-то комбинацию» нескольких. Отключённые правила (`enabled = false`) пропускаются целиком.
+
+- **`amount_threshold`**: `amount > threshold_value` → reject. Разовый перевод выше порога.
+- **`velocity_count`**: количество одобренных проверок этого `account_id` за `window_seconds`, **плюс сама эта проверка** (т.е. «а если одобрить и её»), превышает `threshold_value` → reject.
+- **`velocity_sum`**: то же самое, но сумма одобренных переводов за окно (плюс сумма текущего) вместо количества.
+
+Источник данных для обоих velocity-правил — **собственная** таблица `fraud_checks` (`WHERE decision = 'approve'`), не БД `transfers-svc`: каждый сервис владеет своими данными и считает по ним, чужая БД не источник для чужой логики.
+
+Наблюдаемое значение для каждого фактически проверенного правила (включая то, которое сработало) кладётся в `details` (JSONB) вместе с порогом и окном — постфактум видно не только что заблокировано, но и что именно было насчитано.
+
+### Fail-closed, а не fail-open
+
+Если `fraud-svc` не может посчитать решение (ошибка Postgres на любом шаге — чтение правил, подсчёт velocity, запись лога), `checkTransfer` возвращает ошибку, а RPC — grpc-статус `codes.Internal`, а **не** молчаливый `approve`. Чтение правил, velocity-подсчёты и запись в `fraud_checks` обёрнуты в одну транзакцию: либо решение целиком посчитано и залогировано, либо не сделано ничего — частичной записи без итогового решения не бывает. Что делать при недоступном fraud-svc (пропустить перевод, отклонить, поставить в очередь) — решает вызывающий (`transfers-svc`), не сам fraud-svc.
+
+### Каждая проверка — строка в `fraud_checks`
+
+И `approve`, и `reject` пишутся в лог, не только отклонённые — это то, что вообще делает возможным подсчёт velocity-правил (им нужна полная история одобренных проверок), и то же самое, что нужно для аудируемости из предыдущего шага.
+
+### Проверка вручную
+```bash
+grpcurl -plaintext localhost:9085 list
+
+grpcurl -plaintext -d '{"transfer_id": "<uuid>", "account_id": "<uuid>", "amount": 1000}' \
+  localhost:9085 fraud.v1.FraudService/CheckTransfer
+# {"decision": "approve", "reason": "no rule triggered"}
+
+grpcurl -plaintext -d '{"transfer_id": "<uuid>", "account_id": "<uuid>", "amount": 600000}' \
+  localhost:9085 fraud.v1.FraudService/CheckTransfer
+# {"decision": "reject", "triggeredRule": "amount_threshold", "reason": "amount_threshold: observed 600000 exceeds threshold 500000"}
+```
+Проверено вручную (через образ `fullstorydev/grpcurl` в docker-сети `neo-bank_default`, поскольку локально `grpcurl` не установлен): оба вызова выше отработали как описано, и `SELECT * FROM fraud_checks WHERE account_id = '<uuid>'` показал обе строки — `approve` и `reject` — с ожидаемыми `decision`/`triggered_rule`.
+
+### Тесты
+
+`services/fraud-svc/fraud_test.go` — юнит-тесты на реальном Postgres (конвенция репозитория: `DATABASE_URL`, тест скипается, если переменная не задана), по одному сценарию на каждое правило: перевод выше порога → `reject`/`amount_threshold`; 6-й перевод в пятиминутном окне → `reject`/`velocity_count`; сумма выше лимита в часовом окне → `reject`/`velocity_sum`; обычный перевод → `approve`; отключённое правило пропускается; отменённый контекст (симуляция сбоя БД без реального отключения Postgres) → ошибка и **ни одной** записи в `fraud_checks` (fail-closed, без частичной записи).
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/fraud-svc/... -v
+```
 
 ## Фронтенд
 

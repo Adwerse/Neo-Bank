@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package fraud.v1;
+
+option go_package = "neobank/proto/gen/go/fraud/v1;fraudv1";
+
+// FraudService is fraud-svc's internal service-to-service contract for
+// scoring a transfer before it settles. Not yet called by any other
+// service — wiring a caller (transfers-svc) into this contract is a
+// following step.
+service FraudService {
+  rpc CheckTransfer(CheckTransferRequest) returns (CheckTransferResponse);
+}
+
+message CheckTransferRequest {
+  string transfer_id = 1;
+  string account_id = 2;
+  int64 amount = 3;
+}
+
+message CheckTransferResponse {
+  // "approve" or "reject".
+  string decision = 1;
+  // Which rule caused a reject; empty when decision == "approve".
+  string triggered_rule = 2;
+  string reason = 3;
+}

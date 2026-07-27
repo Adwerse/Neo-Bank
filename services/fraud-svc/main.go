@@ -4,19 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
+
+	fraudv1 "neobank/proto/gen/go/fraud/v1"
 )
 
-const defaultPort = "8085"
+const (
+	defaultPort     = "8085"
+	defaultGRPCPort = "9085"
+)
 
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = defaultPort
+	}
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = defaultGRPCPort
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
@@ -29,6 +43,26 @@ func main() {
 		log.Fatalf("fraud-svc: failed to create postgres pool: %v", err)
 	}
 	defer pool.Close()
+
+	lis, err := net.Listen("tcp", ":"+grpcPort)
+	if err != nil {
+		log.Fatalf("fraud-svc: failed to listen on :%s (gRPC): %v", grpcPort, err)
+	}
+	grpcServer := grpc.NewServer()
+	fraudv1.RegisterFraudServiceServer(grpcServer, &fraudServer{pool: pool})
+
+	grpcHealthServer := health.NewServer()
+	grpcHealthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, grpcHealthServer)
+
+	reflection.Register(grpcServer)
+
+	go func() {
+		log.Printf("fraud-svc listening on :%s (gRPC)", grpcPort)
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
