@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	LedgerService_GetBalance_FullMethodName          = "/ledger.v1.LedgerService/GetBalance"
-	LedgerService_ExecuteTransfer_FullMethodName     = "/ledger.v1.LedgerService/ExecuteTransfer"
-	LedgerService_GetHistory_FullMethodName          = "/ledger.v1.LedgerService/GetHistory"
-	LedgerService_CreateLedgerAccount_FullMethodName = "/ledger.v1.LedgerService/CreateLedgerAccount"
+	LedgerService_GetBalance_FullMethodName                = "/ledger.v1.LedgerService/GetBalance"
+	LedgerService_ExecuteTransfer_FullMethodName           = "/ledger.v1.LedgerService/ExecuteTransfer"
+	LedgerService_GetHistory_FullMethodName                = "/ledger.v1.LedgerService/GetHistory"
+	LedgerService_CreateLedgerAccount_FullMethodName       = "/ledger.v1.LedgerService/CreateLedgerAccount"
+	LedgerService_GetTransactionByReference_FullMethodName = "/ledger.v1.LedgerService/GetTransactionByReference"
 )
 
 // LedgerServiceClient is the client API for LedgerService service.
@@ -42,6 +43,14 @@ type LedgerServiceClient interface {
 	// it once per new account created off a UserActivated Kafka event — an
 	// at-least-once, redelivery-prone path, hence the idempotency requirement.
 	CreateLedgerAccount(ctx context.Context, in *CreateLedgerAccountRequest, opts ...grpc.CallOption) (*CreateLedgerAccountResponse, error)
+	// GetTransactionByReference answers "did I ever execute a transfer
+	// tagged with this reference" — found=false is a normal, expected
+	// answer (not an error), same as ExecuteTransferRequest.reference being
+	// optional. Exists for callers (transfers-svc) that lost track of
+	// whether an ExecuteTransfer call actually committed (e.g. the response
+	// was never received) and need ledger-svc's own data, not a guess, to
+	// find out.
+	GetTransactionByReference(ctx context.Context, in *GetTransactionByReferenceRequest, opts ...grpc.CallOption) (*GetTransactionByReferenceResponse, error)
 }
 
 type ledgerServiceClient struct {
@@ -92,6 +101,16 @@ func (c *ledgerServiceClient) CreateLedgerAccount(ctx context.Context, in *Creat
 	return out, nil
 }
 
+func (c *ledgerServiceClient) GetTransactionByReference(ctx context.Context, in *GetTransactionByReferenceRequest, opts ...grpc.CallOption) (*GetTransactionByReferenceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTransactionByReferenceResponse)
+	err := c.cc.Invoke(ctx, LedgerService_GetTransactionByReference_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LedgerServiceServer is the server API for LedgerService service.
 // All implementations must embed UnimplementedLedgerServiceServer
 // for forward compatibility.
@@ -109,6 +128,14 @@ type LedgerServiceServer interface {
 	// it once per new account created off a UserActivated Kafka event — an
 	// at-least-once, redelivery-prone path, hence the idempotency requirement.
 	CreateLedgerAccount(context.Context, *CreateLedgerAccountRequest) (*CreateLedgerAccountResponse, error)
+	// GetTransactionByReference answers "did I ever execute a transfer
+	// tagged with this reference" — found=false is a normal, expected
+	// answer (not an error), same as ExecuteTransferRequest.reference being
+	// optional. Exists for callers (transfers-svc) that lost track of
+	// whether an ExecuteTransfer call actually committed (e.g. the response
+	// was never received) and need ledger-svc's own data, not a guess, to
+	// find out.
+	GetTransactionByReference(context.Context, *GetTransactionByReferenceRequest) (*GetTransactionByReferenceResponse, error)
 	mustEmbedUnimplementedLedgerServiceServer()
 }
 
@@ -130,6 +157,9 @@ func (UnimplementedLedgerServiceServer) GetHistory(context.Context, *GetHistoryR
 }
 func (UnimplementedLedgerServiceServer) CreateLedgerAccount(context.Context, *CreateLedgerAccountRequest) (*CreateLedgerAccountResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateLedgerAccount not implemented")
+}
+func (UnimplementedLedgerServiceServer) GetTransactionByReference(context.Context, *GetTransactionByReferenceRequest) (*GetTransactionByReferenceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetTransactionByReference not implemented")
 }
 func (UnimplementedLedgerServiceServer) mustEmbedUnimplementedLedgerServiceServer() {}
 func (UnimplementedLedgerServiceServer) testEmbeddedByValue()                       {}
@@ -224,6 +254,24 @@ func _LedgerService_CreateLedgerAccount_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LedgerService_GetTransactionByReference_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTransactionByReferenceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).GetTransactionByReference(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_GetTransactionByReference_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).GetTransactionByReference(ctx, req.(*GetTransactionByReferenceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // LedgerService_ServiceDesc is the grpc.ServiceDesc for LedgerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -246,6 +294,10 @@ var LedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateLedgerAccount",
 			Handler:    _LedgerService_CreateLedgerAccount_Handler,
+		},
+		{
+			MethodName: "GetTransactionByReference",
+			Handler:    _LedgerService_GetTransactionByReference_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

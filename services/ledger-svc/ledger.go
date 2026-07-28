@@ -240,9 +240,18 @@ func lockLedgerAccount(ctx context.Context, tx pgx.Tx, accountID string) (ledger
 // concurrent transfers going in opposite directions between the same pair
 // of accounts, since both will always attempt to lock the same account
 // first rather than each holding one lock and waiting on the other.
-func executeTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toAccountID string, amount int64) (transactionID string, outcome transferOutcome, err error) {
+func executeTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toAccountID string, amount int64, reference string) (transactionID string, outcome transferOutcome, err error) {
 	if amount <= 0 {
 		return "", transferInvalidAmount, nil
+	}
+
+	// A nil interface{} binds as SQL NULL for the (nullable) reference
+	// column; an empty string would fail Postgres's uuid input parsing
+	// instead. Most callers pass no reference at all (devtopup, cmd/seed) —
+	// this keeps their entries exactly as before.
+	var referenceParam any
+	if reference != "" {
+		referenceParam = reference
 	}
 
 	first, second := fromAccountID, toAccountID
@@ -286,18 +295,18 @@ func executeTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toA
 	}
 
 	err = tx.QueryRow(ctx,
-		`INSERT INTO entries (transaction_id, ledger_account_id, amount)
-		 VALUES (gen_random_uuid(), $1, $2)
+		`INSERT INTO entries (transaction_id, ledger_account_id, amount, reference)
+		 VALUES (gen_random_uuid(), $1, $2, $3)
 		 RETURNING transaction_id`,
-		fromLedgerAccountID, -amount,
+		fromLedgerAccountID, -amount, referenceParam,
 	).Scan(&transactionID)
 	if err != nil {
 		return "", 0, fmt.Errorf("insert debit entry: %w", err)
 	}
 
 	_, err = tx.Exec(ctx,
-		"INSERT INTO entries (transaction_id, ledger_account_id, amount) VALUES ($1, $2, $3)",
-		transactionID, toLedgerAccountID, amount,
+		"INSERT INTO entries (transaction_id, ledger_account_id, amount, reference) VALUES ($1, $2, $3, $4)",
+		transactionID, toLedgerAccountID, amount, referenceParam,
 	)
 	if err != nil {
 		return "", 0, fmt.Errorf("insert credit entry: %w", err)
@@ -314,6 +323,26 @@ func executeTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toA
 		return "", 0, fmt.Errorf("commit transfer: %w", err)
 	}
 	return transactionID, transferOK, nil
+}
+
+// getTransactionByReference answers whether executeTransfer ever committed
+// a transfer tagged with this reference, and if so, its transaction_id.
+// found=false is a normal, meaningful answer (the reference was never
+// used, or the transfer never actually executed) — not an error. Both
+// entries of a call share the same reference, so LIMIT 1 is enough; there
+// is no ambiguity to resolve between them.
+func getTransactionByReference(ctx context.Context, pool *pgxpool.Pool, reference string) (transactionID string, found bool, err error) {
+	err = pool.QueryRow(ctx,
+		"SELECT transaction_id FROM entries WHERE reference = $1 LIMIT 1",
+		reference,
+	).Scan(&transactionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("look up entry by reference: %w", err)
+	}
+	return transactionID, true, nil
 }
 
 // applyBalanceDelta adds delta to ledgerAccountID's cached balance in

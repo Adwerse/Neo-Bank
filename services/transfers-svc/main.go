@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	defaultPort         = "8084"
-	defaultAccountsAddr = "accounts-svc:9082"
-	defaultFraudAddr    = "fraud-svc:9085"
-	defaultLedgerAddr   = "ledger-svc:8083"
+	defaultPort                = "8084"
+	defaultAccountsAddr        = "accounts-svc:9082"
+	defaultFraudAddr           = "fraud-svc:9085"
+	defaultLedgerAddr          = "ledger-svc:8083"
+	defaultReconcileStaleAfter = 2 * time.Minute
 )
 
 func main() {
@@ -40,6 +41,14 @@ func main() {
 	ledgerAddr := os.Getenv("LEDGER_GRPC_ADDR")
 	if ledgerAddr == "" {
 		ledgerAddr = defaultLedgerAddr
+	}
+	reconcileStaleAfter := defaultReconcileStaleAfter
+	if v := os.Getenv("RECONCILE_STALE_AFTER"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			log.Fatalf("transfers-svc: invalid RECONCILE_STALE_AFTER %q: %v", v, err)
+		}
+		reconcileStaleAfter = d
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
@@ -80,6 +89,8 @@ func main() {
 	}
 	defer ledgerConn.Close()
 	ledgerClient := ledgerv1.NewLedgerServiceClient(ledgerConn)
+
+	go runReconciliationWorker(context.Background(), pool, ledgerClient, reconcileStaleAfter)
 
 	// An explicit mux, not the package-level http.DefaultServeMux: importing
 	// google.golang.org/grpc transitively pulls in golang.org/x/net/trace,

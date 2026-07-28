@@ -19,6 +19,14 @@ service LedgerService {
   // it once per new account created off a UserActivated Kafka event — an
   // at-least-once, redelivery-prone path, hence the idempotency requirement.
   rpc CreateLedgerAccount(CreateLedgerAccountRequest) returns (CreateLedgerAccountResponse);
+  // GetTransactionByReference answers "did I ever execute a transfer
+  // tagged with this reference" — found=false is a normal, expected
+  // answer (not an error), same as ExecuteTransferRequest.reference being
+  // optional. Exists for callers (transfers-svc) that lost track of
+  // whether an ExecuteTransfer call actually committed (e.g. the response
+  // was never received) and need ledger-svc's own data, not a guess, to
+  // find out.
+  rpc GetTransactionByReference(GetTransactionByReferenceRequest) returns (GetTransactionByReferenceResponse);
 }
 
 message GetBalanceRequest {
@@ -33,10 +41,27 @@ message ExecuteTransferRequest {
   string from_account_id = 1;
   string to_account_id = 2;
   int64 amount = 3;
+  // Optional caller-supplied correlation id (e.g. transfers-svc's own
+  // transfer id), stored on both entries this call writes. Lets a caller
+  // that lost track of an ExecuteTransfer response later ask
+  // GetTransactionByReference whether it actually committed. Left empty,
+  // this call behaves exactly as before — ledger-svc has no opinion on
+  // what a reference means, it just stores and looks it up.
+  string reference = 4;
 }
 
 message ExecuteTransferResponse {
   string transaction_id = 1;
+}
+
+message GetTransactionByReferenceRequest {
+  string reference = 1;
+}
+
+message GetTransactionByReferenceResponse {
+  bool found = 1;
+  // Only meaningful when found is true.
+  string transaction_id = 2;
 }
 
 message GetHistoryRequest {

@@ -37,7 +37,7 @@ func (s *ledgerServer) GetBalance(ctx context.Context, req *ledgerv1.GetBalanceR
 }
 
 func (s *ledgerServer) ExecuteTransfer(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error) {
-	transactionID, outcome, err := executeTransfer(ctx, s.pool, req.GetFromAccountId(), req.GetToAccountId(), req.GetAmount())
+	transactionID, outcome, err := executeTransfer(ctx, s.pool, req.GetFromAccountId(), req.GetToAccountId(), req.GetAmount(), req.GetReference())
 	if err != nil {
 		log.Printf("ledger-svc: ExecuteTransfer: %v", err)
 		return nil, status.Error(codes.Internal, "internal error")
@@ -81,6 +81,15 @@ func (s *ledgerServer) GetHistory(ctx context.Context, req *ledgerv1.GetHistoryR
 		})
 	}
 	return resp, nil
+}
+
+func (s *ledgerServer) GetTransactionByReference(ctx context.Context, req *ledgerv1.GetTransactionByReferenceRequest) (*ledgerv1.GetTransactionByReferenceResponse, error) {
+	transactionID, found, err := getTransactionByReference(ctx, s.pool, req.GetReference())
+	if err != nil {
+		log.Printf("ledger-svc: GetTransactionByReference: %v", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	return &ledgerv1.GetTransactionByReferenceResponse{Found: found, TransactionId: transactionID}, nil
 }
 
 func (s *ledgerServer) CreateLedgerAccount(ctx context.Context, req *ledgerv1.CreateLedgerAccountRequest) (*ledgerv1.CreateLedgerAccountResponse, error) {

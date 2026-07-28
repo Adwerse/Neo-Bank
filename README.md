@@ -158,7 +158,7 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
 
 `codes.Unavailable`, `codes.DeadlineExceeded` и `codes.Unknown` — принципиально другой случай: `ledger-svc` их сам никогда не возвращает, они возникают только на уровне транспорта (не достучались, либо не дождались ответа за `ledgerCallTimeout` = 5 секунд). Здесь `transfers-svc` **не знает**, исполнился перевод или нет: запрос мог не дойти, а мог дойти, исполниться, и уже ответ потеряться на обратном пути. Пометить `failed` в этом случае — соврать, если деньги реально ушли; пометить `completed` без `transaction_id` — соврать в другую сторону. Поэтому запись остаётся `pending` как есть (никакой записи в БД не делается вообще), а клиенту возвращается `202 Accepted` с телом `{"status": "pending", "message": "transfer status unknown, still processing"}`.
 
-**TODO** (за скоупом этого шага): по-настоящему разрешить неопределённость может только сверка с `ledger-svc` — например, периодический опрос `GetHistory(account_id)` на предмет проводки с ожидаемой суммой в окне времени вокруг `created_at` записи, либо (чище) `ledger-svc` должен научиться принимать идемпотентный request-id и отдавать по нему уже исполненный результат повторно — сейчас `ExecuteTransfer` такого параметра не принимает. Реализация reconciliation-джобы — отдельная задача. **То же самое «зависшее pending» применимо теперь и к неопределённому исходу fraud-проверки** (см. «fraud-check перед ledger» ниже) — один и тот же класс проблемы в двух местах потока, решается одной и той же будущей reconciliation-задачей, а не отдельно для каждого.
+Разрешается эта неопределённость автоматически — см. «Reconciliation: закрываем pending переводы» ниже. То же самое «зависшее pending» применимо и к неопределённому исходу fraud-проверки (см. «fraud-check перед ledger») — тот же класс проблемы в двух местах потока, закрывается той же reconciliation-задачей, а не отдельно для каждого случая.
 
 ### Проверка вручную
 ```bash
@@ -264,7 +264,7 @@ checkTransferFraud() → approve   → settleTransfer() как раньше (com
 
 ### Идемпотентность
 
-Fraud-проверка вызывается **строго после** того, как переключатель исходов `createTransfer` в `http.go` уже обработал все ранние `return` (включая `createTransferReplayed`) — то есть ровно там же, где сегодня уже стоит вызов `settleTransfer`. Повтор с тем же `Idempotency-Key` короткоживущим путём возвращает текущее состояние существующей записи и не доходит до вызова fraud вообще — тем же механизмом, что уже не даёт повтору вызвать `ledger` дважды. Замеченный, но не устраняемый на этом шаге нюанс: если запись всё ещё `pending` из-за неопределённого исхода fraud-проверки, повтор так и будет возвращать тот же `pending`-снимок, не пытаясь перепроверить — тот же класс проблемы, что уже описан для неопределённого исхода `ledger-svc` выше, и решается той же будущей reconciliation-задачей, не отдельным патчем здесь.
+Fraud-проверка вызывается **строго после** того, как переключатель исходов `createTransfer` в `http.go` уже обработал все ранние `return` (включая `createTransferReplayed`) — то есть ровно там же, где сегодня уже стоит вызов `settleTransfer`. Повтор с тем же `Idempotency-Key` короткоживущим путём возвращает текущее состояние существующей записи и не доходит до вызова fraud вообще — тем же механизмом, что уже не даёт повтору вызвать `ledger` дважды. Если запись всё ещё `pending` из-за неопределённого исхода fraud-проверки, повтор так и будет возвращать тот же `pending`-снимок, не пытаясь перепроверить fraud — но зависшей она не останется: reconciliation-воркер (см. «Reconciliation: закрываем pending переводы» ниже) разрешает и этот случай тоже, проверяя `ledger-svc` напрямую, независимо от того, что вызвало неопределённость.
 
 ### Проверка вручную
 ```bash
@@ -299,6 +299,64 @@ docker compose start fraud-svc
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -v
+```
+
+## Reconciliation: закрываем pending переводы (transfers-svc)
+
+Это настоящая saga-проблема потока перевода — не reject от fraud (там ledger вообще не трогается, компенсировать нечего), а тот самый обрыв связи после вызова `ledger-svc.ExecuteTransfer`, помеченный TODO ещё в разделе «Честная граница» выше: `transfers-svc` вызвал `ledger`, `ledger` провёл проводку и закоммитил её, а ответ не дошёл (таймаут, сеть, сам `transfers-svc` упал между вызовом и записью `completed`). Запись висит в `pending` навсегда — деньги реально переведены, а система об этом не знает.
+
+### Почему это не «откатить»
+
+Компенсация в saga — не откат БД. Проводка в `entries` append-only и физически не удаляется. Компенсировать можно только двумя способами: **подтвердить** (если проводка реально прошла — записать `completed`, догнав реальность) или **провести обратную проводку** (если решено отменить нечто, что состоялось). Здесь нужен только первый способ — а если проводки не было вообще, компенсировать вообще нечего, деньги никуда не уходили. Обратные проводки (reversal) сюда не входят: они понадобятся в спринте 9 для Stripe-возвратов, где отменяется уже состоявшийся перевод, а не выясняется его судьба.
+
+### `ledger-svc.GetTransactionByReference` — источник истины, а не догадка
+
+Чтобы спросить «а провёл ли ledger вообще перевод с таким id», сначала нужно этот id туда донести. `ExecuteTransferRequest` получил необязательное поле `reference` (`proto/ledger/v1/ledger.proto`) — `transfers-svc` передаёт туда `transfer.ID` (`settleTransfer` в `transfer.go`), `ledger-svc` сохраняет его на обеих проводках (`entries.reference UUID`, миграция `000004_add_reference_to_entries`, индекс `idx_entries_reference`). Значение необязательное и по умолчанию `NULL` — `cmd/devtopup`/`cmd/seed` его не передают, и это ничего не меняет в их поведении.
+
+`GetTransactionByReference(reference) → {found, transaction_id}` — `found = false` такой же полноценный, ожидаемый ответ, как и `found = true`, а не ошибка: reference мог никогда не использоваться, или перевод с ним никогда не выполнялся. Оба случая исчерпывают то, что может быть верно про зависший `pending`.
+
+### Воркер: `runReconciliationWorker` (`services/transfers-svc/reconcile.go`)
+
+Тикер раз в 30 секунд (`reconcileInterval`, константа — тюнить нечего) ищет переводы в `pending` старше настраиваемого порога (`getStalePendingTransfers`, `transfer.go`) — порог задаётся через `RECONCILE_STALE_AFTER` (`time.ParseDuration`, дефолт `2m`, не установлен в `docker-compose.yml` — только через код). Для каждого — `GetTransactionByReference(transfer_id)`:
+- **найдена** → перевод реально прошёл: `status = 'completed'`, `ledger_transaction_id` заполняется. Компенсация не нужна — это просто «догнать реальность».
+- **не найдена** → `ledger` её не проводил: `status = 'failed'`, `failure_reason = 'timeout_unresolved'`. Денег не двигалось, компенсировать нечего.
+- ошибка транспорта (`ledger-svc` сам недоступен) → ничего не пишется, лог, следующий тик попробует снова — тот же fail-closed принцип, что и у `checkTransferFraud`/`settleTransfer`: не знаешь — не пиши.
+
+Как и консьюмер Kafka в `accounts-svc`, воркер живёт всё время жизни процесса без graceful shutdown (`context.Background()` из `main()`) — тот же паттерн, что и везде в этом репозитории.
+
+### Гонка с обычным обработчиком запроса
+
+Между тем, как воркер прочитал список зависших `pending` (`getStalePendingTransfers`), и тем, как он решит его записать, тот же самый перевод может успеть разрешиться по обычному пути — например, клиент повторил запрос с тем же `Idempotency-Key`, и на этот раз `settleTransfer` действительно достучался до `ledger-svc`. Поэтому оба писателя воркера — `markTransferCompletedIfPending`/`markTransferFailedIfPending` (`transfer.go`) — это те же `UPDATE`, что и `markTransferCompleted`/`markTransferFailed`, но с добавленным `AND status = 'pending'`: если строка уже не `pending` к моменту записи, `UPDATE` не совпадает ни с одной строкой (`RowsAffected() == 0`), и воркер просто не резолвит её повторно — уже зафиксированный результат (какой бы он ни был) остаётся как есть, а не перезаписывается устаревшим представлением воркера.
+
+### Логи
+
+Каждое разрешение зависшего перевода логируется явно (`reconcileTransfer`, `transfer.go`) — с `transfer_id`, итоговым статусом и (для `completed`) `ledger_transaction_id`:
+```
+transfers-svc: reconcile: transfer 85abb5f7-... resolved to completed (ledger_transaction_id=0f34b0e1-...) — ledger-svc had already executed it, the original response was never received
+transfers-svc: reconcile: transfer d88ce967-... resolved to failed (reason=timeout_unresolved) — ledger-svc never executed it, no money moved
+```
+Тики без единого разрешения ничего не логируют — иначе лог захламлялся бы каждые 30 секунд без всякой пользы.
+
+### Как симулировался обрыв для проверки
+
+Ни `docker network disconnect`, ни `iptables` не дают надёжно оборвать именно **ответ**, оставив сам вызов и коммит в `ledger-svc` нетронутыми — слишком тонкое по времени состояние гонки, чтобы воспроизводить его через реальную сеть. Вместо этого — временный `os.Getenv("SIMULATE_CRASH_AFTER_LEDGER_CALL") == "true"` прямо в `settleTransfer`, сразу после успешного `ExecuteTransfer` и до `markTransferCompleted`: `log.Fatalf(...)`, честно убивающий процесс в тот самый момент, когда `ledger-svc` уже закоммитил, а `transfers-svc` — ещё нет. Добавлено, использовано для проверки ниже, затем убрано целиком — это одноразовый инструмент для этой проверки, не постоянная часть кода (в отличие от `cmd/devtopup`, которым реально пользуются повторно).
+
+**Проверено вручную на полном стеке:**
+1. `SIMULATE_CRASH_AFTER_LEDGER_CALL=true`, `RECONCILE_STALE_AFTER=5s` (временно, только на время проверки) → перезапуск `transfers-svc`.
+2. Обычный перевод через Gateway → клиент получает `502` (соединение оборвалось вместе с процессом), контейнер `transfers-svc` — `Exited (1)`, в логе `SIMULATED CRASH after ledger call for transfer <id>`.
+3. `SELECT status FROM transfers WHERE id = '<id>'` → `pending`; `SELECT * FROM entries WHERE reference = '<id>'` → обе проводки уже на месте (реальные деньги реально перешли).
+4. Убрать `SIMULATE_CRASH_AFTER_LEDGER_CALL`, перезапустить `transfers-svc` — воркер снова работает. Через один тик (≤35 c при пороге 5 c) перевод сам стал `completed` с правильным `ledger_transaction_id`; баланс отправителя (`GET /accounts/me`) уменьшился ровно на сумму перевода.
+5. Обратный случай: вручную вставлена `pending`-запись без единой проводки в `ledger` (`INSERT INTO transfers (...) VALUES (..., 'pending', now() - interval '1 minute')`) — на следующем тике стала `failed`/`timeout_unresolved`.
+6. `RECONCILE_STALE_AFTER` и код возвращены к дефолту (`2m`, без переменной в `docker-compose.yml`), `SIMULATE_CRASH_AFTER_LEDGER_CALL` полностью удалён из `transfer.go` — обычный перевод после отката по-прежнему `completed` с первого раза.
+
+### Тесты
+
+`services/ledger-svc/ledger_test.go`: `TestExecuteTransfer_WithReference` (reference сохраняется на обеих проводках, `getTransactionByReference` находит правильный `transaction_id`), `TestGetTransactionByReference_NotFound`, `TestExecuteTransfer_EmptyReferenceLeavesEntriesUnreferenced` (пустой reference → `NULL`, а не пустая строка — иначе все переводы без reference коллизировали бы на одном значении для поиска).
+
+`services/transfers-svc/reconcile_test.go`: `TestGetStalePendingTransfers` (порог по возрасту), `TestReconcileTransfer_LedgerExecutedIt`/`_LedgerNeverExecutedIt`/`_TransportErrorLeavesRowUntouched` (три исхода через `fakeLedgerClient.getTransactionByReferenceFunc`), `TestMarkTransferCompletedIfPending_SkipsAlreadyResolved`/`TestMarkTransferFailedIfPending_SkipsAlreadyResolved` — доказывают саму гонку: заранее резолвят перевод в один терминальный статус, затем вызывают «противоположный» `*IfPending` и проверяют, что `RowsAffected = 0` и строка не тронута.
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/ledger-svc/... ./services/transfers-svc/... -v
 ```
 
 ## Фронтенд

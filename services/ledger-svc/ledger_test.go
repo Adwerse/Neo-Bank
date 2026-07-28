@@ -260,7 +260,7 @@ func TestExecuteTransfer_Success(t *testing.T) {
 	toLedgerID := insertLedgerAccount(t, ctx, pool, toAccountID)
 	fundAccount(t, ctx, pool, fromLedgerID, 10000)
 
-	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 3000)
+	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 3000, "")
 	if err != nil {
 		t.Fatalf("executeTransfer: unexpected error: %v", err)
 	}
@@ -325,6 +325,97 @@ func TestExecuteTransfer_Success(t *testing.T) {
 	}
 }
 
+// TestExecuteTransfer_WithReference proves a non-empty reference is stored
+// on both entries a transfer writes, and that getTransactionByReference can
+// then find the same transaction_id from it — the mechanism
+// transfers-svc's reconciliation worker depends on to ask "did this
+// transfer actually execute," independent of whether its own response was
+// ever received.
+func TestExecuteTransfer_WithReference(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	fromAccountID := randomUUID(t)
+	toAccountID := randomUUID(t)
+	fromLedgerID := insertLedgerAccount(t, ctx, pool, fromAccountID)
+	insertLedgerAccount(t, ctx, pool, toAccountID)
+	fundAccount(t, ctx, pool, fromLedgerID, 10000)
+
+	reference := randomUUID(t)
+	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 1500, reference)
+	if err != nil {
+		t.Fatalf("executeTransfer: unexpected error: %v", err)
+	}
+	if outcome != transferOK {
+		t.Fatalf("executeTransfer outcome = %v, want transferOK", outcome)
+	}
+
+	var referenceCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM entries WHERE transaction_id = $1 AND reference = $2", transactionID, reference).Scan(&referenceCount); err != nil {
+		t.Fatalf("count entries with reference: %v", err)
+	}
+	if referenceCount != 2 {
+		t.Errorf("entries with reference=%s for transaction_id=%s = %d, want 2 (both debit and credit)", reference, transactionID, referenceCount)
+	}
+
+	foundTransactionID, found, err := getTransactionByReference(ctx, pool, reference)
+	if err != nil {
+		t.Fatalf("getTransactionByReference: unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatal("getTransactionByReference: found = false, want true")
+	}
+	if foundTransactionID != transactionID {
+		t.Errorf("getTransactionByReference: transactionID = %q, want %q", foundTransactionID, transactionID)
+	}
+}
+
+func TestGetTransactionByReference_NotFound(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	_, found, err := getTransactionByReference(ctx, pool, randomUUID(t))
+	if err != nil {
+		t.Fatalf("getTransactionByReference: unexpected error: %v", err)
+	}
+	if found {
+		t.Error("getTransactionByReference: found = true for a reference that was never used, want false")
+	}
+}
+
+// TestExecuteTransfer_EmptyReferenceLeavesEntriesUnreferenced proves an
+// empty reference (the default for callers like devtopup/cmd/seed that
+// don't pass one) stores NULL, not the empty string — Postgres would
+// reject "" as an invalid uuid, and a stored empty string would also be
+// wrong: it would make every no-reference transfer collide on the same
+// lookup key.
+func TestExecuteTransfer_EmptyReferenceLeavesEntriesUnreferenced(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	fromAccountID := randomUUID(t)
+	toAccountID := randomUUID(t)
+	fromLedgerID := insertLedgerAccount(t, ctx, pool, fromAccountID)
+	insertLedgerAccount(t, ctx, pool, toAccountID)
+	fundAccount(t, ctx, pool, fromLedgerID, 10000)
+
+	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 1000, "")
+	if err != nil {
+		t.Fatalf("executeTransfer: unexpected error: %v", err)
+	}
+	if outcome != transferOK {
+		t.Fatalf("executeTransfer outcome = %v, want transferOK", outcome)
+	}
+
+	var nullCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM entries WHERE transaction_id = $1 AND reference IS NULL", transactionID).Scan(&nullCount); err != nil {
+		t.Fatalf("count entries with NULL reference: %v", err)
+	}
+	if nullCount != 2 {
+		t.Errorf("entries with NULL reference for transaction_id=%s = %d, want 2", transactionID, nullCount)
+	}
+}
+
 func TestExecuteTransfer_InsufficientFunds(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -338,7 +429,7 @@ func TestExecuteTransfer_InsufficientFunds(t *testing.T) {
 	fromCountBefore := entryCount(t, ctx, pool, fromLedgerID)
 	toCountBefore := entryCount(t, ctx, pool, toLedgerID)
 
-	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 5000)
+	transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, 5000, "")
 	if err != nil {
 		t.Fatalf("executeTransfer: unexpected error: %v", err)
 	}
@@ -380,7 +471,7 @@ func TestExecuteTransfer_InvalidAmount(t *testing.T) {
 	toAccountID := randomUUID(t)
 
 	for _, amount := range []int64{0, -100} {
-		transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, amount)
+		transactionID, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountID, amount, "")
 		if err != nil {
 			t.Fatalf("executeTransfer(amount=%d): unexpected error: %v", amount, err)
 		}
@@ -400,7 +491,7 @@ func TestExecuteTransfer_FromAccountNotFound(t *testing.T) {
 	toAccountID := randomUUID(t)
 	insertLedgerAccount(t, ctx, pool, toAccountID)
 
-	_, outcome, err := executeTransfer(ctx, pool, randomUUID(t), toAccountID, 100)
+	_, outcome, err := executeTransfer(ctx, pool, randomUUID(t), toAccountID, 100, "")
 	if err != nil {
 		t.Fatalf("executeTransfer: unexpected error: %v", err)
 	}
@@ -417,7 +508,7 @@ func TestExecuteTransfer_ToAccountNotFound(t *testing.T) {
 	fromLedgerID := insertLedgerAccount(t, ctx, pool, fromAccountID)
 	fundAccount(t, ctx, pool, fromLedgerID, 1000)
 
-	_, outcome, err := executeTransfer(ctx, pool, fromAccountID, randomUUID(t), 100)
+	_, outcome, err := executeTransfer(ctx, pool, fromAccountID, randomUUID(t), 100, "")
 	if err != nil {
 		t.Fatalf("executeTransfer: unexpected error: %v", err)
 	}
@@ -443,7 +534,7 @@ func TestRebuildBalance_MatchesIncrementalCache(t *testing.T) {
 	insertLedgerAccount(t, ctx, pool, counterpartyID)
 
 	for _, amount := range []int64{4000, 1000, 500} {
-		_, outcome, err := executeTransfer(ctx, pool, accountID, counterpartyID, amount)
+		_, outcome, err := executeTransfer(ctx, pool, accountID, counterpartyID, amount, "")
 		if err != nil {
 			t.Fatalf("executeTransfer(%d): unexpected error: %v", amount, err)
 		}
@@ -578,7 +669,7 @@ func TestExecuteTransfer_ConcurrentOverdraftPrevention(t *testing.T) {
 	for i := 0; i < attempts; i++ {
 		go func(i int) {
 			defer wg.Done()
-			_, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountIDs[i], amount)
+			_, outcome, err := executeTransfer(ctx, pool, fromAccountID, toAccountIDs[i], amount, "")
 			outcomes[i] = outcome
 			errs[i] = err
 		}(i)

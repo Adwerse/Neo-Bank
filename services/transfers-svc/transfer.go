@@ -39,6 +39,12 @@ const (
 	failureReasonAccountNotFound   = "account_not_found"
 	failureReasonInvalidAmount     = "invalid_amount"
 	failureReasonLedgerInternal    = "ledger_internal_error"
+	// failureReasonTimeoutUnresolved is set by the reconciliation worker
+	// (reconcile.go), never by settleTransfer itself: it means a transfer
+	// sat pending long enough to go stale, and ledger-svc's own data
+	// confirmed it never actually executed — not a guess, a fact checked
+	// against the source of truth.
+	failureReasonTimeoutUnresolved = "timeout_unresolved"
 )
 
 // Transfer is a transfers row: transfers-svc's own record of a transfer
@@ -48,12 +54,12 @@ const (
 // or the network could drop the response — the idempotency_key attaches to
 // this record, not to a ledger entry.
 type Transfer struct {
-	ID                  string    `json:"id"`
-	IdempotencyKey      string    `json:"idempotency_key"`
-	SenderAccountID     string    `json:"sender_account_id"`
-	RecipientAccountID  string    `json:"recipient_account_id"`
-	Amount              int64     `json:"amount"`
-	Status              string    `json:"status"`
+	ID                 string `json:"id"`
+	IdempotencyKey     string `json:"idempotency_key"`
+	SenderAccountID    string `json:"sender_account_id"`
+	RecipientAccountID string `json:"recipient_account_id"`
+	Amount             int64  `json:"amount"`
+	Status             string `json:"status"`
 	// FailureReason holds one of two disjoint vocabularies depending on
 	// Status: a ledger failure code (e.g. "insufficient_funds") when
 	// "failed", or fraud-svc's triggered_rule (e.g. "amount_threshold")
@@ -261,6 +267,13 @@ func settleTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledger
 		FromAccountId: transfer.SenderAccountID,
 		ToAccountId:   transfer.RecipientAccountID,
 		Amount:        transfer.Amount,
+		// Tags both entries this call writes with this transfer's own id,
+		// so the reconciliation worker (reconcile.go) can later ask
+		// ledger-svc's GetTransactionByReference whether this specific
+		// call actually committed — needed for exactly the case this
+		// function's own doc comment describes: a transport failure where
+		// we can't tell whether the request landed.
+		Reference: transfer.ID,
 	})
 	if err == nil {
 		updated, dbErr := markTransferCompleted(ctx, pool, transfer.ID, resp.GetTransactionId())
@@ -328,6 +341,72 @@ func markTransferFailed(ctx context.Context, pool *pgxpool.Pool, id, failureReas
 		return Transfer{}, fmt.Errorf("mark transfer failed: %w", err)
 	}
 	return t, nil
+}
+
+// getStalePendingTransfers returns transfers stuck in 'pending' for longer
+// than staleAfter — candidates for reconcile.go's worker to resolve
+// against ledger-svc's own data. A transfer that's merely pending because
+// settleTransfer hasn't been called yet at all (createTransferOK, fraud
+// check still running) is never this old within the same request, so this
+// threshold naturally excludes in-flight requests without needing to
+// distinguish them explicitly.
+func getStalePendingTransfers(ctx context.Context, pool *pgxpool.Pool, staleAfter time.Duration) ([]Transfer, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at
+		 FROM transfers
+		 WHERE status = 'pending' AND updated_at < now() - make_interval(secs => $1)`,
+		staleAfter.Seconds(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query stale pending transfers: %w", err)
+	}
+	defer rows.Close()
+
+	var transfers []Transfer
+	for rows.Next() {
+		var t Transfer
+		if err := rows.Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan stale pending transfer: %w", err)
+		}
+		transfers = append(transfers, t)
+	}
+	return transfers, rows.Err()
+}
+
+// markTransferCompletedIfPending and markTransferFailedIfPending are
+// reconcile.go's writers, not settleTransfer's — they add "AND status =
+// 'pending'" to the same UPDATEs markTransferCompleted/markTransferFailed
+// already do. This is the race guard requirement 3 of the reconciliation
+// task calls for: the worker reads a transfer as stale-pending, but by the
+// time it writes, a concurrent ordinary request for that same transfer
+// (also possible if, say, the client retried and this time reached
+// settleTransfer for real) may have already resolved it. Without the
+// status condition, the worker's write could silently overwrite an
+// already-committed result with stale information. The returned bool
+// reports whether this call's write actually happened, so the caller can
+// tell "resolved it" apart from "someone else already had."
+func markTransferCompletedIfPending(ctx context.Context, pool *pgxpool.Pool, id, ledgerTransactionID string) (bool, error) {
+	tag, err := pool.Exec(ctx,
+		`UPDATE transfers SET status = 'completed', ledger_transaction_id = $1, updated_at = now()
+		 WHERE id = $2 AND status = 'pending'`,
+		ledgerTransactionID, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark transfer completed if pending: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func markTransferFailedIfPending(ctx context.Context, pool *pgxpool.Pool, id, failureReason string) (bool, error) {
+	tag, err := pool.Exec(ctx,
+		`UPDATE transfers SET status = 'failed', failure_reason = $1, updated_at = now()
+		 WHERE id = $2 AND status = 'pending'`,
+		failureReason, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark transfer failed if pending: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 type fraudCheckOutcome int

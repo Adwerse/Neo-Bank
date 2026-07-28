@@ -75,11 +75,16 @@ func (f *fakeAccountsClient) GetAccountByID(ctx context.Context, req *accountsv1
 // settleTransfer actually calls needs overriding.
 type fakeLedgerClient struct {
 	ledgerv1.LedgerServiceClient
-	executeTransferFunc func(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error)
+	executeTransferFunc           func(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error)
+	getTransactionByReferenceFunc func(ctx context.Context, req *ledgerv1.GetTransactionByReferenceRequest) (*ledgerv1.GetTransactionByReferenceResponse, error)
 }
 
 func (f *fakeLedgerClient) ExecuteTransfer(ctx context.Context, req *ledgerv1.ExecuteTransferRequest, opts ...grpc.CallOption) (*ledgerv1.ExecuteTransferResponse, error) {
 	return f.executeTransferFunc(ctx, req)
+}
+
+func (f *fakeLedgerClient) GetTransactionByReference(ctx context.Context, req *ledgerv1.GetTransactionByReferenceRequest, opts ...grpc.CallOption) (*ledgerv1.GetTransactionByReferenceResponse, error) {
+	return f.getTransactionByReferenceFunc(ctx, req)
 }
 
 // fakeFraudClient implements fraudv1.FraudServiceClient without a live
