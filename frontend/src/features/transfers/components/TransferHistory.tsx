@@ -11,6 +11,7 @@ const STATUS_LABELS: Record<string, string> = {
   pending: 'В обработке',
   completed: 'Выполнен',
   failed: 'Не выполнен',
+  rejected: 'Заблокирован',
 }
 
 export function TransferHistory() {
@@ -57,7 +58,9 @@ export function TransferHistory() {
                 {formatMoney(t.amount, 'EUR')}
               </span>
               <span className={styles.counterparty}>{t.counterparty_account_number}</span>
-              <span className={styles.status}>{STATUS_LABELS[t.status] ?? t.status}</span>
+              <span className={[styles.status, t.status === 'rejected' ? styles.rejected : ''].filter(Boolean).join(' ')}>
+                {STATUS_LABELS[t.status] ?? t.status}
+              </span>
               <span className={styles.date}>{new Date(t.created_at).toLocaleString('ru-RU')}</span>
             </li>
           ))}

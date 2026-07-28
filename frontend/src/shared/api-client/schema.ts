@@ -274,8 +274,8 @@ export interface components {
             /** Format: int64 */
             amount: number;
             /** @enum {string} */
-            status: "pending" | "completed" | "failed";
-            /** @description Only present when status is failed, e.g. "insufficient_funds", "account_not_found", "invalid_amount", "ledger_internal_error". */
+            status: "pending" | "completed" | "failed" | "rejected";
+            /** @description Two disjoint vocabularies depending on status: a ledger failure code when status is "failed" (e.g. "insufficient_funds", "account_not_found", "invalid_amount", "ledger_internal_error"), or fraud-svc's triggered rule name when status is "rejected" ("amount_threshold", "velocity_count", "velocity_sum"). The two statuses are mutually exclusive, so which vocabulary applies is never ambiguous. */
             failure_reason?: string;
             /**
              * Format: uuid
@@ -704,7 +704,7 @@ export interface operations {
                     "application/json": components["schemas"]["TransferResult"];
                 };
             };
-            /** @description A definite outcome was reached (completed or failed). */
+            /** @description A definite outcome was reached (completed, failed, or rejected). */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -713,7 +713,7 @@ export interface operations {
                     "application/json": components["schemas"]["TransferResult"];
                 };
             };
-            /** @description ledger-svc did not respond definitively (timeout/unreachable). The transfer is left pending — status unknown, neither success nor failure. */
+            /** @description The outcome is uncertain and the transfer is left pending. Two distinct causes share this same shape (TransferResult with status "pending" and a message) with no separate discriminator field — callers must match on message text: ledger-svc did not respond definitively ("transfer status unknown, still processing"), or fraud-svc was unreachable and the check fails closed ("fraud check unavailable, transfer still pending"). */
             202: {
                 headers: {
                     [name: string]: unknown;

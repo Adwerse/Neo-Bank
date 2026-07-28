@@ -40,6 +40,11 @@
   text-align: right;
 }
 
+.rejected {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
 .date {
   grid-column: 1 / -1;
   color: var(--color-text-muted);
