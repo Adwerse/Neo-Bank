@@ -166,6 +166,35 @@ func getAccountByID(ctx context.Context, pool *pgxpool.Pool, id string) (Account
 	return acc, true, nil
 }
 
+// getAccountsByIDs returns whatever accounts among ids exist, in no
+// particular order, silently omitting any id with no matching row — unlike
+// the single-row lookups above ((Account, bool, error), exactly one id), a
+// batch caller needs partial results, not an all-or-nothing failure over
+// one bad id in a larger list.
+func getAccountsByIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]Account, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx,
+		"SELECT id, user_id, account_number, status, created_at, updated_at FROM accounts WHERE id = ANY($1::uuid[])",
+		ids,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []Account
+	for rows.Next() {
+		var acc Account
+		if err := rows.Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, acc)
+	}
+	return accounts, rows.Err()
+}
+
 func getAccountByAccountNumber(ctx context.Context, pool *pgxpool.Pool, accountNumber string) (Account, bool, error) {
 	var acc Account
 	err := pool.QueryRow(ctx,

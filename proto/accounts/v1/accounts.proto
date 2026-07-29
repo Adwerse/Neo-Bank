@@ -21,6 +21,15 @@ service AccountsService {
   // transfers-svc to resolve the authenticated caller's sender account_id
   // from the gateway-injected X-User-Id header.
   rpc GetAccountByUserID(GetAccountByUserIDRequest) returns (GetAccountByUserIDResponse);
+  // ResolveAccountsByIds looks up multiple accounts by internal account_id
+  // in a single call — used by transfers-svc to resolve every counterparty
+  // account_number for a page of transfer history in one round trip instead
+  // of one call per counterparty. An id with no matching account is simply
+  // omitted from the response, not treated as an error: a miss here would
+  // indicate a data inconsistency (a transfer referencing a nonexistent
+  // account), not a caller mistake, and returning what IS resolvable is more
+  // useful than failing the whole page over it.
+  rpc ResolveAccountsByIds(ResolveAccountsByIdsRequest) returns (ResolveAccountsByIdsResponse);
 }
 
 message ResolveAccountByNumberRequest {
@@ -49,4 +58,20 @@ message GetAccountByUserIDRequest {
 message GetAccountByUserIDResponse {
   string account_id = 1;
   string status = 2;
+}
+
+message ResolveAccountsByIdsRequest {
+  repeated string account_ids = 1;
+}
+
+message ResolveAccountsByIdsResponse {
+  repeated AccountSummary accounts = 1;
+}
+
+// AccountSummary is a minimal per-account projection for batch lookups —
+// only what a caller needs to enrich a list of records with human-readable
+// account info, not the full GetAccountByIDResponse shape.
+message AccountSummary {
+  string account_id = 1;
+  string account_number = 2;
 }

@@ -22,6 +22,7 @@ const (
 	AccountsService_ResolveAccountByNumber_FullMethodName = "/accounts.v1.AccountsService/ResolveAccountByNumber"
 	AccountsService_GetAccountByID_FullMethodName         = "/accounts.v1.AccountsService/GetAccountByID"
 	AccountsService_GetAccountByUserID_FullMethodName     = "/accounts.v1.AccountsService/GetAccountByUserID"
+	AccountsService_ResolveAccountsByIds_FullMethodName   = "/accounts.v1.AccountsService/ResolveAccountsByIds"
 )
 
 // AccountsServiceClient is the client API for AccountsService service.
@@ -45,6 +46,15 @@ type AccountsServiceClient interface {
 	// transfers-svc to resolve the authenticated caller's sender account_id
 	// from the gateway-injected X-User-Id header.
 	GetAccountByUserID(ctx context.Context, in *GetAccountByUserIDRequest, opts ...grpc.CallOption) (*GetAccountByUserIDResponse, error)
+	// ResolveAccountsByIds looks up multiple accounts by internal account_id
+	// in a single call — used by transfers-svc to resolve every counterparty
+	// account_number for a page of transfer history in one round trip instead
+	// of one call per counterparty. An id with no matching account is simply
+	// omitted from the response, not treated as an error: a miss here would
+	// indicate a data inconsistency (a transfer referencing a nonexistent
+	// account), not a caller mistake, and returning what IS resolvable is more
+	// useful than failing the whole page over it.
+	ResolveAccountsByIds(ctx context.Context, in *ResolveAccountsByIdsRequest, opts ...grpc.CallOption) (*ResolveAccountsByIdsResponse, error)
 }
 
 type accountsServiceClient struct {
@@ -85,6 +95,16 @@ func (c *accountsServiceClient) GetAccountByUserID(ctx context.Context, in *GetA
 	return out, nil
 }
 
+func (c *accountsServiceClient) ResolveAccountsByIds(ctx context.Context, in *ResolveAccountsByIdsRequest, opts ...grpc.CallOption) (*ResolveAccountsByIdsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveAccountsByIdsResponse)
+	err := c.cc.Invoke(ctx, AccountsService_ResolveAccountsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AccountsServiceServer is the server API for AccountsService service.
 // All implementations must embed UnimplementedAccountsServiceServer
 // for forward compatibility.
@@ -106,6 +126,15 @@ type AccountsServiceServer interface {
 	// transfers-svc to resolve the authenticated caller's sender account_id
 	// from the gateway-injected X-User-Id header.
 	GetAccountByUserID(context.Context, *GetAccountByUserIDRequest) (*GetAccountByUserIDResponse, error)
+	// ResolveAccountsByIds looks up multiple accounts by internal account_id
+	// in a single call — used by transfers-svc to resolve every counterparty
+	// account_number for a page of transfer history in one round trip instead
+	// of one call per counterparty. An id with no matching account is simply
+	// omitted from the response, not treated as an error: a miss here would
+	// indicate a data inconsistency (a transfer referencing a nonexistent
+	// account), not a caller mistake, and returning what IS resolvable is more
+	// useful than failing the whole page over it.
+	ResolveAccountsByIds(context.Context, *ResolveAccountsByIdsRequest) (*ResolveAccountsByIdsResponse, error)
 	mustEmbedUnimplementedAccountsServiceServer()
 }
 
@@ -124,6 +153,9 @@ func (UnimplementedAccountsServiceServer) GetAccountByID(context.Context, *GetAc
 }
 func (UnimplementedAccountsServiceServer) GetAccountByUserID(context.Context, *GetAccountByUserIDRequest) (*GetAccountByUserIDResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetAccountByUserID not implemented")
+}
+func (UnimplementedAccountsServiceServer) ResolveAccountsByIds(context.Context, *ResolveAccountsByIdsRequest) (*ResolveAccountsByIdsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveAccountsByIds not implemented")
 }
 func (UnimplementedAccountsServiceServer) mustEmbedUnimplementedAccountsServiceServer() {}
 func (UnimplementedAccountsServiceServer) testEmbeddedByValue()                         {}
@@ -200,6 +232,24 @@ func _AccountsService_GetAccountByUserID_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AccountsService_ResolveAccountsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveAccountsByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AccountsServiceServer).ResolveAccountsByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AccountsService_ResolveAccountsByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AccountsServiceServer).ResolveAccountsByIds(ctx, req.(*ResolveAccountsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AccountsService_ServiceDesc is the grpc.ServiceDesc for AccountsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -218,6 +268,10 @@ var AccountsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetAccountByUserID",
 			Handler:    _AccountsService_GetAccountByUserID_Handler,
+		},
+		{
+			MethodName: "ResolveAccountsByIds",
+			Handler:    _AccountsService_ResolveAccountsByIds_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

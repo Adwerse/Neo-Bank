@@ -25,6 +25,12 @@ const (
 
 const uniqueViolation = "23505"
 
+// invalidTextRepresentation is Postgres's SQLSTATE for a malformed typed
+// literal (e.g. a non-UUID string bound to a uuid column) — same code
+// accounts-svc's isNotFoundErr treats specially. Here it means a
+// structurally-valid-looking cursor decoded to a garbage id.
+const invalidTextRepresentation = "22P02"
+
 // transfersIdempotencyKeyConstraint is Postgres's default name for a
 // single-column UNIQUE constraint (<table>_<column>_key), per the
 // transfers migration — not explicitly named there, same convention as
@@ -180,33 +186,106 @@ func getTransferByIdempotencyKey(ctx context.Context, pool *pgxpool.Pool, idempo
 	return t, true, nil
 }
 
-// getTransfersForAccount returns accountID's transfers (as sender or
-// recipient), newest first, paginated via limit/offset — mirroring
-// ledger-svc's getHistory tie-break reasoning: two entries can share a
-// created_at from the same transaction-local now(), so id is the tie-break.
-func getTransfersForAccount(ctx context.Context, pool *pgxpool.Pool, accountID string, limit, offset int32) ([]Transfer, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at
-		 FROM transfers
-		 WHERE sender_account_id = $1 OR recipient_account_id = $1
-		 ORDER BY created_at DESC, id DESC
-		 LIMIT $2 OFFSET $3`,
-		accountID, limit, offset,
-	)
+const transferHistoryColumns = `id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`
+
+// transferHistoryQueryFirstPage and transferHistoryQueryNextPage are a
+// UNION ALL of two independently-indexed branches rather than a single
+// WHERE (sender_account_id = $1 OR (recipient_account_id = $1 AND status =
+// 'completed')) — deliberately: each branch applies its own LIMIT
+// immediately after an index-ordered scan of idx_transfers_sender_created_id
+// / idx_transfers_recipient_completed_created_id (see migration 000004),
+// which bounds the query's total work at 2*(limit+1) rows no matter how
+// large the account's full transfer history is. A single OR'd WHERE across
+// two different indexed columns would force Postgres into a BitmapOr +
+// Bitmap Heap Scan, which cannot apply LIMIT before materializing (and
+// sorting) every matching row — exactly the cost keyset pagination exists
+// to avoid. The outer ORDER BY + LIMIT re-merges the two (already small,
+// already sorted) branch results; the top-K of a two-way sorted merge is
+// always contained within the top-K of each input, so this is exact, not
+// an approximation. See ledger-svc's getHistory for the same
+// created_at DESC, id DESC tie-break reasoning (created_at can collide
+// within one transaction-local now()).
+//
+// The recipient branch only ever matches status = 'completed': a
+// rejected/failed/pending transfer never moved money, so from the
+// recipient's perspective it never happened — showing it would leak the
+// sender's own fraud-rule trigger and unrelated activity to someone who
+// was never party to a real event. The sender branch has no status filter:
+// it's the sender's own transfer, in whatever state it's in.
+const transferHistoryQueryFirstPage = `
+(SELECT ` + transferHistoryColumns + `
+ FROM transfers
+ WHERE sender_account_id = $1
+ ORDER BY created_at DESC, id DESC
+ LIMIT $2)
+UNION ALL
+(SELECT ` + transferHistoryColumns + `
+ FROM transfers
+ WHERE recipient_account_id = $1 AND status = 'completed'
+ ORDER BY created_at DESC, id DESC
+ LIMIT $2)
+ORDER BY created_at DESC, id DESC
+LIMIT $2`
+
+const transferHistoryQueryNextPage = `
+(SELECT ` + transferHistoryColumns + `
+ FROM transfers
+ WHERE sender_account_id = $1 AND (created_at, id) < ($3, $4)
+ ORDER BY created_at DESC, id DESC
+ LIMIT $2)
+UNION ALL
+(SELECT ` + transferHistoryColumns + `
+ FROM transfers
+ WHERE recipient_account_id = $1 AND status = 'completed' AND (created_at, id) < ($3, $4)
+ ORDER BY created_at DESC, id DESC
+ LIMIT $2)
+ORDER BY created_at DESC, id DESC
+LIMIT $2`
+
+// getTransferHistoryPage returns up to limit of accountID's transfers (as
+// sender — any status — or as recipient — status = 'completed' only, see
+// the query comment above), newest first, plus whether more rows exist
+// beyond this page. cursor is nil for the first page; otherwise it's the
+// (created_at, id) of the last row returned by the previous page.
+//
+// Internally requests limit+1 rows (one extra to detect "is there a next
+// page" without a separate COUNT query), then trims back to limit.
+func getTransferHistoryPage(ctx context.Context, pool *pgxpool.Pool, accountID string, limit int32, cursor *pageCursor) ([]Transfer, bool, error) {
+	fetchLimit := limit + 1
+
+	var rows pgx.Rows
+	var err error
+	if cursor == nil {
+		rows, err = pool.Query(ctx, transferHistoryQueryFirstPage, accountID, fetchLimit)
+	} else {
+		rows, err = pool.Query(ctx, transferHistoryQueryNextPage, accountID, fetchLimit, cursor.CreatedAt, cursor.ID)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("query transfers: %w", err)
+		var pgErr *pgconn.PgError
+		if cursor != nil && errors.As(err, &pgErr) && pgErr.Code == invalidTextRepresentation {
+			return nil, false, errInvalidCursor
+		}
+		return nil, false, fmt.Errorf("query transfer history: %w", err)
 	}
 	defer rows.Close()
 
-	transfers := make([]Transfer, 0, limit)
+	transfers := make([]Transfer, 0, fetchLimit)
 	for rows.Next() {
 		var t Transfer
 		if err := rows.Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan transfer: %w", err)
+			return nil, false, fmt.Errorf("scan transfer: %w", err)
 		}
 		transfers = append(transfers, t)
 	}
-	return transfers, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("query transfer history: %w", err)
+	}
+
+	hasMore := len(transfers) > int(limit)
+	if hasMore {
+		transfers = transfers[:limit]
+	}
+	return transfers, hasMore, nil
 }
 
 // reconcileReplay compares an existing transfer found by idempotency key

@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	crand "crypto/rand"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
@@ -53,13 +57,15 @@ func randomUUIDForTest(t *testing.T) string {
 }
 
 // fakeAccountsClient implements accountsv1.AccountsServiceClient without a
-// live accounts-svc, embedding the real interface as nil so only the two
-// methods createTransfer actually calls need overriding — if the proto ever
-// grows more RPCs, this fake keeps compiling instead of breaking every test.
+// live accounts-svc, embedding the real interface as nil so only the
+// methods actually exercised need overriding — if the proto ever grows more
+// RPCs, this fake keeps compiling instead of breaking every test.
 type fakeAccountsClient struct {
 	accountsv1.AccountsServiceClient
-	resolveFunc func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error)
-	getByIDFunc func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error)
+	resolveFunc              func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error)
+	getByIDFunc              func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error)
+	getByUserIDFunc          func(ctx context.Context, req *accountsv1.GetAccountByUserIDRequest) (*accountsv1.GetAccountByUserIDResponse, error)
+	resolveAccountsByIdsFunc func(ctx context.Context, req *accountsv1.ResolveAccountsByIdsRequest) (*accountsv1.ResolveAccountsByIdsResponse, error)
 }
 
 func (f *fakeAccountsClient) ResolveAccountByNumber(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest, opts ...grpc.CallOption) (*accountsv1.ResolveAccountByNumberResponse, error) {
@@ -68,6 +74,14 @@ func (f *fakeAccountsClient) ResolveAccountByNumber(ctx context.Context, req *ac
 
 func (f *fakeAccountsClient) GetAccountByID(ctx context.Context, req *accountsv1.GetAccountByIDRequest, opts ...grpc.CallOption) (*accountsv1.GetAccountByIDResponse, error) {
 	return f.getByIDFunc(ctx, req)
+}
+
+func (f *fakeAccountsClient) GetAccountByUserID(ctx context.Context, req *accountsv1.GetAccountByUserIDRequest, opts ...grpc.CallOption) (*accountsv1.GetAccountByUserIDResponse, error) {
+	return f.getByUserIDFunc(ctx, req)
+}
+
+func (f *fakeAccountsClient) ResolveAccountsByIds(ctx context.Context, req *accountsv1.ResolveAccountsByIdsRequest, opts ...grpc.CallOption) (*accountsv1.ResolveAccountsByIdsResponse, error) {
+	return f.resolveAccountsByIdsFunc(ctx, req)
 }
 
 // fakeLedgerClient implements ledgerv1.LedgerServiceClient without a live
@@ -169,6 +183,16 @@ func deleteTransfer(t *testing.T, ctx context.Context, pool *pgxpool.Pool, idemp
 	t.Helper()
 	if _, err := pool.Exec(ctx, "DELETE FROM transfers WHERE idempotency_key = $1", idempotencyKey); err != nil {
 		t.Logf("cleanup: delete transfer idempotency_key=%s: %v", idempotencyKey, err)
+	}
+}
+
+// setTransferCreatedAtForTest overrides a transfer's created_at directly,
+// for pagination tests that need deterministic, distinctly-ordered rows
+// rather than relying on real wall-clock spacing between inserts.
+func setTransferCreatedAtForTest(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id string, ts time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, "UPDATE transfers SET created_at = $1 WHERE id = $2", ts, id); err != nil {
+		t.Fatalf("set transfer created_at: %v", err)
 	}
 }
 
@@ -828,7 +852,7 @@ func TestCreateTransfer_ConcurrentDuplicate(t *testing.T) {
 	}
 }
 
-func TestGetTransfersForAccount(t *testing.T) {
+func TestGetTransferHistoryPage_BothDirectionsAndVisibility(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
 
@@ -836,35 +860,235 @@ func TestGetTransfersForAccount(t *testing.T) {
 	accountB := randomUUIDForTest(t)
 	accountC := randomUUIDForTest(t)
 
-	sent := insertPendingTransfer(t, ctx, pool, accountA, accountB, 1000)
-	received := insertPendingTransfer(t, ctx, pool, accountB, accountA, 2000)
+	outgoing := insertPendingTransfer(t, ctx, pool, accountA, accountB, 1000)
+	incoming := insertPendingTransfer(t, ctx, pool, accountB, accountA, 2000)
+	if _, err := markTransferCompleted(ctx, pool, incoming.ID, randomUUIDForTest(t)); err != nil {
+		t.Fatalf("markTransferCompleted: %v", err)
+	}
 	unrelated := insertPendingTransfer(t, ctx, pool, accountB, accountC, 3000)
 
-	transfers, err := getTransfersForAccount(ctx, pool, accountA, 20, 0)
+	transfers, hasMore, err := getTransferHistoryPage(ctx, pool, accountA, 20, nil)
 	if err != nil {
-		t.Fatalf("getTransfersForAccount: unexpected error: %v", err)
+		t.Fatalf("getTransferHistoryPage: unexpected error: %v", err)
+	}
+	if hasMore {
+		t.Errorf("hasMore = true, want false (only 2 rows for a limit of 20)")
 	}
 
 	ids := make(map[string]bool, len(transfers))
 	for _, tr := range transfers {
 		ids[tr.ID] = true
 	}
-	if !ids[sent.ID] {
-		t.Errorf("expected sent transfer %s in results", sent.ID)
+	if !ids[outgoing.ID] {
+		t.Errorf("expected outgoing (pending) transfer %s in accountA's results", outgoing.ID)
 	}
-	if !ids[received.ID] {
-		t.Errorf("expected received transfer %s in results", received.ID)
+	if !ids[incoming.ID] {
+		t.Errorf("expected incoming (completed) transfer %s in accountA's results", incoming.ID)
 	}
 	if ids[unrelated.ID] {
 		t.Errorf("unrelated transfer %s should not be in accountA's results", unrelated.ID)
 	}
 
-	// Pagination: limit=1 should return exactly one row.
-	limited, err := getTransfersForAccount(ctx, pool, accountA, 1, 0)
+	// Pagination: limit=1 should return exactly one row and report more.
+	limited, hasMore, err := getTransferHistoryPage(ctx, pool, accountA, 1, nil)
 	if err != nil {
-		t.Fatalf("getTransfersForAccount (limit=1): unexpected error: %v", err)
+		t.Fatalf("getTransferHistoryPage (limit=1): unexpected error: %v", err)
 	}
 	if len(limited) != 1 {
 		t.Errorf("len(limited) = %d, want 1", len(limited))
+	}
+	if !hasMore {
+		t.Errorf("hasMore = false, want true (2 rows exist for a limit of 1)")
+	}
+}
+
+func TestGetTransferHistoryPage_RecipientHidesNonCompleted(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountA := randomUUIDForTest(t)
+	accountB := randomUUIDForTest(t)
+
+	pending := insertPendingTransfer(t, ctx, pool, accountB, accountA, 1000)
+
+	failed := insertPendingTransfer(t, ctx, pool, accountB, accountA, 2000)
+	if _, err := markTransferFailed(ctx, pool, failed.ID, failureReasonInsufficientFunds); err != nil {
+		t.Fatalf("markTransferFailed: %v", err)
+	}
+
+	rejected := insertPendingTransfer(t, ctx, pool, accountB, accountA, 3000)
+	if _, err := markTransferRejected(ctx, pool, rejected.ID, "amount_threshold"); err != nil {
+		t.Fatalf("markTransferRejected: %v", err)
+	}
+
+	// Recipient (accountA) should see none of these three.
+	recipientView, _, err := getTransferHistoryPage(ctx, pool, accountA, 20, nil)
+	if err != nil {
+		t.Fatalf("getTransferHistoryPage(accountA): unexpected error: %v", err)
+	}
+	for _, tr := range recipientView {
+		if tr.ID == pending.ID || tr.ID == failed.ID || tr.ID == rejected.ID {
+			t.Errorf("recipient accountA should not see transfer %s (status=%s)", tr.ID, tr.Status)
+		}
+	}
+
+	// Sender (accountB) should see all three, in every status.
+	senderView, _, err := getTransferHistoryPage(ctx, pool, accountB, 20, nil)
+	if err != nil {
+		t.Fatalf("getTransferHistoryPage(accountB): unexpected error: %v", err)
+	}
+	senderIDs := make(map[string]bool, len(senderView))
+	for _, tr := range senderView {
+		senderIDs[tr.ID] = true
+	}
+	for _, tr := range []Transfer{pending, failed, rejected} {
+		if !senderIDs[tr.ID] {
+			t.Errorf("sender accountB should see its own transfer %s", tr.ID)
+		}
+	}
+}
+
+func TestGetTransferHistoryPage_CursorPagination(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountA := randomUUIDForTest(t)
+	accountB := randomUUIDForTest(t)
+
+	const total = 5
+	base := time.Now().Add(-time.Hour)
+	inserted := make([]Transfer, total)
+	for i := 0; i < total; i++ {
+		tr := insertPendingTransfer(t, ctx, pool, accountA, accountB, int64(1000+i))
+		setTransferCreatedAtForTest(t, ctx, pool, tr.ID, base.Add(time.Duration(i)*time.Minute))
+		tr.CreatedAt = base.Add(time.Duration(i) * time.Minute)
+		inserted[i] = tr
+	}
+
+	seen := map[string]bool{}
+	var order []string
+	var cursor *pageCursor
+	for i := 0; i < total+1; i++ { // +1 guards against an infinite loop on a bug
+		page, hasMore, err := getTransferHistoryPage(ctx, pool, accountA, 2, cursor)
+		if err != nil {
+			t.Fatalf("getTransferHistoryPage: unexpected error: %v", err)
+		}
+		for _, tr := range page {
+			if seen[tr.ID] {
+				t.Fatalf("transfer %s returned more than once across pages", tr.ID)
+			}
+			seen[tr.ID] = true
+			order = append(order, tr.ID)
+		}
+		if !hasMore {
+			break
+		}
+		last := page[len(page)-1]
+		cursor = &pageCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+
+	if len(seen) != total {
+		t.Fatalf("saw %d distinct transfers across pages, want %d", len(seen), total)
+	}
+	// Newest first: inserted[total-1] has the latest created_at.
+	for i, id := range order {
+		want := inserted[total-1-i].ID
+		if id != want {
+			t.Errorf("order[%d] = %s, want %s (created_at DESC, id DESC)", i, id, want)
+		}
+	}
+}
+
+// TestListTransfersHandler_BatchResolvesCounterpartiesOnce is the
+// regression guard for the N+1 fix: however many rows/distinct
+// counterparties are on a page, ResolveAccountsByIds must be called
+// exactly once per request.
+func TestListTransfersHandler_BatchResolvesCounterpartiesOnce(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountA := randomUUIDForTest(t)
+	accountB := randomUUIDForTest(t)
+	accountC := randomUUIDForTest(t)
+
+	insertPendingTransfer(t, ctx, pool, accountA, accountB, 1000)
+	insertPendingTransfer(t, ctx, pool, accountA, accountC, 2000)
+	third := insertPendingTransfer(t, ctx, pool, accountA, accountB, 3000)
+	if _, err := markTransferCompleted(ctx, pool, third.ID, randomUUIDForTest(t)); err != nil {
+		t.Fatalf("markTransferCompleted: %v", err)
+	}
+
+	accountNumbers := map[string]string{
+		accountB: "NB0000000001",
+		accountC: "NB0000000002",
+	}
+
+	var resolveCalls int
+	client := &fakeAccountsClient{
+		getByUserIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByUserIDRequest) (*accountsv1.GetAccountByUserIDResponse, error) {
+			return &accountsv1.GetAccountByUserIDResponse{AccountId: accountA, Status: "active"}, nil
+		},
+		resolveAccountsByIdsFunc: func(ctx context.Context, req *accountsv1.ResolveAccountsByIdsRequest) (*accountsv1.ResolveAccountsByIdsResponse, error) {
+			resolveCalls++
+			resp := &accountsv1.ResolveAccountsByIdsResponse{}
+			for _, id := range req.GetAccountIds() {
+				if number, ok := accountNumbers[id]; ok {
+					resp.Accounts = append(resp.Accounts, &accountsv1.AccountSummary{AccountId: id, AccountNumber: number})
+				}
+			}
+			return resp, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-User-Id", "irrelevant-userid-fake-handles-lookup")
+	rec := httptest.NewRecorder()
+
+	listTransfersHandler(pool, client)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if resolveCalls != 1 {
+		t.Errorf("ResolveAccountsByIds called %d times, want exactly 1", resolveCalls)
+	}
+
+	var resp listTransfersResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Transfers) != 3 {
+		t.Fatalf("len(resp.Transfers) = %d, want 3", len(resp.Transfers))
+	}
+	for _, entry := range resp.Transfers {
+		if entry.Direction != "outgoing" {
+			t.Errorf("transfer %s direction = %q, want %q", entry.ID, entry.Direction, "outgoing")
+		}
+		want := accountNumbers[entry.RecipientAccountID]
+		if entry.CounterpartyAccountNumber != want {
+			t.Errorf("transfer %s counterparty_account_number = %q, want %q", entry.ID, entry.CounterpartyAccountNumber, want)
+		}
+	}
+}
+
+func TestListTransfersHandler_InvalidCursor(t *testing.T) {
+	// No live DB needed: an invalid cursor is rejected in
+	// parseHistoryQuery, before the handler ever queries pool.
+	var pool *pgxpool.Pool
+
+	client := &fakeAccountsClient{
+		getByUserIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByUserIDRequest) (*accountsv1.GetAccountByUserIDResponse, error) {
+			return &accountsv1.GetAccountByUserIDResponse{AccountId: randomUUIDForTest(t), Status: "active"}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/?cursor=not-valid-base64!!", nil)
+	req.Header.Set("X-User-Id", "irrelevant-userid-fake-handles-lookup")
+	rec := httptest.NewRecorder()
+
+	listTransfersHandler(pool, client)(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }

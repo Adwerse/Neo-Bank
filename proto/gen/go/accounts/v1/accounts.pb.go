@@ -317,6 +317,149 @@ func (x *GetAccountByUserIDResponse) GetStatus() string {
 	return ""
 }
 
+type ResolveAccountsByIdsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccountIds    []string               `protobuf:"bytes,1,rep,name=account_ids,json=accountIds,proto3" json:"account_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveAccountsByIdsRequest) Reset() {
+	*x = ResolveAccountsByIdsRequest{}
+	mi := &file_accounts_v1_accounts_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveAccountsByIdsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveAccountsByIdsRequest) ProtoMessage() {}
+
+func (x *ResolveAccountsByIdsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_accounts_v1_accounts_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveAccountsByIdsRequest.ProtoReflect.Descriptor instead.
+func (*ResolveAccountsByIdsRequest) Descriptor() ([]byte, []int) {
+	return file_accounts_v1_accounts_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ResolveAccountsByIdsRequest) GetAccountIds() []string {
+	if x != nil {
+		return x.AccountIds
+	}
+	return nil
+}
+
+type ResolveAccountsByIdsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accounts      []*AccountSummary      `protobuf:"bytes,1,rep,name=accounts,proto3" json:"accounts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveAccountsByIdsResponse) Reset() {
+	*x = ResolveAccountsByIdsResponse{}
+	mi := &file_accounts_v1_accounts_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveAccountsByIdsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveAccountsByIdsResponse) ProtoMessage() {}
+
+func (x *ResolveAccountsByIdsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_accounts_v1_accounts_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveAccountsByIdsResponse.ProtoReflect.Descriptor instead.
+func (*ResolveAccountsByIdsResponse) Descriptor() ([]byte, []int) {
+	return file_accounts_v1_accounts_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ResolveAccountsByIdsResponse) GetAccounts() []*AccountSummary {
+	if x != nil {
+		return x.Accounts
+	}
+	return nil
+}
+
+// AccountSummary is a minimal per-account projection for batch lookups —
+// only what a caller needs to enrich a list of records with human-readable
+// account info, not the full GetAccountByIDResponse shape.
+type AccountSummary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccountId     string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	AccountNumber string                 `protobuf:"bytes,2,opt,name=account_number,json=accountNumber,proto3" json:"account_number,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccountSummary) Reset() {
+	*x = AccountSummary{}
+	mi := &file_accounts_v1_accounts_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccountSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccountSummary) ProtoMessage() {}
+
+func (x *AccountSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_accounts_v1_accounts_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccountSummary.ProtoReflect.Descriptor instead.
+func (*AccountSummary) Descriptor() ([]byte, []int) {
+	return file_accounts_v1_accounts_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *AccountSummary) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *AccountSummary) GetAccountNumber() string {
+	if x != nil {
+		return x.AccountNumber
+	}
+	return ""
+}
+
 var File_accounts_v1_accounts_proto protoreflect.FileDescriptor
 
 const file_accounts_v1_accounts_proto_rawDesc = "" +
@@ -341,11 +484,21 @@ const file_accounts_v1_accounts_proto_rawDesc = "" +
 	"\x1aGetAccountByUserIDResponse\x12\x1d\n" +
 	"\n" +
 	"account_id\x18\x01 \x01(\tR\taccountId\x12\x16\n" +
-	"\x06status\x18\x02 \x01(\tR\x06status2\xc6\x02\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\">\n" +
+	"\x1bResolveAccountsByIdsRequest\x12\x1f\n" +
+	"\vaccount_ids\x18\x01 \x03(\tR\n" +
+	"accountIds\"W\n" +
+	"\x1cResolveAccountsByIdsResponse\x127\n" +
+	"\baccounts\x18\x01 \x03(\v2\x1b.accounts.v1.AccountSummaryR\baccounts\"V\n" +
+	"\x0eAccountSummary\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\x12%\n" +
+	"\x0eaccount_number\x18\x02 \x01(\tR\raccountNumber2\xb3\x03\n" +
 	"\x0fAccountsService\x12q\n" +
 	"\x16ResolveAccountByNumber\x12*.accounts.v1.ResolveAccountByNumberRequest\x1a+.accounts.v1.ResolveAccountByNumberResponse\x12Y\n" +
 	"\x0eGetAccountByID\x12\".accounts.v1.GetAccountByIDRequest\x1a#.accounts.v1.GetAccountByIDResponse\x12e\n" +
-	"\x12GetAccountByUserID\x12&.accounts.v1.GetAccountByUserIDRequest\x1a'.accounts.v1.GetAccountByUserIDResponseB-Z+neobank/proto/gen/go/accounts/v1;accountsv1b\x06proto3"
+	"\x12GetAccountByUserID\x12&.accounts.v1.GetAccountByUserIDRequest\x1a'.accounts.v1.GetAccountByUserIDResponse\x12k\n" +
+	"\x14ResolveAccountsByIds\x12(.accounts.v1.ResolveAccountsByIdsRequest\x1a).accounts.v1.ResolveAccountsByIdsResponseB-Z+neobank/proto/gen/go/accounts/v1;accountsv1b\x06proto3"
 
 var (
 	file_accounts_v1_accounts_proto_rawDescOnce sync.Once
@@ -359,7 +512,7 @@ func file_accounts_v1_accounts_proto_rawDescGZIP() []byte {
 	return file_accounts_v1_accounts_proto_rawDescData
 }
 
-var file_accounts_v1_accounts_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_accounts_v1_accounts_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_accounts_v1_accounts_proto_goTypes = []any{
 	(*ResolveAccountByNumberRequest)(nil),  // 0: accounts.v1.ResolveAccountByNumberRequest
 	(*ResolveAccountByNumberResponse)(nil), // 1: accounts.v1.ResolveAccountByNumberResponse
@@ -367,19 +520,25 @@ var file_accounts_v1_accounts_proto_goTypes = []any{
 	(*GetAccountByIDResponse)(nil),         // 3: accounts.v1.GetAccountByIDResponse
 	(*GetAccountByUserIDRequest)(nil),      // 4: accounts.v1.GetAccountByUserIDRequest
 	(*GetAccountByUserIDResponse)(nil),     // 5: accounts.v1.GetAccountByUserIDResponse
+	(*ResolveAccountsByIdsRequest)(nil),    // 6: accounts.v1.ResolveAccountsByIdsRequest
+	(*ResolveAccountsByIdsResponse)(nil),   // 7: accounts.v1.ResolveAccountsByIdsResponse
+	(*AccountSummary)(nil),                 // 8: accounts.v1.AccountSummary
 }
 var file_accounts_v1_accounts_proto_depIdxs = []int32{
-	0, // 0: accounts.v1.AccountsService.ResolveAccountByNumber:input_type -> accounts.v1.ResolveAccountByNumberRequest
-	2, // 1: accounts.v1.AccountsService.GetAccountByID:input_type -> accounts.v1.GetAccountByIDRequest
-	4, // 2: accounts.v1.AccountsService.GetAccountByUserID:input_type -> accounts.v1.GetAccountByUserIDRequest
-	1, // 3: accounts.v1.AccountsService.ResolveAccountByNumber:output_type -> accounts.v1.ResolveAccountByNumberResponse
-	3, // 4: accounts.v1.AccountsService.GetAccountByID:output_type -> accounts.v1.GetAccountByIDResponse
-	5, // 5: accounts.v1.AccountsService.GetAccountByUserID:output_type -> accounts.v1.GetAccountByUserIDResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	8, // 0: accounts.v1.ResolveAccountsByIdsResponse.accounts:type_name -> accounts.v1.AccountSummary
+	0, // 1: accounts.v1.AccountsService.ResolveAccountByNumber:input_type -> accounts.v1.ResolveAccountByNumberRequest
+	2, // 2: accounts.v1.AccountsService.GetAccountByID:input_type -> accounts.v1.GetAccountByIDRequest
+	4, // 3: accounts.v1.AccountsService.GetAccountByUserID:input_type -> accounts.v1.GetAccountByUserIDRequest
+	6, // 4: accounts.v1.AccountsService.ResolveAccountsByIds:input_type -> accounts.v1.ResolveAccountsByIdsRequest
+	1, // 5: accounts.v1.AccountsService.ResolveAccountByNumber:output_type -> accounts.v1.ResolveAccountByNumberResponse
+	3, // 6: accounts.v1.AccountsService.GetAccountByID:output_type -> accounts.v1.GetAccountByIDResponse
+	5, // 7: accounts.v1.AccountsService.GetAccountByUserID:output_type -> accounts.v1.GetAccountByUserIDResponse
+	7, // 8: accounts.v1.AccountsService.ResolveAccountsByIds:output_type -> accounts.v1.ResolveAccountsByIdsResponse
+	5, // [5:9] is the sub-list for method output_type
+	1, // [1:5] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_accounts_v1_accounts_proto_init() }
@@ -393,7 +552,7 @@ func file_accounts_v1_accounts_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_accounts_v1_accounts_proto_rawDesc), len(file_accounts_v1_accounts_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -55,3 +55,18 @@ func (s *accountsServer) GetAccountByUserID(ctx context.Context, req *accountsv1
 	}
 	return &accountsv1.GetAccountByUserIDResponse{AccountId: acc.ID, Status: acc.Status}, nil
 }
+
+// ResolveAccountsByIds has no "not found" case — a batch lookup returning
+// fewer accounts than ids requested is a normal outcome, not an error.
+func (s *accountsServer) ResolveAccountsByIds(ctx context.Context, req *accountsv1.ResolveAccountsByIdsRequest) (*accountsv1.ResolveAccountsByIdsResponse, error) {
+	accounts, err := getAccountsByIDs(ctx, s.pool, req.GetAccountIds())
+	if err != nil {
+		log.Printf("accounts-svc: ResolveAccountsByIds: %v", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	resp := &accountsv1.ResolveAccountsByIdsResponse{Accounts: make([]*accountsv1.AccountSummary, 0, len(accounts))}
+	for _, acc := range accounts {
+		resp.Accounts = append(resp.Accounts, &accountsv1.AccountSummary{AccountId: acc.ID, AccountNumber: acc.AccountNumber})
+	}
+	return resp, nil
+}

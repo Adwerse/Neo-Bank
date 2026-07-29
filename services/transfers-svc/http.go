@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -165,14 +166,26 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 // project, so history should show that too, not a bare account_id UUID.
 type transferHistoryEntry struct {
 	Transfer
-	Direction                 string `json:"direction"` // "sent" | "received"
+	Direction                 string `json:"direction"` // "outgoing" | "incoming"
 	CounterpartyAccountNumber string `json:"counterparty_account_number"`
 }
 
+// listTransfersResponse is the GET /transfers envelope: a page of entries
+// plus an opaque cursor for the next page. NextCursor is omitted once
+// there's nothing more to fetch.
+type listTransfersResponse struct {
+	Transfers  []transferHistoryEntry `json:"transfers"`
+	NextCursor *string                `json:"next_cursor,omitempty"`
+}
+
 // listTransfersHandler is registered at "GET /" (external GET /transfers).
-// Pagination is via ?limit=&offset=, defaulted/clamped rather than
-// rejected — this is the caller's own history, not a security-sensitive
-// input.
+// Pagination is cursor-based (?cursor=, an opaque token from a prior
+// response's next_cursor) rather than offset-based: an offset shifts and
+// duplicates rows as new transfers are inserted between page requests on a
+// growing history, which a keyset cursor over (created_at, id) doesn't.
+// limit is still defaulted/clamped rather than rejected — it's just a
+// page-size preference, not a security-sensitive input; a malformed
+// cursor, in contrast, is rejected with 400 (see errInvalidCursor).
 func listTransfersHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -187,56 +200,90 @@ func listTransfersHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 			return
 		}
 
-		limit, offset := parsePagination(r)
-
-		transfers, err := getTransfersForAccount(r.Context(), pool, accountID, limit, offset)
+		limit, cursor, err := parseHistoryQuery(r)
 		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid cursor")
+			return
+		}
+
+		transfers, hasMore, err := getTransferHistoryPage(r.Context(), pool, accountID, limit, cursor)
+		if err != nil {
+			if errors.Is(err, errInvalidCursor) {
+				writeJSONError(w, http.StatusBadRequest, "invalid cursor")
+				return
+			}
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
 		}
 
-		// Memoized per request: the same counterparty can appear in
-		// multiple rows on one page.
-		accountNumberCache := map[string]string{}
+		// Collect every unique counterparty for this page and resolve all
+		// of them in a single batch RPC — one call per request, not one
+		// call per counterparty.
+		counterpartyIDSet := make(map[string]struct{}, len(transfers))
+		for _, t := range transfers {
+			if t.SenderAccountID == accountID {
+				counterpartyIDSet[t.RecipientAccountID] = struct{}{}
+			} else {
+				counterpartyIDSet[t.SenderAccountID] = struct{}{}
+			}
+		}
+		counterpartyIDs := make([]string, 0, len(counterpartyIDSet))
+		for id := range counterpartyIDSet {
+			counterpartyIDs = append(counterpartyIDs, id)
+		}
+
+		accountNumbers := map[string]string{}
+		if len(counterpartyIDs) > 0 {
+			resolved, err := accountsClient.ResolveAccountsByIds(r.Context(), &accountsv1.ResolveAccountsByIdsRequest{AccountIds: counterpartyIDs})
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+				return
+			}
+			for _, acc := range resolved.GetAccounts() {
+				accountNumbers[acc.GetAccountId()] = acc.GetAccountNumber()
+			}
+		}
+
 		entries := make([]transferHistoryEntry, 0, len(transfers))
 		for _, t := range transfers {
 			entry := transferHistoryEntry{Transfer: t}
 			counterpartyID := t.RecipientAccountID
 			if t.SenderAccountID == accountID {
-				entry.Direction = "sent"
+				entry.Direction = "outgoing"
 			} else {
-				entry.Direction = "received"
+				entry.Direction = "incoming"
 				counterpartyID = t.SenderAccountID
 			}
-			number, ok := accountNumberCache[counterpartyID]
-			if !ok {
-				acc, err := accountsClient.GetAccountByID(r.Context(), &accountsv1.GetAccountByIDRequest{AccountId: counterpartyID})
-				if err != nil {
-					writeJSONError(w, http.StatusInternalServerError, "failed to process request")
-					return
-				}
-				number = acc.GetAccountNumber()
-				accountNumberCache[counterpartyID] = number
-			}
-			entry.CounterpartyAccountNumber = number
+			entry.CounterpartyAccountNumber = accountNumbers[counterpartyID]
 			entries = append(entries, entry)
 		}
 
+		resp := listTransfersResponse{Transfers: entries}
+		if hasMore && len(transfers) > 0 {
+			last := transfers[len(transfers)-1]
+			next := encodeCursor(pageCursor{CreatedAt: last.CreatedAt, ID: last.ID})
+			resp.NextCursor = &next
+		}
+
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(entries)
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
-func parsePagination(r *http.Request) (limit, offset int32) {
+func parseHistoryQuery(r *http.Request) (limit int32, cursor *pageCursor, err error) {
 	const defaultLimit, maxLimit = 20, 100
 	limit = defaultLimit
 	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= maxLimit {
 		limit = int32(v)
 	}
-	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
-		offset = int32(v)
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		c, err := decodeCursor(raw)
+		if err != nil {
+			return 0, nil, err
+		}
+		cursor = &c
 	}
-	return limit, offset
+	return limit, cursor, nil
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {

@@ -383,20 +383,26 @@ paths:
           schema:
             type: integer
             default: 20
-        - name: offset
+        - name: cursor
           in: query
+          description: >
+            Opaque continuation token from a previous response's
+            next_cursor. Omit to fetch the first page.
           schema:
-            type: integer
-            default: 0
+            type: string
       responses:
         '200':
-          description: Transfer history.
+          description: A page of transfer history.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/TransferHistoryEntry'
+                $ref: '#/components/schemas/TransferHistoryPage'
+        '400':
+          description: Malformed cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -657,6 +663,20 @@ components:
                 Only present when the outcome is uncertain (202) — e.g.
                 "transfer status unknown, still processing".
 
+    TransferHistoryPage:
+      type: object
+      required: [transfers]
+      properties:
+        transfers:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransferHistoryEntry'
+        next_cursor:
+          type: string
+          description: >
+            Pass as ?cursor= on the next request. Absent when there are no
+            more pages.
+
     TransferHistoryEntry:
       allOf:
         - $ref: '#/components/schemas/Transfer'
@@ -665,6 +685,6 @@ components:
           properties:
             direction:
               type: string
-              enum: [sent, received]
+              enum: [outgoing, incoming]
             counterparty_account_number:
               type: string
