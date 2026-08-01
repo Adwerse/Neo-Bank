@@ -12,8 +12,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	eventsv1 "neobank/proto/gen/go/events/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
@@ -394,9 +397,22 @@ func settleTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledger
 // generic account_not_found reason is enough rather than parsing
 // ledger-svc's message wording, a fragile coupling.
 
+// markTransferCompleted, markTransferFailed, and markTransferRejected each
+// write their status UPDATE and the corresponding outbox event in a single
+// Postgres transaction — either both persist or neither does. This is the
+// entire point of the outbox pattern (see auth-svc's kafka.go TODO for the
+// dual-write gap it closes): a transfer must never reach a terminal status
+// without its event durably queued for a later Kafka publish, and an event
+// must never exist for a status change that got rolled back.
 func markTransferCompleted(ctx context.Context, pool *pgxpool.Pool, id, ledgerTransactionID string) (Transfer, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer completed: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	var t Transfer
-	err := pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`UPDATE transfers SET status = 'completed', ledger_transaction_id = $1, updated_at = now()
 		 WHERE id = $2
 		 RETURNING id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`,
@@ -405,12 +421,42 @@ func markTransferCompleted(ctx context.Context, pool *pgxpool.Pool, id, ledgerTr
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer completed: %w", err)
 	}
+
+	eventID, err := generateEventID()
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer completed: generate event id: %w", err)
+	}
+	payload, err := proto.Marshal(&eventsv1.TransferCompleted{
+		EventId:             eventID,
+		TransferId:          t.ID,
+		SenderAccountId:     t.SenderAccountID,
+		RecipientAccountId:  t.RecipientAccountID,
+		Amount:              t.Amount,
+		LedgerTransactionId: ledgerTransactionID,
+		OccurredAt:          timestamppb.New(time.Now()),
+	})
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer completed: marshal event: %w", err)
+	}
+	if err := insertOutboxEvent(ctx, tx, eventID, "TransferCompleted", t.SenderAccountID, payload); err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer completed: insert outbox event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer completed: commit tx: %w", err)
+	}
 	return t, nil
 }
 
 func markTransferFailed(ctx context.Context, pool *pgxpool.Pool, id, failureReason string) (Transfer, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer failed: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	var t Transfer
-	err := pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`UPDATE transfers SET status = 'failed', failure_reason = $1, updated_at = now()
 		 WHERE id = $2
 		 RETURNING id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`,
@@ -418,6 +464,30 @@ func markTransferFailed(ctx context.Context, pool *pgxpool.Pool, id, failureReas
 	).Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer failed: %w", err)
+	}
+
+	eventID, err := generateEventID()
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer failed: generate event id: %w", err)
+	}
+	payload, err := proto.Marshal(&eventsv1.TransferFailed{
+		EventId:            eventID,
+		TransferId:         t.ID,
+		SenderAccountId:    t.SenderAccountID,
+		RecipientAccountId: t.RecipientAccountID,
+		Amount:             t.Amount,
+		Reason:             failureReason,
+		OccurredAt:         timestamppb.New(time.Now()),
+	})
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer failed: marshal event: %w", err)
+	}
+	if err := insertOutboxEvent(ctx, tx, eventID, "TransferFailed", t.SenderAccountID, payload); err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer failed: insert outbox event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer failed: commit tx: %w", err)
 	}
 	return t, nil
 }
@@ -464,28 +534,101 @@ func getStalePendingTransfers(ctx context.Context, pool *pgxpool.Pool, staleAfte
 // already-committed result with stale information. The returned bool
 // reports whether this call's write actually happened, so the caller can
 // tell "resolved it" apart from "someone else already had."
-func markTransferCompletedIfPending(ctx context.Context, pool *pgxpool.Pool, id, ledgerTransactionID string) (bool, error) {
-	tag, err := pool.Exec(ctx,
+//
+// Both take the full transfer (rather than just its id) because the
+// outbox event needs sender_account_id/recipient_account_id/amount, which
+// are immutable after creation and already sit on the caller's Transfer —
+// no extra RETURNING/scan is needed to get them. When the race is lost
+// (RowsAffected == 0), nothing is written to outbox either: whoever
+// resolved the transfer first is responsible for its own event.
+func markTransferCompletedIfPending(ctx context.Context, pool *pgxpool.Pool, transfer Transfer, ledgerTransactionID string) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("mark transfer completed if pending: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE transfers SET status = 'completed', ledger_transaction_id = $1, updated_at = now()
 		 WHERE id = $2 AND status = 'pending'`,
-		ledgerTransactionID, id,
+		ledgerTransactionID, transfer.ID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("mark transfer completed if pending: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	eventID, err := generateEventID()
+	if err != nil {
+		return false, fmt.Errorf("mark transfer completed if pending: generate event id: %w", err)
+	}
+	payload, err := proto.Marshal(&eventsv1.TransferCompleted{
+		EventId:             eventID,
+		TransferId:          transfer.ID,
+		SenderAccountId:     transfer.SenderAccountID,
+		RecipientAccountId:  transfer.RecipientAccountID,
+		Amount:              transfer.Amount,
+		LedgerTransactionId: ledgerTransactionID,
+		OccurredAt:          timestamppb.New(time.Now()),
+	})
+	if err != nil {
+		return false, fmt.Errorf("mark transfer completed if pending: marshal event: %w", err)
+	}
+	if err := insertOutboxEvent(ctx, tx, eventID, "TransferCompleted", transfer.SenderAccountID, payload); err != nil {
+		return false, fmt.Errorf("mark transfer completed if pending: insert outbox event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("mark transfer completed if pending: commit tx: %w", err)
+	}
+	return true, nil
 }
 
-func markTransferFailedIfPending(ctx context.Context, pool *pgxpool.Pool, id, failureReason string) (bool, error) {
-	tag, err := pool.Exec(ctx,
+func markTransferFailedIfPending(ctx context.Context, pool *pgxpool.Pool, transfer Transfer, failureReason string) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("mark transfer failed if pending: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE transfers SET status = 'failed', failure_reason = $1, updated_at = now()
 		 WHERE id = $2 AND status = 'pending'`,
-		failureReason, id,
+		failureReason, transfer.ID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("mark transfer failed if pending: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	eventID, err := generateEventID()
+	if err != nil {
+		return false, fmt.Errorf("mark transfer failed if pending: generate event id: %w", err)
+	}
+	payload, err := proto.Marshal(&eventsv1.TransferFailed{
+		EventId:            eventID,
+		TransferId:         transfer.ID,
+		SenderAccountId:    transfer.SenderAccountID,
+		RecipientAccountId: transfer.RecipientAccountID,
+		Amount:             transfer.Amount,
+		Reason:             failureReason,
+		OccurredAt:         timestamppb.New(time.Now()),
+	})
+	if err != nil {
+		return false, fmt.Errorf("mark transfer failed if pending: marshal event: %w", err)
+	}
+	if err := insertOutboxEvent(ctx, tx, eventID, "TransferFailed", transfer.SenderAccountID, payload); err != nil {
+		return false, fmt.Errorf("mark transfer failed if pending: insert outbox event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("mark transfer failed if pending: commit tx: %w", err)
+	}
+	return true, nil
 }
 
 type fraudCheckOutcome int
@@ -548,8 +691,14 @@ func checkTransferFraud(ctx context.Context, pool *pgxpool.Pool, fraudClient fra
 }
 
 func markTransferRejected(ctx context.Context, pool *pgxpool.Pool, id, triggeredRule string) (Transfer, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer rejected: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	var t Transfer
-	err := pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`UPDATE transfers SET status = 'rejected', failure_reason = $1, updated_at = now()
 		 WHERE id = $2
 		 RETURNING id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`,
@@ -557,6 +706,30 @@ func markTransferRejected(ctx context.Context, pool *pgxpool.Pool, id, triggered
 	).Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer rejected: %w", err)
+	}
+
+	eventID, err := generateEventID()
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer rejected: generate event id: %w", err)
+	}
+	payload, err := proto.Marshal(&eventsv1.TransferRejected{
+		EventId:            eventID,
+		TransferId:         t.ID,
+		SenderAccountId:    t.SenderAccountID,
+		RecipientAccountId: t.RecipientAccountID,
+		Amount:             t.Amount,
+		TriggeredRule:      triggeredRule,
+		OccurredAt:         timestamppb.New(time.Now()),
+	})
+	if err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer rejected: marshal event: %w", err)
+	}
+	if err := insertOutboxEvent(ctx, tx, eventID, "TransferRejected", t.SenderAccountID, payload); err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer rejected: insert outbox event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Transfer{}, fmt.Errorf("mark transfer rejected: commit tx: %w", err)
 	}
 	return t, nil
 }

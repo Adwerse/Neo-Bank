@@ -6,6 +6,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.18.2
 	github.com/jackc/pgx/v5 v5.10.0
 	google.golang.org/grpc v1.75.0
+	google.golang.org/protobuf v1.36.11
 	neobank/proto/gen/go v0.0.0
 )
 
@@ -22,7 +23,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )
 
 replace neobank/proto/gen/go => ../../proto/gen/go

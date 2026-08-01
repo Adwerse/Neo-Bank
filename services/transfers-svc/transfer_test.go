@@ -16,8 +16,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
+	eventsv1 "neobank/proto/gen/go/events/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
@@ -130,6 +132,7 @@ func insertPendingTransfer(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		t.Fatalf("insert pending transfer: %v", err)
 	}
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
+	t.Cleanup(func() { deleteOutboxRows(t, ctx, pool, senderID) })
 	return tr
 }
 
@@ -149,6 +152,7 @@ func insertPendingTransferWithKey(t *testing.T, ctx context.Context, pool *pgxpo
 		t.Fatalf("insert pending transfer: %v", err)
 	}
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
+	t.Cleanup(func() { deleteOutboxRows(t, ctx, pool, senderID) })
 	return tr
 }
 
@@ -413,6 +417,30 @@ func TestSettleTransfer_Success(t *testing.T) {
 	if row.Status != "completed" {
 		t.Errorf("row.Status = %q, want \"completed\"", row.Status)
 	}
+
+	outboxRow := getOutboxRow(t, ctx, pool, pending.SenderAccountID)
+	if outboxRow.EventType != "TransferCompleted" {
+		t.Errorf("outbox event_type = %q, want \"TransferCompleted\"", outboxRow.EventType)
+	}
+	if outboxRow.PublishedAt != nil {
+		t.Errorf("outbox published_at = %v, want nil (not published by this task — a separate relay does that later)", outboxRow.PublishedAt)
+	}
+	var event eventsv1.TransferCompleted
+	if err := proto.Unmarshal(outboxRow.Payload, &event); err != nil {
+		t.Fatalf("unmarshal outbox payload: %v", err)
+	}
+	if event.GetEventId() == "" {
+		t.Error("event.EventId is empty, want a generated UUID")
+	}
+	if event.GetTransferId() != pending.ID {
+		t.Errorf("event.TransferId = %q, want %q", event.GetTransferId(), pending.ID)
+	}
+	if event.GetSenderAccountId() != pending.SenderAccountID || event.GetRecipientAccountId() != pending.RecipientAccountID || event.GetAmount() != pending.Amount {
+		t.Errorf("event = %+v, want sender=%s recipient=%s amount=%d", &event, pending.SenderAccountID, pending.RecipientAccountID, pending.Amount)
+	}
+	if event.GetLedgerTransactionId() != wantTransactionID {
+		t.Errorf("event.LedgerTransactionId = %q, want %q", event.GetLedgerTransactionId(), wantTransactionID)
+	}
 }
 
 func TestSettleTransfer_InsufficientFunds(t *testing.T) {
@@ -445,6 +473,18 @@ func TestSettleTransfer_InsufficientFunds(t *testing.T) {
 	if row.Status != "failed" {
 		t.Errorf("row.Status = %q, want \"failed\"", row.Status)
 	}
+
+	outboxRow := getOutboxRow(t, ctx, pool, pending.SenderAccountID)
+	if outboxRow.EventType != "TransferFailed" {
+		t.Errorf("outbox event_type = %q, want \"TransferFailed\"", outboxRow.EventType)
+	}
+	var event eventsv1.TransferFailed
+	if err := proto.Unmarshal(outboxRow.Payload, &event); err != nil {
+		t.Fatalf("unmarshal outbox payload: %v", err)
+	}
+	if event.GetReason() != failureReasonInsufficientFunds {
+		t.Errorf("event.Reason = %q, want %q", event.GetReason(), failureReasonInsufficientFunds)
+	}
 }
 
 func TestSettleTransfer_AccountNotFound(t *testing.T) {
@@ -468,6 +508,10 @@ func TestSettleTransfer_AccountNotFound(t *testing.T) {
 	}
 	if settled.FailureReason == nil || *settled.FailureReason != failureReasonAccountNotFound {
 		t.Errorf("settled.FailureReason = %v, want %q", settled.FailureReason, failureReasonAccountNotFound)
+	}
+
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 1 {
+		t.Errorf("outbox rows = %d, want 1", got)
 	}
 }
 
@@ -506,6 +550,9 @@ func TestSettleTransfer_Uncertain(t *testing.T) {
 			if row.FailureReason != nil {
 				t.Errorf("row.FailureReason = %v, want nil", row.FailureReason)
 			}
+			if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 0 {
+				t.Errorf("outbox rows = %d, want 0 (settleTransfer must not write an event when uncertain)", got)
+			}
 		})
 	}
 }
@@ -539,6 +586,9 @@ func TestCheckTransferFraud_Approved(t *testing.T) {
 	row := getTransferByID(t, ctx, pool, pending.ID)
 	if row.Status != "pending" {
 		t.Errorf("row.Status = %q, want \"pending\" (checkTransferFraud must not write anything on approve)", row.Status)
+	}
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 0 {
+		t.Errorf("outbox rows = %d, want 0", got)
 	}
 }
 
@@ -582,6 +632,21 @@ func TestCheckTransferFraud_Rejected(t *testing.T) {
 	if row.LedgerTransactionID != nil {
 		t.Errorf("row.LedgerTransactionID = %v, want nil (ledger must never be called on a fraud reject)", row.LedgerTransactionID)
 	}
+
+	outboxRow := getOutboxRow(t, ctx, pool, pending.SenderAccountID)
+	if outboxRow.EventType != "TransferRejected" {
+		t.Errorf("outbox event_type = %q, want \"TransferRejected\"", outboxRow.EventType)
+	}
+	var event eventsv1.TransferRejected
+	if err := proto.Unmarshal(outboxRow.Payload, &event); err != nil {
+		t.Fatalf("unmarshal outbox payload: %v", err)
+	}
+	if event.GetTriggeredRule() != "amount_threshold" {
+		t.Errorf("event.TriggeredRule = %q, want \"amount_threshold\"", event.GetTriggeredRule())
+	}
+	if event.GetTransferId() != pending.ID {
+		t.Errorf("event.TransferId = %q, want %q", event.GetTransferId(), pending.ID)
+	}
 }
 
 func TestCheckTransferFraud_Uncertain(t *testing.T) {
@@ -616,6 +681,9 @@ func TestCheckTransferFraud_Uncertain(t *testing.T) {
 			if row.FailureReason != nil {
 				t.Errorf("row.FailureReason = %v, want nil", row.FailureReason)
 			}
+			if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 0 {
+				t.Errorf("outbox rows = %d, want 0 (checkTransferFraud must not write an event when uncertain)", got)
+			}
 		})
 	}
 }
@@ -646,6 +714,9 @@ func TestCheckTransferFraud_UnexpectedDecision(t *testing.T) {
 	row := getTransferByID(t, ctx, pool, pending.ID)
 	if row.Status != "pending" {
 		t.Errorf("row.Status = %q, want \"pending\" (must not write anything on an unrecognized decision)", row.Status)
+	}
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 0 {
+		t.Errorf("outbox rows = %d, want 0", got)
 	}
 }
 

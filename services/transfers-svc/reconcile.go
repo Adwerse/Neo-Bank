@@ -80,7 +80,7 @@ func reconcileTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient led
 	}
 
 	if resp.GetFound() {
-		resolved, err := markTransferCompletedIfPending(ctx, pool, transfer.ID, resp.GetTransactionId())
+		resolved, err := markTransferCompletedIfPending(ctx, pool, transfer, resp.GetTransactionId())
 		if err != nil {
 			log.Printf("transfers-svc: reconcile: transfer %s: mark completed: %v", transfer.ID, err)
 			return
@@ -91,7 +91,7 @@ func reconcileTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient led
 		return
 	}
 
-	resolved, err := markTransferFailedIfPending(ctx, pool, transfer.ID, failureReasonTimeoutUnresolved)
+	resolved, err := markTransferFailedIfPending(ctx, pool, transfer, failureReasonTimeoutUnresolved)
 	if err != nil {
 		log.Printf("transfers-svc: reconcile: transfer %s: mark failed: %v", transfer.ID, err)
 		return

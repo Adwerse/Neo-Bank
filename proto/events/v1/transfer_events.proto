@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "neobank/proto/gen/go/events/v1;eventsv1";
+
+// TransferCompleted is published when a transfer's ledger settlement
+// succeeds (settleTransfer, transfers-svc) — the money has moved. Also
+// published by the reconciliation worker when it discovers, after a
+// transport failure, that ledger-svc had in fact already executed the
+// transfer.
+message TransferCompleted {
+  string event_id = 1;
+  string transfer_id = 2;
+  string sender_account_id = 3;
+  string recipient_account_id = 4;
+  int64 amount = 5;
+  string ledger_transaction_id = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+}
+
+// TransferFailed is published when ledger-svc definitively rejects a
+// transfer (e.g. insufficient funds) — no money moved. Also published by
+// the reconciliation worker when it discovers, after a transport failure,
+// that ledger-svc never executed the transfer.
+message TransferFailed {
+  string event_id = 1;
+  string transfer_id = 2;
+  string sender_account_id = 3;
+  string recipient_account_id = 4;
+  int64 amount = 5;
+  string reason = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+}
+
+// TransferRejected is published when fraud-svc rejects a transfer before
+// it ever reaches ledger-svc — no money moved.
+message TransferRejected {
+  string event_id = 1;
+  string transfer_id = 2;
+  string sender_account_id = 3;
+  string recipient_account_id = 4;
+  int64 amount = 5;
+  string triggered_rule = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+}

@@ -65,7 +65,7 @@ func TestMarkTransferCompletedIfPending_SkipsAlreadyResolved(t *testing.T) {
 		t.Fatalf("markTransferFailed (setup): %v", err)
 	}
 
-	resolved, err := markTransferCompletedIfPending(ctx, pool, pending.ID, randomUUIDForTest(t))
+	resolved, err := markTransferCompletedIfPending(ctx, pool, pending, randomUUIDForTest(t))
 	if err != nil {
 		t.Fatalf("markTransferCompletedIfPending: unexpected error: %v", err)
 	}
@@ -80,6 +80,11 @@ func TestMarkTransferCompletedIfPending_SkipsAlreadyResolved(t *testing.T) {
 	if row.FailureReason == nil || *row.FailureReason != failureReasonInsufficientFunds {
 		t.Errorf("row.FailureReason = %v, want %q (unchanged)", row.FailureReason, failureReasonInsufficientFunds)
 	}
+	// Exactly 1: the setup markTransferFailed call's own event — the skipped
+	// markTransferCompletedIfPending call above must not have added another.
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 1 {
+		t.Errorf("outbox rows = %d, want 1 (the skipped call must not write its own event)", got)
+	}
 }
 
 func TestMarkTransferFailedIfPending_SkipsAlreadyResolved(t *testing.T) {
@@ -92,7 +97,7 @@ func TestMarkTransferFailedIfPending_SkipsAlreadyResolved(t *testing.T) {
 		t.Fatalf("markTransferCompleted (setup): %v", err)
 	}
 
-	resolved, err := markTransferFailedIfPending(ctx, pool, pending.ID, failureReasonTimeoutUnresolved)
+	resolved, err := markTransferFailedIfPending(ctx, pool, pending, failureReasonTimeoutUnresolved)
 	if err != nil {
 		t.Fatalf("markTransferFailedIfPending: unexpected error: %v", err)
 	}
@@ -106,6 +111,11 @@ func TestMarkTransferFailedIfPending_SkipsAlreadyResolved(t *testing.T) {
 	}
 	if row.LedgerTransactionID == nil || *row.LedgerTransactionID != wantTransactionID {
 		t.Errorf("row.LedgerTransactionID = %v, want %q (unchanged)", row.LedgerTransactionID, wantTransactionID)
+	}
+	// Exactly 1: the setup markTransferCompleted call's own event — the
+	// skipped markTransferFailedIfPending call above must not add another.
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 1 {
+		t.Errorf("outbox rows = %d, want 1 (the skipped call must not write its own event)", got)
 	}
 }
 
@@ -134,6 +144,9 @@ func TestReconcileTransfer_LedgerExecutedIt(t *testing.T) {
 	if row.LedgerTransactionID == nil || *row.LedgerTransactionID != wantTransactionID {
 		t.Errorf("row.LedgerTransactionID = %v, want %q", row.LedgerTransactionID, wantTransactionID)
 	}
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 1 {
+		t.Errorf("outbox rows = %d, want 1 (reconciliation resolving a transfer must publish an event too)", got)
+	}
 }
 
 func TestReconcileTransfer_LedgerNeverExecutedIt(t *testing.T) {
@@ -160,6 +173,9 @@ func TestReconcileTransfer_LedgerNeverExecutedIt(t *testing.T) {
 	if row.LedgerTransactionID != nil {
 		t.Errorf("row.LedgerTransactionID = %v, want nil", row.LedgerTransactionID)
 	}
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 1 {
+		t.Errorf("outbox rows = %d, want 1", got)
+	}
 }
 
 func TestReconcileTransfer_TransportErrorLeavesRowUntouched(t *testing.T) {
@@ -181,5 +197,8 @@ func TestReconcileTransfer_TransportErrorLeavesRowUntouched(t *testing.T) {
 	row := getTransferByID(t, ctx, pool, pending.ID)
 	if row.Status != "pending" {
 		t.Errorf("row.Status = %q, want \"pending\" (unchanged — a transport error must not resolve anything)", row.Status)
+	}
+	if got := outboxRowCount(t, ctx, pool, pending.SenderAccountID); got != 0 {
+		t.Errorf("outbox rows = %d, want 0", got)
 	}
 }
