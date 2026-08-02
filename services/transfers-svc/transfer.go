@@ -15,11 +15,18 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"neobank/pkg/outbox"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	eventsv1 "neobank/proto/gen/go/events/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
+
+// outboxTable is transfers-svc's outbox table name, shared with the outbox
+// relay/cleanup workers wired up in main.go — kept as one constant so the
+// name is never duplicated as a magic string across markTransferX and the
+// workers.
+const outboxTable = "outbox"
 
 const (
 	accountStatusActive = "active"
@@ -422,7 +429,7 @@ func markTransferCompleted(ctx context.Context, pool *pgxpool.Pool, id, ledgerTr
 		return Transfer{}, fmt.Errorf("mark transfer completed: %w", err)
 	}
 
-	eventID, err := generateEventID()
+	eventID, err := outbox.GenerateEventID()
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer completed: generate event id: %w", err)
 	}
@@ -438,7 +445,7 @@ func markTransferCompleted(ctx context.Context, pool *pgxpool.Pool, id, ledgerTr
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer completed: marshal event: %w", err)
 	}
-	if err := insertOutboxEvent(ctx, tx, eventID, "TransferCompleted", t.SenderAccountID, payload); err != nil {
+	if err := outbox.InsertEvent(ctx, tx, outboxTable, eventID, "TransferCompleted", t.SenderAccountID, payload); err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer completed: insert outbox event: %w", err)
 	}
 
@@ -466,7 +473,7 @@ func markTransferFailed(ctx context.Context, pool *pgxpool.Pool, id, failureReas
 		return Transfer{}, fmt.Errorf("mark transfer failed: %w", err)
 	}
 
-	eventID, err := generateEventID()
+	eventID, err := outbox.GenerateEventID()
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer failed: generate event id: %w", err)
 	}
@@ -482,7 +489,7 @@ func markTransferFailed(ctx context.Context, pool *pgxpool.Pool, id, failureReas
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer failed: marshal event: %w", err)
 	}
-	if err := insertOutboxEvent(ctx, tx, eventID, "TransferFailed", t.SenderAccountID, payload); err != nil {
+	if err := outbox.InsertEvent(ctx, tx, outboxTable, eventID, "TransferFailed", t.SenderAccountID, payload); err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer failed: insert outbox event: %w", err)
 	}
 
@@ -560,7 +567,7 @@ func markTransferCompletedIfPending(ctx context.Context, pool *pgxpool.Pool, tra
 		return false, nil
 	}
 
-	eventID, err := generateEventID()
+	eventID, err := outbox.GenerateEventID()
 	if err != nil {
 		return false, fmt.Errorf("mark transfer completed if pending: generate event id: %w", err)
 	}
@@ -576,7 +583,7 @@ func markTransferCompletedIfPending(ctx context.Context, pool *pgxpool.Pool, tra
 	if err != nil {
 		return false, fmt.Errorf("mark transfer completed if pending: marshal event: %w", err)
 	}
-	if err := insertOutboxEvent(ctx, tx, eventID, "TransferCompleted", transfer.SenderAccountID, payload); err != nil {
+	if err := outbox.InsertEvent(ctx, tx, outboxTable, eventID, "TransferCompleted", transfer.SenderAccountID, payload); err != nil {
 		return false, fmt.Errorf("mark transfer completed if pending: insert outbox event: %w", err)
 	}
 
@@ -605,7 +612,7 @@ func markTransferFailedIfPending(ctx context.Context, pool *pgxpool.Pool, transf
 		return false, nil
 	}
 
-	eventID, err := generateEventID()
+	eventID, err := outbox.GenerateEventID()
 	if err != nil {
 		return false, fmt.Errorf("mark transfer failed if pending: generate event id: %w", err)
 	}
@@ -621,7 +628,7 @@ func markTransferFailedIfPending(ctx context.Context, pool *pgxpool.Pool, transf
 	if err != nil {
 		return false, fmt.Errorf("mark transfer failed if pending: marshal event: %w", err)
 	}
-	if err := insertOutboxEvent(ctx, tx, eventID, "TransferFailed", transfer.SenderAccountID, payload); err != nil {
+	if err := outbox.InsertEvent(ctx, tx, outboxTable, eventID, "TransferFailed", transfer.SenderAccountID, payload); err != nil {
 		return false, fmt.Errorf("mark transfer failed if pending: insert outbox event: %w", err)
 	}
 
@@ -708,7 +715,7 @@ func markTransferRejected(ctx context.Context, pool *pgxpool.Pool, id, triggered
 		return Transfer{}, fmt.Errorf("mark transfer rejected: %w", err)
 	}
 
-	eventID, err := generateEventID()
+	eventID, err := outbox.GenerateEventID()
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer rejected: generate event id: %w", err)
 	}
@@ -724,7 +731,7 @@ func markTransferRejected(ctx context.Context, pool *pgxpool.Pool, id, triggered
 	if err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer rejected: marshal event: %w", err)
 	}
-	if err := insertOutboxEvent(ctx, tx, eventID, "TransferRejected", t.SenderAccountID, payload); err != nil {
+	if err := outbox.InsertEvent(ctx, tx, outboxTable, eventID, "TransferRejected", t.SenderAccountID, payload); err != nil {
 		return Transfer{}, fmt.Errorf("mark transfer rejected: insert outbox event: %w", err)
 	}
 

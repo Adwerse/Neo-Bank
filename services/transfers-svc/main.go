@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"neobank/pkg/outbox"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
@@ -23,6 +24,10 @@ const (
 	defaultFraudAddr           = "fraud-svc:9085"
 	defaultLedgerAddr          = "ledger-svc:8083"
 	defaultReconcileStaleAfter = 2 * time.Minute
+	defaultKafkaBrokers        = "kafka:9092"
+	defaultTransferEventsTopic = "transfer.events"
+	defaultOutboxRetention     = 7 * 24 * time.Hour
+	outboxRelayInterval        = 1 * time.Second
 )
 
 func main() {
@@ -49,6 +54,22 @@ func main() {
 			log.Fatalf("transfers-svc: invalid RECONCILE_STALE_AFTER %q: %v", v, err)
 		}
 		reconcileStaleAfter = d
+	}
+	outboxRetention := defaultOutboxRetention
+	if v := os.Getenv("OUTBOX_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			log.Fatalf("transfers-svc: invalid OUTBOX_RETENTION %q: %v", v, err)
+		}
+		outboxRetention = d
+	}
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	if kafkaBrokers == "" {
+		kafkaBrokers = defaultKafkaBrokers
+	}
+	transferEventsTopic := os.Getenv("KAFKA_TRANSFER_EVENTS_TOPIC")
+	if transferEventsTopic == "" {
+		transferEventsTopic = defaultTransferEventsTopic
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
@@ -90,7 +111,12 @@ func main() {
 	defer ledgerConn.Close()
 	ledgerClient := ledgerv1.NewLedgerServiceClient(ledgerConn)
 
+	kafkaWriter := newKafkaWriter(kafkaBrokers, transferEventsTopic)
+	defer kafkaWriter.Close()
+
 	go runReconciliationWorker(context.Background(), pool, ledgerClient, reconcileStaleAfter)
+	go outbox.RunRelay(context.Background(), pool, outboxTable, kafkaWriter, outboxRelayInterval, outbox.DefaultBatchSize, "transfers-svc")
+	go outbox.RunCleanupWorker(context.Background(), pool, outboxTable, outboxRetention, outbox.DefaultCleanupInterval, "transfers-svc")
 
 	// An explicit mux, not the package-level http.DefaultServeMux: importing
 	// google.golang.org/grpc transitively pulls in golang.org/x/net/trace,

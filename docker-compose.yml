@@ -74,6 +74,8 @@ services:
       ACCOUNTS_GRPC_ADDR: accounts-svc:9082
       FRAUD_GRPC_ADDR: fraud-svc:9085
       LEDGER_GRPC_ADDR: ledger-svc:8083
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TRANSFER_EVENTS_TOPIC: transfer.events
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,6 +84,8 @@ services:
       fraud-svc:
         condition: service_started
       ledger-svc:
+        condition: service_started
+      kafka:
         condition: service_started
 
   fraud-svc:
