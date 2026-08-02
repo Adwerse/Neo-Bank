@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"net/mail"
 	"time"
@@ -12,8 +11,16 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
-	"github.com/segmentio/kafka-go"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"neobank/pkg/outbox"
+	eventsv1 "neobank/proto/gen/go/events/v1"
 )
+
+// authOutboxTable is auth-svc's outbox table name, shared with the outbox
+// relay/cleanup workers wired up in main.go.
+const authOutboxTable = "auth_outbox"
 
 const resendCooldown = 60 * time.Second
 
@@ -28,7 +35,7 @@ const (
 	verifyWrongCode
 )
 
-func verifyEmailHandler(pool *pgxpool.Pool, kafkaWriter *kafka.Writer) http.HandlerFunc {
+func verifyEmailHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -42,7 +49,7 @@ func verifyEmailHandler(pool *pgxpool.Pool, kafkaWriter *kafka.Writer) http.Hand
 		}
 
 		ctx := r.Context()
-		outcome, userID, attemptsRemaining, err := verifyEmailCode(ctx, pool, req.Email, req.Code)
+		outcome, _, attemptsRemaining, err := verifyEmailCode(ctx, pool, req.Email, req.Code)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
@@ -50,14 +57,11 @@ func verifyEmailHandler(pool *pgxpool.Pool, kafkaWriter *kafka.Writer) http.Hand
 
 		switch outcome {
 		case verifyOK:
-			// The activation already committed — that's the guarantee that
-			// matters. A Kafka hiccup here shouldn't turn into a 500 that
-			// falsely tells the client verification failed; log it instead
-			// so it's visible a downstream consumer may have missed this
-			// activation.
-			if err := publishUserActivated(ctx, kafkaWriter, userID, req.Email); err != nil {
-				log.Printf("auth-svc: failed to publish user.activated event for user %s: %v", userID, err)
-			}
+			// The UserActivated event was already written to the outbox in
+			// the same transaction that flipped status='active' (see
+			// verifyEmailCode) — publishing to Kafka itself happens later,
+			// asynchronously, via the outbox relay (main.go). Nothing left
+			// to do here but report success.
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"status": "active"})
 		case verifyUserNotFound:
@@ -103,6 +107,33 @@ func verifyEmailCode(ctx context.Context, pool *pgxpool.Pool, email, code string
 	if _, err := tx.Exec(ctx, "UPDATE users SET status = 'active', updated_at = now() WHERE id = $1", userID); err != nil {
 		return 0, "", 0, err
 	}
+
+	// The UserActivated event is written to the outbox in this same
+	// transaction — either the activation and the event both commit, or
+	// neither does. This is the fix for the dual-write gap that used to
+	// live in kafka.go's publishUserActivated: publishing directly to
+	// Kafka after this transaction committed meant a crash, or Kafka
+	// being unreachable, between the two could leave the activation
+	// permanently unannounced. The outbox relay (main.go) is what
+	// actually gets this row to Kafka, asynchronously, sometime after
+	// this function returns.
+	eventID, err := outbox.GenerateEventID()
+	if err != nil {
+		return 0, "", 0, err
+	}
+	payload, err := proto.Marshal(&eventsv1.UserActivated{
+		UserId:     userID,
+		Email:      email,
+		OccurredAt: timestamppb.New(time.Now()),
+		EventId:    eventID,
+	})
+	if err != nil {
+		return 0, "", 0, err
+	}
+	if err := outbox.InsertEvent(ctx, tx, authOutboxTable, eventID, "UserActivated", userID, payload); err != nil {
+		return 0, "", 0, err
+	}
+
 	return verifyOK, userID, 0, tx.Commit(ctx)
 }
 

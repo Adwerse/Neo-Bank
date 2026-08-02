@@ -10,15 +10,19 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+
+	"neobank/pkg/outbox"
 )
 
 const (
-	defaultPort         = "8081"
-	defaultSMTPAddr     = "mailpit:1025"
-	defaultSMTPFrom     = "noreply@neobank.local"
-	defaultRedisAddr    = "redis:6379"
-	defaultKafkaBrokers = "kafka:9092"
-	defaultKafkaTopic   = "user.events"
+	defaultPort            = "8081"
+	defaultSMTPAddr        = "mailpit:1025"
+	defaultSMTPFrom        = "noreply@neobank.local"
+	defaultRedisAddr       = "redis:6379"
+	defaultKafkaBrokers    = "kafka:9092"
+	defaultKafkaTopic      = "user.events"
+	defaultOutboxRetention = 7 * 24 * time.Hour
+	outboxRelayInterval    = 1 * time.Second
 )
 
 func main() {
@@ -50,8 +54,21 @@ func main() {
 	if jwtSecret == "" {
 		log.Fatal("auth-svc: JWT_SECRET environment variable is required")
 	}
+	outboxRetention := defaultOutboxRetention
+	if v := os.Getenv("OUTBOX_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			log.Fatalf("auth-svc: invalid OUTBOX_RETENTION %q: %v", v, err)
+		}
+		outboxRetention = d
+	}
+	databaseURL := os.Getenv("DATABASE_URL")
 
-	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err := runMigrations(databaseURL); err != nil {
+		log.Fatalf("auth-svc: failed to run migrations: %v", err)
+	}
+
+	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
 		log.Fatalf("auth-svc: failed to create postgres pool: %v", err)
 	}
@@ -62,6 +79,9 @@ func main() {
 
 	kafkaWriter := newKafkaWriter(kafkaBrokers, kafkaTopic)
 	defer kafkaWriter.Close()
+
+	go outbox.RunRelay(context.Background(), pool, authOutboxTable, kafkaWriter, outboxRelayInterval, outbox.DefaultBatchSize, "auth-svc")
+	go outbox.RunCleanupWorker(context.Background(), pool, authOutboxTable, outboxRetention, outbox.DefaultCleanupInterval, "auth-svc")
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -85,7 +105,7 @@ func main() {
 	})
 
 	http.HandleFunc("/register", registerHandler(pool, smtpAddr, smtpFrom))
-	http.HandleFunc("/verify-email", verifyEmailHandler(pool, kafkaWriter))
+	http.HandleFunc("/verify-email", verifyEmailHandler(pool))
 	http.HandleFunc("/resend-verification", resendVerificationHandler(pool, rdb, smtpAddr, smtpFrom))
 	http.HandleFunc("/login", loginHandler(pool, rdb, jwtSecret))
 	http.HandleFunc("/refresh", refreshHandler(pool, rdb, jwtSecret))
