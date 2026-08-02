@@ -1,0 +1,20 @@
+-- A transfer event (TransferCompleted/Failed/Rejected) identifies both
+-- parties by account_id (UUID) and nothing else — no user_id, no account
+-- number, no email. To tell a recipient "you received money from account
+-- NB00...", notifications-svc has to resolve that UUID to a human-facing
+-- account number itself, and account_number is the only field of the
+-- sender's that belongs in a recipient's email at all (not their email
+-- address, not their balance).
+--
+-- AccountCreated has carried account_number on the wire since it was
+-- introduced; migration 000001 simply didn't persist it, because nothing
+-- needed it while this service only maintained an address book.
+--
+-- Nullable, deliberately. Rows linked before this migration cannot be
+-- backfilled from within this service — replaying account.events won't
+-- help either, since notifications_processed_events already holds a
+-- barrier row for each of those AccountCreated events and every replay
+-- short-circuits on it. The consumers of this column therefore treat
+-- NULL as "omit the account line from the email" rather than as an
+-- error; see README's "Проверка вручную" for the dev-only reset.
+ALTER TABLE user_contacts ADD COLUMN account_number TEXT;

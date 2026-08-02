@@ -17,9 +17,11 @@ Postgres, Redis и Kafka подняты в `docker-compose.yml`. Postgres исп
 ## События (Kafka)
 `auth-svc` публикует `UserActivated` в топик `user.events`, `accounts-svc` — `AccountCreated` в `account.events`, `transfers-svc` — `TransferCompleted`/`TransferFailed`/`TransferRejected` в `transfer.events`. Контракты — `proto/events/v1/{user,account,transfer}_events.proto`, сериализация бинарным protobuf. Ключ сообщения — `user_id` для `UserActivated`/`AccountCreated`, `sender_account_id` для Transfer*-событий: гарантирует, что все события одного пользователя/счёта попадают в одну партицию и обрабатываются по порядку. `event_id` — случайный UUIDv4 (`outbox.GenerateEventID`, см. ниже), используется консьюмерами (accounts-svc, notifications-svc) для дедупликации при повторной доставке (см. «Идемпотентность» ниже и «notifications-svc» дальше).
 
+Кроме ключа и тела, каждое сообщение несёт **Kafka-заголовок `event_type`** (`outbox.HeaderEventType`) со значением из колонки `event_type` outbox-строки — дословно `TransferCompleted`, `UserActivated` и т.д. Это часть wire-контракта, а не отладочная метка: protobuf не самоописателен, и на топике с несколькими типами сообщений (`transfer.events`) консьюмеру больше не на что опереться — подробности в секции про письма о переводах.
+
 `accounts-svc` — consumer топика `user.events` (consumer group `accounts-svc`): на `UserActivated` создаёт строку в `accounts` со сгенерированным номером счёта и `status = 'active'`, а **сразу после этого** — вызывает `ledger-svc` `CreateLedgerAccount(account_id)` по gRPC, чтобы у нового счёта появился ledger-аккаунт (адрес ledger — env `LEDGER_GRPC_ADDR`, дефолт `ledger-svc:8083`). Порядок фиксации важен: если вызов ledger упал, offset события **не** коммитится — Kafka передоставит сообщение, а идемпотентность (consumer'а и самого `CreateLedgerAccount`) делает повтор безопасным. Это ровно тот случай, ради которого строились at-least-once + идемпотентность.
 
-Топики создаются автоматически брокером при первой публикации (`KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"` задано явно в `docker-compose.yml`, хотя это и так поведение Kafka по умолчанию) — отдельного шага инициализации нет. Ни auth-svc, ни transfers-svc не блокируют старт на доступности Kafka: продюсер (`segmentio/kafka-go`) подключается лениво при первой записи и переподключается сам, как и клиенты Postgres/Redis.
+Авто-создание топиков брокером включено (`KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"` задано в `docker-compose.yml` явно, хотя это и так дефолт Kafka), но полагаться на него мы перестали: одноразовый сервис `kafka-init` создаёт все три топика с явной политикой retention до старта notifications-svc — `compact` для `user.events`/`account.events`, `delete` для `transfer.events`. Почему разные — см. «Kafka: offset reset и retention» и «`transfer.events` — `delete`, а не `compact`» дальше. Ни auth-svc, ни transfers-svc не блокируют старт на доступности Kafka: продюсер (`segmentio/kafka-go`) подключается лениво при первой записи и переподключается сам, как и клиенты Postgres/Redis.
 
 ### Outbox: как публикация переживает недоступность Kafka
 И auth-svc, и transfers-svc публикуют события через транзакционный outbox, а не напрямую в момент запроса — общая реализация (таблица + релей) вынесена в `pkg/outbox` (`neobank/pkg/outbox`), подключается через `require`/`replace` так же, как `pkg/health` и `proto/gen/go`.
@@ -85,15 +87,17 @@ docker compose logs -f accounts-svc
 
 ## notifications-svc: проекция `user_contacts` из событий
 
-`notifications-svc` не отправляет письма (это отдельный следующий шаг) — пока что он только строит и поддерживает свою локальную проекцию `user_id`/`account_id` → `email` (`user_contacts`), полностью из Kafka-событий, без единого синхронного вызова в auth-svc или accounts-svc. Это осознанный архитектурный выбор: сервис, специально вынесенный из критического пути (отправка писем не должна блокировать регистрацию или переводы), не должен обзаводиться зависимостью от аптайма другого сервиса ради того, чтобы просто узнать чей-то email — каждый сервис владеет своими данными, а notifications-svc держит собственную, независимую копию того, что ему нужно.
+Прежде чем отправлять письма (это следующая секция), `notifications-svc` строит и поддерживает свою локальную проекцию `user_id`/`account_id` → `email` (`user_contacts`), полностью из Kafka-событий, без единого синхронного вызова в auth-svc или accounts-svc. Это осознанный архитектурный выбор: сервис, специально вынесенный из критического пути (отправка писем не должна блокировать регистрацию или переводы), не должен обзаводиться зависимостью от аптайма другого сервиса ради того, чтобы просто узнать чей-то email — каждый сервис владеет своими данными, а notifications-svc держит собственную, независимую копию того, что ему нужно.
 
 Два consumer'а (одна consumer-группа `notifications-svc`, два ридера — `kafka-go`'s `Reader` подписывается ровно на один топик, поэтому один ридер на топик, не один на группу):
 - `user.events` → `UserActivated` → `upsertUserContactEmail` создаёт/обновляет строку `(user_id, email)`, `account_id` не трогает.
-- `account.events` (новый топик, публикует accounts-svc через тот же outbox-подход, что transfers-svc/auth-svc — см. `services/accounts-svc/accounts.go`, `tryCreateAccount`) → `AccountCreated` → `updateUserContactAccountID` дозаполняет `account_id` в уже существующую строку.
+- `account.events` (новый топик, публикует accounts-svc через тот же outbox-подход, что transfers-svc/auth-svc — см. `services/accounts-svc/accounts.go`, `tryCreateAccount`) → `AccountCreated` → `updateUserContactAccountLink` дозаполняет `account_id` и `account_number` в уже существующую строку.
 
-`AccountCreated` причинно всегда следует за `UserActivated` (accounts-svc создаёт счёт только в ответ на `UserActivated`), но у двух топиков независимые ридеры без гарантии взаимного порядка обработки внутри notifications-svc. Поэтому `updateUserContactAccountID` — намеренно `UPDATE`, не `UPSERT`: если строки `user_contacts` ещё нет (обработчик `user.events` не успел), `RowsAffected = 0`, обработчик `AccountCreated` возвращает ошибку, оффсет не коммитится, и то же сообщение перечитывается на следующем тике — до тех пор, пока другой ридер не создаст строку. `email TEXT NOT NULL` в схеме исключает противоположную стратегию (upsert с пустым email).
+`AccountCreated` причинно всегда следует за `UserActivated` (accounts-svc создаёт счёт только в ответ на `UserActivated`), но у двух топиков независимые ридеры без гарантии взаимного порядка обработки внутри notifications-svc. Поэтому `updateUserContactAccountLink` — намеренно `UPDATE`, не `UPSERT`: если строки `user_contacts` ещё нет (обработчик `user.events` не успел), `RowsAffected = 0`. `email TEXT NOT NULL` в схеме исключает противоположную стратегию (upsert с пустым email).
 
-Дедупликация — тот же паттерн idempotent-consumer, что у accounts-svc: проверка перед обработкой, запись после. Своя таблица `notifications_processed_events`, не `processed_events` — та уже занята accounts-svc в той же физической базе `neobank` (тот же класс коллизии, что уже заставил переименовать outbox-таблицы в `auth_outbox`/`accounts_outbox`, см. выше). Оба типа событий (UserActivated, AccountCreated) пишутся в одну таблицу сразу — `event_id` глобально уникален независимо от типа события. Колонка `status` (`processing`/`sent`/`skipped`) в этом спринте всегда пишется как `skipped` — уведомление не отправляется ни для одного события; `sent`/`processing` зарезервированы под следующий спринт, чтобы не требовать миграции схемы, когда он появится.
+Ждём мы при этом **внутри процесса** (`contactWaitAttempts` × `contactWaitDelay` = 15 × 200 мс), а не «вернуть ошибку и положиться на переспрашивание». У `Reader` из `kafka-go` **нет** per-message redelivery внутри работающего процесса: `FetchMessage` всегда отдаёт следующее сообщение независимо от того, закоммичен ли предыдущий оффсет. «Не коммитить» помогает, только если процесс перезапустится раньше, чем закоммитится любой более поздний оффсет на той же партиции; как только это произошло, пропущенное сообщение потеряно. Ограничение цикла нужно, чтобы по-настоящему застрявший случай не блокировал горутину навсегда.
+
+Дедупликация — тот же паттерн idempotent-consumer, что у accounts-svc: проверка перед обработкой, запись после. Своя таблица `notifications_processed_events`, не `processed_events` — та уже занята accounts-svc в той же физической базе `neobank` (тот же класс коллизии, что уже заставил переименовать outbox-таблицы в `auth_outbox`/`accounts_outbox`, см. выше). Все типы событий пишутся в одну таблицу — `event_id` глобально уникален независимо от типа. Для `UserActivated`/`AccountCreated` статус всегда `skipped`: они кормят проекцию и писем не порождают (о регистрации auth-svc пишет пользователю сам). `processing`/`sent` появляются на событиях переводов — см. следующую секцию.
 
 ### Kafka: offset reset и retention
 
@@ -392,6 +396,224 @@ transfers-svc: reconcile: transfer d88ce967-... resolved to failed (reason=timeo
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/ledger-svc/... ./services/transfers-svc/... -v
+```
+
+## notifications-svc: письма о переводах (`transfer.events` → Mailpit)
+
+Третий консьюмер (`runTransferEventsConsumer`, та же группа `notifications-svc`, свой ридер на топик `transfer.events`) превращает три типа событий в четыре письма через Mailpit. Отправка — тот же подход, что в auth-svc: stdlib `net/smtp`, `Auth = nil`, тело собирается `fmt.Sprintf`, никакого шаблонизатора; env `SMTP_ADDR`/`SMTP_FROM` с теми же дефолтами (`mailpit:1025`, `noreply@neobank.local`), так что оба сервиса кладут почту в один ящик. Переход на Brevo/SES — смена этих значений и добавление `smtp.Auth`, а не переписывание логики выше.
+
+### Кому и о чём: три события — четыре письма
+
+У перевода две стороны, и они узнают о разном:
+
+| Событие | Отправителю | Получателю |
+|---|---|---|
+| `TransferCompleted` | «transfer sent» | «transfer received» |
+| `TransferFailed` | «transfer failed» | — |
+| `TransferRejected` | «transfer declined» | — |
+
+`TransferCompleted` — единственное событие, порождающее **два** письма: деньги ушли у одного и пришли к другому, оба факта адресату интересны. `TransferFailed` и `TransferRejected` означают, что денег не двигалось вовсе, — получателю не о чем знать, и его контакт даже не резолвится (лишний запрос плюс лишнее ожидание проекции ради адреса, который будет выброшен). Это же согласуется с решением спринта 7: получатель не видит чужие неуспешные переводы.
+
+События несут только `sender_account_id`/`recipient_account_id` (UUID) — ни email, ни номера счёта. Адрес берётся из собственной проекции `user_contacts` по `account_id`; ради номера счёта в миграции `000003` добавлена колонка `account_number` (`AccountCreated` нёс её на wire всегда, но до этого спринта не персистилась).
+
+### Чего в письме нет — и почему это не забывчивость
+
+**В письме про заблокированный фродом перевод нет ни имени правила, ни порога.** `TransferRejected` несёт `triggered_rule`, обработчик его читает — и пишет только в лог. `buildTransferDeclinedEmail` **физически не принимает** такой параметр: назвать правило («velocity_count») или лимит («свыше 5 000.00 за один перевод») значит выдать инструкцию, как остаться под ним. Ровно та же логика, что в UI спринта 6 (`REJECTED_REASON_LABELS` в `TransferForm.tsx` — маппинг без fallback на сырую строку), только письмо ещё и пересылаемо и вечно. Отсутствие параметра — это способ сделать так, чтобы будущая правка не смогла раскрыть правило по невнимательности.
+
+**В письме получателю нет ни email отправителя, ни чьего-либо баланса** — `buildTransferReceivedEmail` не получает ни того, ни другого. Получателю достаточно суммы, ID перевода и номера счёта, с которого пришли деньги.
+
+**Коды ошибок ledger'а не показываются сырыми.** `failureReasonSentences` переводит `insufficient_funds` в «There were not enough funds in your account.»; неизвестный код — не строка `Reason: ledger_internal_error`, а отсутствие строки `Reason` вовсе.
+
+### `event_type` в Kafka-заголовке: дискриминатор, которого нет в payload
+
+`transfer.events` — первый топик в репозитории с несколькими типами сообщений, и распознать их по телу **невозможно**. `TransferCompleted`, `TransferFailed` и `TransferRejected` совпадают по номерам и типам полей 1–5, а поле 6 — `string` во всех трёх (`ledger_transaction_id` / `reason` / `triggered_rule`). Значит `proto.Unmarshal` любого из них в любой другой **проходит без ошибки**: `TransferFailed`, прочитанный как `TransferCompleted`, тихо кладёт `insufficient_funds` в `LedgerTransactionId`. Это не гипотетическая опасность — это то, что случилось бы при первом же наивном консьюмере.
+
+Решение — заголовок, а не поле в proto: `pkg/outbox/relay.go` теперь ставит `Headers: [{event_type: <outbox.event_type>}]`. Колонка `event_type` в outbox-таблице существовала с самого начала и тратилась только на логи; относить её на wire в релее дёшево (три строки в общем пакете), не требует regen protobuf, не трогает ни одного продюсера и не может разойтись с тем, что записано в той же транзакции, что и бизнес-изменение. Заголовок аддитивен — консьюмеры `user.events`/`account.events` его просто не смотрят.
+
+`notifications-svc` при этом **не импортирует `pkg/outbox`**: нужна ровно одна строка, а этот пакет — сторона *записи* (положить событие в outbox в одной транзакции с бизнес-изменением и отрелеить), тогда как notifications-svc никакой outbox-таблицей не владеет и ничего не публикует. Чистый консьюмер, зависящий от библиотеки публикации, перевернул бы слои. Литерал продублирован в `kafka.go` и запинен с обеих сторон (`TestHeaderEventType_IsWireContract` в `pkg/outbox`, `TestEventTypeHeader_MatchesProducer` в notifications-svc) — без этого переименование на стороне продюсера просто молча выключило бы письма.
+
+Что делает консьюмер с четырьмя вариантами заголовка:
+
+| Заголовок | Действие | Коммит оффсета |
+|---|---|---|
+| известный тип, обработчик успешен | письмо(а) + `finishEvent` | да |
+| известный тип, `proto.Unmarshal` упал | лог | да — переспрашивание не сделает байты разбираемыми |
+| известный тип, обработчик вернул ошибку | лог | **нет** |
+| заголовка нет (`""`) | лог | да — сообщение опубликовано до релей-фикса, заголовок у него уже не появится |
+| неизвестное значение | лог | да — будущий `TransferReversed` не должен кирпичить партицию для старого бинаря |
+
+У безголового сообщения соблазнительно вытащить `event_id`, распаковав его как `TransferCompleted` (поля 1–5 же совпадают) — не делаем: это ровно та случайная кросс-распаковка, ради устранения которой заголовок и вводился. В лог идут partition и offset, которыми оператор и так полез бы смотреть сообщение.
+
+### Барьер идемпотентности: `processing` → отправка → `sent`
+
+Kafka даёт at-least-once, и релей из outbox тоже (публикация идёт до отметки `published_at`) — одно событие может прийти дважды. Но **отправку письма нельзя внести в транзакцию БД**: внешний побочный эффект не откатывается. Exactly-once здесь недостижим в принципе; выбирается только направление ошибки.
+
+`claimEvent` (`contacts.go`) — один атомарный оператор:
+
+```sql
+INSERT INTO notifications_processed_events (event_id, status)
+VALUES ($1, 'processing')
+ON CONFLICT (event_id) DO UPDATE SET status = notifications_processed_events.status
+RETURNING status
+```
+
+`DO UPDATE` здесь — намеренный no-op: строке присваивается её же значение. Его единственная задача — заставить `RETURNING` сработать на ветке конфликта; `ON CONFLICT DO NOTHING` возвращает ноль строк и не может сообщить, что там уже лежало. Возвращается пред-существующий статус: `sent`/`skipped` → пропустить, `processing` → работать.
+
+Почему одним оператором, а не парой `isEventProcessed` + `markEventProcessed`, как у проекционных обработчиков: там побочный эффект — upsert, и гонка между чтением и записью безвредна (сделать дважды = сделать один раз). Здесь побочный эффект — письмо, оно себя не дедуплицирует, поэтому проверка и захват обязаны быть одним оператором.
+
+**`processing` означает «работать» — это выбор, а не запасной вариант.** Падение между возвратом из `smtp.SendMail` и `finishEvent` оставляет строку, которая честно говорит «неизвестно, ушло ли письмо». Повторить — риск дубля; пропустить — риск тишины. Для уведомлений о деньгах второе «вам поступило 25.00 EUR» — лёгкое раздражение, а пропавшее — клиент, который не знает, что деньги пришли. **Дубль важнее потери.**
+
+Закрывает событие `finishEvent` — именно `UPDATE`, и подменять его на `markEventProcessed` нельзя: у того `ON CONFLICT DO NOTHING`, строка после `claimEvent` уже существует, и он бы тихо не сделал ничего, оставив `processing` навсегда и превратив каждую переигровку в новый комплект писем. Самый вероятный способ сломать это через полгода, поэтому две функции намеренно оставлены раздельными, а не «объединены».
+
+Одного барьер не делает: **не сериализует конкурентные реплики.** Захват воркера A коммитится сразу, воркер B через миллисекунду видит `processing` и тоже идёт работать. Сегодня недостижимо (одна реплика, а Kafka в группе отдаёт партицию одному консьюмеру), но это свойство политики «`processing` → работать», а не SQL, и лучше знать о нём заранее.
+
+### Одна строка барьера на два письма — и что это стоит
+
+У `TransferCompleted` два побочных эффекта и **одна** строка в `notifications_processed_events`. Плюс: «обработано ли событие» — один недвусмысленный факт. Минус, честно: строка не отличает «отправлено оба» от «отправлено одно». Падение между двумя письмами оставляет `processing`, и переигровка отправит **оба** — отправитель получит дубль. Это то же направление («дубль важнее потери»), а альтернатива (строка барьера на каждого адресата) обменяла бы его на схему, где «одна строка на событие» уже не выполняется.
+
+Отправителю пишем первым — он инициатор и ждёт подтверждения, так что если из двух писем успеет уйти одно, пусть это будет его.
+
+### Порядок с оффсетом и что «не коммитить» на самом деле даёт
+
+Оффсет коммитится **после** обработки, не до, — иначе падение до отправки потеряло бы событие безвозвратно. Но надо быть честными про механизм: у `Reader` из `kafka-go` нет per-message redelivery внутри работающего процесса, `FetchMessage` всегда идёт вперёд. «Не коммитить» помогает, только если процесс перезапустится раньше, чем закоммитится любой более поздний оффсет той же партиции. Это по-прежнему правильный дефолт (упавший SMTP обычно валит и следующее сообщение, так что позже ничего не коммитится и рестарт действительно переигрывает), но реально транзиентный сбой вывозит `sendEmailWithRetry` — три попытки с паузой, — а не привычность паттерна.
+
+| Ситуация | Письма | Строка барьера | Коммит |
+|---|---|---|---|
+| SMTP лежит, все 3 попытки исчерпаны | нет | `processing` | нет |
+| SMTP моргнул, ретрай прошёл | есть | `sent` | да |
+| Письмо №1 ушло, №2 упало | одно | `processing` | нет (переигровка отправит оба) |
+| Падение после обоих, до `finishEvent` | два | `processing` | нет (то же) |
+| Контакт не нашёлся за ~3 с | что резолвилось | `sent` / `skipped` | **да** — терминально, не транзиентно |
+| Ошибка Postgres на поиске контакта | нет | `processing` | нет |
+| `claimEvent` вернул `sent`/`skipped` | нет | не меняется | да — штатная ветка переигровки |
+
+Ненайденный контакт коммитится осознанно: любой счёт в системе создаётся accounts-svc в ответ на `UserActivated`, поэтому вечно неразрешимый `account_id` означает сломанную проекцию, а не «внешний счёт», — и парковать консьюмер на сообщении, которое он не сможет удовлетворить никогда, значит платить за это уведомлениями, стоящими за ним в очереди. Если из двух сторон нашлась одна — письмо уходит ей (у получателя просто исчезает строка *From account*), статус `sent`; если ни одной — писем нет, статус `skipped`, то есть «решили не отправлять», а не «не смогли». Битый UUID — другой случай: Postgres отвечает `22P02`, это ошибка обработчика, и корректно её не коммитить. DLQ нет — его нет нигде в репозитории, и он был бы больше самой фичи.
+
+### Почему `LastOffset`, а не `FirstOffset`
+
+Самая дорогая ошибка этого спринта была бы в одной строке конфигурации ридера. Ридеры разделены по намерению:
+
+- `newProjectionReader` (`user.events`, `account.events`) — `FirstOffset`. `user_contacts` — это состояние: переигровка компактного лога пересобирает его, повторный upsert ничего не стоит.
+- `newNotificationReader` (`transfer.events`) — **`LastOffset`, и иначе нельзя.** Топик не компактится, живёт по обычному time-retention и копится с 5-го спринта. `FirstOffset` на новой группе переиграл бы всю историю, и барьер идемпотентности не остановил бы **ни одного** события: в `notifications_processed_events` нет строк на те `event_id`. Каждый пользователь получил бы письмо про каждый свой перевод за недели, по два на каждый успешный. Письмо — побочный эффект во внешнем мире, а не обновление состояния: «пересобрать» его нельзя, и история — ровно то, что переигрывать НЕ надо.
+
+`StartOffset` действует только пока у группы нет закоммиченного оффсета на партиции, так что после первого старта это ничего не стоит — краш, рестарт и ручной сброс оффсета одинаково продолжают с закоммиченного места. Цена — ровно один пропуск: перевод, завершившийся во время самого первого запуска, до первого коммита, письма не получит. Один раз, на одном деплое, в обмен на неразосланный спам по всей истории на том же деплое.
+
+### `transfer.events` — `delete`, а не `compact`
+
+`kafka-init` теперь создаёт и `transfer.events`, с `cleanup.policy=delete` — брокерским дефолтом, записанным явно, потому что альтернатива здесь активно неверна. Ключ этого топика — `sender_account_id`, и компакция хранила бы только **последнее** событие на отправителя, молча выбросив всю остальную его историю переводов. `user.events`/`account.events` компактятся именно потому, что они — снимки состояния по `user_id`; `transfer.events` — лог дискретных фактов, и компакция на нём была бы потерей данных, переодетой в политику хранения.
+
+Предсоздавать, а не полагаться на авто-создание, нужно ещё и потому, что `depends_on: kafka-init` у notifications-svc до этого покрывал два топика из трёх: на свежем стеке, где ещё не было ни одного перевода, третий ридер упирался бы в несуществующий топик, а путь ошибки `FetchMessage` — цикл без паузы. Заодно добавлен `fetchErrorBackoff` (1 с) во все три цикла на остаточные случаи вроде рестарта брокера.
+
+### Формат суммы
+
+`formatMinorUnits` — зеркало `frontend/src/features/accounts/money.ts`: `abs/100` и `abs%100` целочисленно (никогда не `float64(minorUnits)/100`), ручная группировка тысяч, ровно два знака. `123456` → `1,234.56`. Одно отличие — **без символа валюты**: `" EUR"` приписывает `formatAmount`, потому что `€` не ASCII, а все письма ASCII-only — это и позволяет не ставить MIME charset-заголовок, ровно как в письмах auth-svc. Предпосылка проверяется тестом, а не подразумевается.
+
+### Проверка вручную
+
+Полный прогон DoD. Пересобрать нужно и transfers-svc — релей, ставящий заголовок, живёт в его процессе:
+
+```bash
+docker compose up -d --build
+# зарегистрировать и подтвердить alice@example.com и bob@example.com,
+# пополнить счёт alice (см. «Dev-инструменты»)
+
+# 1. Успешный перевод между двумя пользователями → ДВА письма
+curl -s -X POST http://localhost:8080/transfers \
+  -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"recipient_account_number":"<номер счёта bob>","amount":123456}'
+
+curl -s http://localhost:8025/api/v1/messages \
+  | jq -r '.total, (.messages[] | "\(.To[0].Address)  \(.Subject)")'
+# 2
+# bob@example.com    Neo-Bank: transfer received
+# alice@example.com  Neo-Bank: transfer sent
+#   в обоих телах — 1,234.56 EUR; у alice строка "To account", у bob — "From account"
+
+# 2. Заблокированный фродом → ОДНО письмо отправителю, без раскрытия правила
+curl -s -X DELETE http://localhost:8025/api/v1/messages
+curl -s -X POST http://localhost:8080/transfers \
+  -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"recipient_account_number":"<номер счёта bob>","amount":600000}'
+# {"status":"rejected","failure_reason":"amount_threshold"}  <- API говорит; письмо не должно
+
+curl -s http://localhost:8025/api/v1/messages | jq -r '.total, (.messages[]|.To[0].Address)'
+# 1
+# alice@example.com          <- получателю не пришло ничего
+
+curl -s "http://localhost:8025/api/v1/message/<ID>" | jq -r .Text \
+  | grep -Ei 'amount_threshold|velocity|500000|threshold|limit'
+# (пусто — ни имени правила, ни порога)
+```
+
+Тест redelivery — новых писем нет, строка одна и `sent`:
+
+```bash
+docker compose exec postgres psql -U neobank -d neobank \
+  -c "SELECT event_id, status FROM notifications_processed_events ORDER BY processed_at DESC LIMIT 3;"
+#  <uuid успешного перевода> | sent
+#   ^ ОДНА строка, несмотря на ДВА отправленных письма
+
+curl -s -X DELETE http://localhost:8025/api/v1/messages
+docker compose stop notifications-svc          # группа должна быть неактивна для сброса
+docker compose exec kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --group notifications-svc --topic transfer.events --reset-offsets --shift-by -2 --execute
+docker compose start notifications-svc
+docker compose logs -f notifications-svc
+# notifications-svc: event <uuid> already handled, skipping (redelivery)
+
+curl -s http://localhost:8025/api/v1/messages | jq .total
+# 0                                            <- новых писем нет
+
+docker compose exec postgres psql -U neobank -d neobank \
+  -c "SELECT count(*) FROM notifications_processed_events WHERE event_id = '<uuid>';"
+#  1
+docker compose exec kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --group notifications-svc
+#  LAG 0 на всех трёх топиках — переигровка закоммитилась, ничего не застряло
+```
+
+`--shift-by -2`, а не `--to-earliest`: у ридера `transfer.events` старт `LastOffset`, и сброс в начало переиграл бы всю историю топика — ровно то, чего этот старт и избегает.
+
+Опционально, «SMTP лежит»:
+
+```bash
+docker compose stop mailpit
+# сделать перевод → в логе 3 попытки отправки, затем ошибка обработчика; оффсет не коммитится
+docker compose exec postgres psql -U neobank -d neobank \
+  -c "SELECT event_id, status FROM notifications_processed_events WHERE status = 'processing';"
+#  ^ та самая честная строка «неизвестно, ушло ли письмо»
+docker compose start mailpit
+```
+
+**Про dev-данные:** у контактов, слинкованных до миграции `000003`, `account_number` остаётся `NULL`, и письмо просто опускает строку со счётом. Сброс оффсета сам по себе не бэкфиллит: строки барьера на те `AccountCreated` уже есть, и каждое переигранное событие короткозамкнётся. Либо `docker compose down -v`, либо (dev-only, вручную — не кодом):
+
+```bash
+docker compose stop notifications-svc
+docker compose exec postgres psql -U neobank -d neobank -c \
+  "DELETE FROM notifications_processed_events WHERE event_id IN (SELECT event_id FROM accounts_outbox WHERE event_type = 'AccountCreated');"
+docker compose exec kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --group notifications-svc --topic account.events --reset-offsets --to-earliest --execute
+docker compose start notifications-svc
+# account.events компактится, так что переигровка доставит последнее AccountCreated на пользователя
+```
+
+Проще всего демонстрировать на свежих пользователях. Кросс-сервисный `UPDATE user_contacts ... FROM accounts` технически возможен (одна физическая база) и отвергается осознанно: notifications-svc не читает чужие таблицы.
+
+### Тесты
+
+`services/notifications-svc/money_test.go` — таблица против семантики `money.ts` (`0` → `0.00`, `5` → `0.05`, `123456` → `1,234.56`, `100000000` → `1,000,000.00`, `-2550` → `-25.50`) плюс проверка ASCII, на которой держится отсутствие charset-заголовка.
+
+`services/notifications-svc/email_test.go` — здесь требования спринта становятся исполняемыми: в теле declined-письма нет ни `amount_threshold`/`velocity_count`/`velocity_sum`, ни слов `threshold`/`limit`/`rule`, ни цифр порогов; в received-письме нет `@` (то есть ничьего email) и слова `balance`, есть номер счёта отправителя, и строка *From account* исчезает целиком при пустом номере; failed-письмо рендерит каждый известный код как фразу и опускает строку `Reason` для неизвестного, не показывая сырой токен; у зануленного `occurred_at` не появляется дата `1970`.
+
+`services/notifications-svc/kafka_test.go` — `eventTypeOf` (есть / нет / пустое значение / неверный регистр / дубликаты ключей → первый), и пиннинг обоих наборов литералов wire-контракта.
+
+`services/notifications-svc/contacts_test.go` — под живой базой (`t.Skip` без `DATABASE_URL`, конвенция из `pkg/outbox`): жизненный цикл `claimEvent` — первый вызов `true`; **второй тоже `true`** на строке, оставленной в `processing` (политика восстановления после падения проверяется, а не предполагается); после `finishEvent(sent)` и `finishEvent(skipped)` — `false`; три захвата подряд + `finishEvent` оставляют ровно одну строку. Плюс `getContactByAccountID`: hit, miss, и `account_number IS NULL` → `""`.
+
+`pkg/outbox/relay_test.go` — `TestRelayBatch_StampsEventTypeHeader` (заголовок доезжает до сообщения, ровно один, со значением из колонки) и `TestHeaderEventType_IsWireContract`.
+
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/notifications-svc/... ./pkg/outbox/... -v
 ```
 
 ## Фронтенд

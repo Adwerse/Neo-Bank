@@ -46,6 +46,25 @@ func containsMessage(messages []kafka.Message, key string, value []byte) bool {
 	return false
 }
 
+func findMessage(messages []kafka.Message, key string, value []byte) (kafka.Message, bool) {
+	for _, m := range messages {
+		if string(m.Key) == key && bytes.Equal(m.Value, value) {
+			return m, true
+		}
+	}
+	return kafka.Message{}, false
+}
+
+func headerValues(m kafka.Message, key string) []string {
+	var values []string
+	for _, h := range m.Headers {
+		if h.Key == key {
+			values = append(values, string(h.Value))
+		}
+	}
+	return values
+}
+
 func insertRowForTest(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table, eventID, eventType, partitionKey string, payload []byte) int64 {
 	t.Helper()
 	var id int64
@@ -100,6 +119,48 @@ func TestRelayBatch_PublishesAndMarksPublished(t *testing.T) {
 	}
 	if getPublishedAt(t, ctx, pool, table, id2) == nil {
 		t.Error("row 2 published_at is nil, want set")
+	}
+}
+
+// TestRelayBatch_StampsEventTypeHeader proves the discriminator actually
+// reaches the wire, not just the outbox table. Consumers of a topic
+// carrying more than one message type (transfer.events) route on this
+// header and have no other way to tell the types apart — protobuf will
+// happily decode any Transfer* event as any other.
+func TestRelayBatch_StampsEventTypeHeader(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	table := newTestOutboxTable(t, ctx, pool)
+
+	partitionKey := randomHexForTest(t)
+	insertRowForTest(t, ctx, pool, table, randomEventID(t), "TransferRejected", partitionKey, []byte("rejected-payload"))
+
+	writer := &fakeKafkaWriter{}
+	RelayBatch(ctx, pool, table, writer, DefaultBatchSize, "test")
+
+	msg, ok := findMessage(writer.messages, partitionKey, []byte("rejected-payload"))
+	if !ok {
+		t.Fatal("relay did not publish the row")
+	}
+	got := headerValues(msg, HeaderEventType)
+	if len(got) != 1 {
+		t.Fatalf("got %d %q headers %v, want exactly 1", len(got), HeaderEventType, got)
+	}
+	if got[0] != "TransferRejected" {
+		t.Errorf("%q header = %q, want %q — the value must be the outbox row's event_type verbatim", HeaderEventType, got[0], "TransferRejected")
+	}
+}
+
+// TestHeaderEventType_IsWireContract is not the tautology it looks like.
+// services/notifications-svc/kafka.go hardcodes this same literal in a
+// separate Go module with no compile-time link to this constant (a pure
+// consumer has no business importing the publishing side's library just
+// to read one string — see that file's eventTypeHeader comment). This
+// test is the only thing standing between renaming the constant here and
+// transfer emails silently ceasing.
+func TestHeaderEventType_IsWireContract(t *testing.T) {
+	if HeaderEventType != "event_type" {
+		t.Errorf("HeaderEventType = %q, want %q — this literal is duplicated in services/notifications-svc/kafka.go and must not drift", HeaderEventType, "event_type")
 	}
 }
 

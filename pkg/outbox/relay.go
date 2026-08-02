@@ -19,6 +19,28 @@ const DefaultBatchSize = 100
 // indefinitely.
 const DefaultPublishTimeout = 5 * time.Second
 
+// HeaderEventType is the Kafka message header key every relayed event
+// carries; its value is the outbox row's event_type verbatim
+// ("TransferCompleted", "UserActivated", ...).
+//
+// It exists because protobuf's wire format is not self-describing and
+// transfer.events is the first topic in this repo carrying more than one
+// message type. TransferCompleted/TransferFailed/TransferRejected share
+// field numbers AND field types for 1-5, and their field 6 is a string in
+// all three (ledger_transaction_id / reason / triggered_rule) — so
+// proto.Unmarshal of any one of them into any other SUCCEEDS, silently,
+// depositing a failure reason into LedgerTransactionId. Without a
+// discriminator outside the payload, a consumer of that topic cannot know
+// what it is holding.
+//
+// The relay is the right place to stamp it: event_type is already a
+// column on every outbox row (it was previously read only to be logged),
+// so producers need no change and the header can never disagree with what
+// was written in the same transaction as the state change. Adding a
+// header is additive on the wire — existing consumers that don't look at
+// it are unaffected.
+const HeaderEventType = "event_type"
+
 // KafkaMessageWriter is the narrow slice of *kafka.Writer's API the relay
 // needs, narrowed to an interface so callers' tests can substitute a
 // fake instead of a live broker. *kafka.Writer satisfies this implicitly.
@@ -121,8 +143,9 @@ func RelayBatch(ctx context.Context, pool *pgxpool.Pool, table string, writer Ka
 	for _, r := range batch {
 		writeCtx, cancel := context.WithTimeout(ctx, DefaultPublishTimeout)
 		err := writer.WriteMessages(writeCtx, kafka.Message{
-			Key:   []byte(r.PartitionKey),
-			Value: r.Payload,
+			Key:     []byte(r.PartitionKey),
+			Value:   r.Payload,
+			Headers: []kafka.Header{{Key: HeaderEventType, Value: []byte(r.EventType)}},
 		})
 		cancel()
 		if err != nil {

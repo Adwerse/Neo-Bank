@@ -116,11 +116,20 @@ services:
       KAFKA_BROKERS: kafka:9092
       KAFKA_USER_EVENTS_TOPIC: user.events
       KAFKA_ACCOUNT_EVENTS_TOPIC: account.events
+      KAFKA_TRANSFER_EVENTS_TOPIC: transfer.events
+      # Byte-identical to auth-svc's, so both services deliver into the
+      # same Mailpit inbox from the same sender. Switching to a real
+      # provider is a change to these two values plus SMTP credentials,
+      # not to any sending logic.
+      SMTP_ADDR: mailpit:1025
+      SMTP_FROM: noreply@neobank.local
     depends_on:
       postgres:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
+      mailpit:
+        condition: service_healthy
 
   postgres:
     image: postgres:16-alpine
@@ -165,12 +174,25 @@ services:
     volumes:
       - kafka_data:/bitnami/kafka
 
-  # One-shot provisioning: creates user.events/account.events with
-  # cleanup.policy=compact (idempotent — --if-not-exists on create, and
-  # --alter --add-config is safe to reapply) so a late-subscribing
-  # consumer group (notifications-svc) can always read every historical
+  # One-shot provisioning of every topic notifications-svc reads, with an
+  # explicit retention policy for each (idempotent — --if-not-exists on
+  # create, and --alter --add-config is safe to reapply).
+  #
+  # user.events/account.events get cleanup.policy=compact so a
+  # late-subscribing consumer group can always read every historical
   # event for a still-live key, not just whatever survived time-based
   # retention. See README's "Kafka: offset reset и retention" section.
+  #
+  # transfer.events gets cleanup.policy=delete — the broker default,
+  # stated explicitly because the alternative is actively wrong here. Its
+  # key is sender_account_id, so a compacted transfer.events would retain
+  # only the LAST event per sender and silently discard the rest of their
+  # transfer history: it's a log of discrete facts, not a snapshot of
+  # state, and compaction on it would be data loss wearing a retention
+  # policy's clothes. It is created here rather than left to broker
+  # auto-creation so notifications-svc's depends_on actually covers all
+  # three of the topics it reads — otherwise, on a stack where nobody has
+  # transferred yet, its reader spins against a topic that doesn't exist.
   kafka-init:
     image: bitnamilegacy/kafka:3.7.1
     depends_on:
@@ -181,8 +203,10 @@ services:
         until kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do sleep 2; done
         kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic user.events --config cleanup.policy=compact
         kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic account.events --config cleanup.policy=compact
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transfer.events --config cleanup.policy=delete
         kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic user.events --add-config cleanup.policy=compact
         kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic account.events --add-config cleanup.policy=compact
+        kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic transfer.events --add-config cleanup.policy=delete
 
   mailpit:
     image: axllent/mailpit
