@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "neobank/proto/gen/go/events/v1;eventsv1";
+
+// AccountCreated is published once accounts-svc creates a new account row
+// for a user, in response to consuming that user's UserActivated event.
+// Carries account_id alongside user_id so a consumer that only knows one
+// of the two (e.g. notifications-svc's user_contacts projection, or a
+// transfer event that only carries account_id) can link them without a
+// synchronous call back to accounts-svc.
+message AccountCreated {
+  string event_id = 1;
+  string user_id = 2;
+  string account_id = 3;
+  string account_number = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+}

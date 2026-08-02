@@ -10,12 +10,12 @@
 - `.github/workflows/` — CI-пайплайны
 
 ## Инфраструктура (dev)
-Postgres, Redis и Kafka подняты в `docker-compose.yml`. `auth-svc` использует все три (Postgres и Redis — с первого спринта, Kafka — как продюсер событий, см. ниже); остальные сервисы пока не подключены.
+Postgres, Redis и Kafka подняты в `docker-compose.yml`. Postgres использует каждый сервис, у которого есть своя схема (все, кроме gateway). Redis — только auth-svc (сессии/токены). Kafka — auth-svc, accounts-svc и transfers-svc как продюсеры, accounts-svc и notifications-svc как консьюмеры (см. «События (Kafka)» ниже).
 
 Креды Postgres в `docker-compose.yml` — только для локальной разработки, не для продакшена.
 
 ## События (Kafka)
-`auth-svc` публикует событие `UserActivated` в топик `user.events`, `transfers-svc` — `TransferCompleted`/`TransferFailed`/`TransferRejected` в топик `transfer.events`. Контракты — `proto/events/v1/user_events.proto` и `proto/events/v1/transfer_events.proto`, сериализация бинарным protobuf. Ключ сообщения — `user_id` для `UserActivated`, `sender_account_id` для всех трёх Transfer*-событий: это гарантирует, что все события одного пользователя/счёта попадают в одну партицию и обрабатываются по порядку. `event_id` — случайный UUIDv4 (`outbox.GenerateEventID`, см. ниже), используется accounts-svc для дедупликации при повторной доставке (см. «Идемпотентность» ниже).
+`auth-svc` публикует `UserActivated` в топик `user.events`, `accounts-svc` — `AccountCreated` в `account.events`, `transfers-svc` — `TransferCompleted`/`TransferFailed`/`TransferRejected` в `transfer.events`. Контракты — `proto/events/v1/{user,account,transfer}_events.proto`, сериализация бинарным protobuf. Ключ сообщения — `user_id` для `UserActivated`/`AccountCreated`, `sender_account_id` для Transfer*-событий: гарантирует, что все события одного пользователя/счёта попадают в одну партицию и обрабатываются по порядку. `event_id` — случайный UUIDv4 (`outbox.GenerateEventID`, см. ниже), используется консьюмерами (accounts-svc, notifications-svc) для дедупликации при повторной доставке (см. «Идемпотентность» ниже и «notifications-svc» дальше).
 
 `accounts-svc` — consumer топика `user.events` (consumer group `accounts-svc`): на `UserActivated` создаёт строку в `accounts` со сгенерированным номером счёта и `status = 'active'`, а **сразу после этого** — вызывает `ledger-svc` `CreateLedgerAccount(account_id)` по gRPC, чтобы у нового счёта появился ledger-аккаунт (адрес ledger — env `LEDGER_GRPC_ADDR`, дефолт `ledger-svc:8083`). Порядок фиксации важен: если вызов ledger упал, offset события **не** коммитится — Kafka передоставит сообщение, а идемпотентность (consumer'а и самого `CreateLedgerAccount`) делает повтор безопасным. Это ровно тот случай, ради которого строились at-least-once + идемпотентность.
 
@@ -82,6 +82,31 @@ docker compose logs -f accounts-svc
 ```
 
 Проверено вручную на этом стеке (`bitnamilegacy/kafka:3.7.1`): после шага 3 в логах появляется `accounts-svc: event <event_id> already processed, skipping (redelivery)`, а `SELECT count(*) FROM accounts WHERE user_id = '<user_id>'` остаётся `1`. Дополнительно проверен и уровень 1 отдельно: если вручную удалить строку из `processed_events` (`DELETE FROM processed_events WHERE event_id = '<event_id>'`) и повторить шаги 1–3, лог показывает уже другую ветку — `account for user <user_id> already exists (redelivery of event <event_id>), not recreating` — то есть дедупликация срабатывает и без `processed_events`, только на `ON CONFLICT (user_id)`; при этом строка в `processed_events` восстанавливается (самолечение), а счёт по-прежнему один. Оффсет консьюмера в обоих случаях в итоге закоммичен (`kafka-consumer-groups.sh --describe` показывает `LAG 0`), т.е. дубль не оставляет группу «застрявшей».
+
+## notifications-svc: проекция `user_contacts` из событий
+
+`notifications-svc` не отправляет письма (это отдельный следующий шаг) — пока что он только строит и поддерживает свою локальную проекцию `user_id`/`account_id` → `email` (`user_contacts`), полностью из Kafka-событий, без единого синхронного вызова в auth-svc или accounts-svc. Это осознанный архитектурный выбор: сервис, специально вынесенный из критического пути (отправка писем не должна блокировать регистрацию или переводы), не должен обзаводиться зависимостью от аптайма другого сервиса ради того, чтобы просто узнать чей-то email — каждый сервис владеет своими данными, а notifications-svc держит собственную, независимую копию того, что ему нужно.
+
+Два consumer'а (одна consumer-группа `notifications-svc`, два ридера — `kafka-go`'s `Reader` подписывается ровно на один топик, поэтому один ридер на топик, не один на группу):
+- `user.events` → `UserActivated` → `upsertUserContactEmail` создаёт/обновляет строку `(user_id, email)`, `account_id` не трогает.
+- `account.events` (новый топик, публикует accounts-svc через тот же outbox-подход, что transfers-svc/auth-svc — см. `services/accounts-svc/accounts.go`, `tryCreateAccount`) → `AccountCreated` → `updateUserContactAccountID` дозаполняет `account_id` в уже существующую строку.
+
+`AccountCreated` причинно всегда следует за `UserActivated` (accounts-svc создаёт счёт только в ответ на `UserActivated`), но у двух топиков независимые ридеры без гарантии взаимного порядка обработки внутри notifications-svc. Поэтому `updateUserContactAccountID` — намеренно `UPDATE`, не `UPSERT`: если строки `user_contacts` ещё нет (обработчик `user.events` не успел), `RowsAffected = 0`, обработчик `AccountCreated` возвращает ошибку, оффсет не коммитится, и то же сообщение перечитывается на следующем тике — до тех пор, пока другой ридер не создаст строку. `email TEXT NOT NULL` в схеме исключает противоположную стратегию (upsert с пустым email).
+
+Дедупликация — тот же паттерн idempotent-consumer, что у accounts-svc: проверка перед обработкой, запись после. Своя таблица `notifications_processed_events`, не `processed_events` — та уже занята accounts-svc в той же физической базе `neobank` (тот же класс коллизии, что уже заставил переименовать outbox-таблицы в `auth_outbox`/`accounts_outbox`, см. выше). Оба типа событий (UserActivated, AccountCreated) пишутся в одну таблицу сразу — `event_id` глобально уникален независимо от типа события. Колонка `status` (`processing`/`sent`/`skipped`) в этом спринте всегда пишется как `skipped` — уведомление не отправляется ни для одного события; `sent`/`processing` зарезервированы под следующий спринт, чтобы не требовать миграции схемы, когда он появится.
+
+### Kafka: offset reset и retention
+
+`UserActivated` публикуется с спринта 2, а `notifications-svc` подключается только сейчас — новая consumer-группа без явных настроек могла бы начать читать `user.events` с конца топика, и все пользователи, зарегистрированные раньше, остались бы без email в проекции навсегда. Решение, оба пункта обязательны вместе, ни один не достаточен в одиночку:
+
+1. **`StartOffset: kafka.FirstOffset`** в `newKafkaReader` (`services/notifications-svc/kafka.go`) — явно, а не полагаясь на дефолт `kafka-go`. Действует только один раз: пока у группы `notifications-svc` нет закоммиченного оффсета на партиции. После первого коммита оффсета это значение больше не читается — чтение всегда продолжается с закоммиченного места, так что параметр безопасно оставить в коде навсегда, а не убирать после первого деплоя.
+2. **`cleanup.policy=compact`** на топиках `user.events` и `account.events` (не `delete`, дефолт брокера) — иначе `FirstOffset` не помог бы, если старые сообщения уже физически удалены по retention до того, как notifications-svc впервые подключился. Компакция вместо этого хранит последнее сообщение на каждый ключ (`user_id`) бессрочно — ровно то, что нужно для построения проекции состояния, и естественно для топика, где почти всегда один `UserActivated` на пользователя. Применяется через одноразовый сервис `kafka-init` в `docker-compose.yml` (`kafka-topics.sh --create --if-not-exists ... --config cleanup.policy=compact` + `kafka-configs.sh --alter --add-config` — второе идемпотентно и покрывает случай, когда топик уже существовал с дефолтной политикой до этого изменения). `notifications-svc` зависит от `kafka-init` (`condition: service_completed_successfully`) — топики гарантированно сконфигурированы до первого чтения.
+
+Проверено вручную: остановленные `notifications-svc`/`postgres` volume, существующие в топике `UserActivated` от пользователей, зарегистрированных до появления этого сервиса, — после `docker compose up` (миграции применяются, ридер стартует с `FirstOffset`) все они появляются в `user_contacts` без создания новых пользователей и без обращения к auth-svc.
+
+### Устойчивость к недоступности auth-svc
+
+`notifications-svc` никогда не вызывает auth-svc (ни HTTP, ни gRPC) — вся связь только через Kafka и собственную БД. Проверено: `docker compose stop auth-svc`, затем обычный поток (перевод, либо ранее необработанное `UserActivated` через сдвиг оффсета) — `notifications-svc` продолжает читать и обрабатывать события без ошибок, `/healthz` остаётся `200`.
 
 ## ledger-svc: внутренний gRPC API
 

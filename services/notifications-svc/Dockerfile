@@ -1,6 +1,7 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY pkg/health ./pkg/health
+COPY proto/gen/go ./proto/gen/go
 COPY services/notifications-svc ./services/notifications-svc
 WORKDIR /src/services/notifications-svc
 RUN go build -o /out/server .

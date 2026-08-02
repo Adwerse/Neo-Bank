@@ -28,6 +28,21 @@ func newKafkaReader(brokers, topic, groupID string) *kafka.Reader {
 	})
 }
 
+// newKafkaWriter constructs accounts-svc's producer for the account.events
+// topic — same shape as auth-svc's/transfers-svc's newKafkaWriter,
+// duplicated rather than shared per this repo's per-service-module
+// convention. Balancer is explicit (see those services' own doc comments
+// for why the zero-value balancer is key-blind); AllowAutoTopicCreation
+// is required client-side even with the broker's own auto-create enabled.
+func newKafkaWriter(brokers, topic string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:                   kafka.TCP(strings.Split(brokers, ",")...),
+		Topic:                  topic,
+		Balancer:               &kafka.Hash{},
+		AllowAutoTopicCreation: true,
+	}
+}
+
 // runUserActivatedConsumer fetches UserActivated events and turns each one
 // into an accounts row, one message at a time. It deliberately uses
 // FetchMessage + an explicit CommitMessages (not the auto-committing

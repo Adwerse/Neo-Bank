@@ -11,7 +11,16 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"neobank/pkg/outbox"
+	eventsv1 "neobank/proto/gen/go/events/v1"
 )
+
+// accountsOutboxTable is accounts-svc's outbox table name, shared with the
+// outbox relay/cleanup workers wired up in main.go.
+const accountsOutboxTable = "accounts_outbox"
 
 const (
 	accountNumberPrefix      = "NB"
@@ -89,6 +98,12 @@ func isNotFoundErr(err error) bool {
 // is a faster-path complement to this, not a replacement: this layer alone is
 // what actually prevents a duplicate row from ever being created, in every
 // case including ones layer 2's bookkeeping doesn't fully cover.
+//
+// The account-number-collision retry lives here, one attempt per call to
+// tryCreateAccount below — each attempt is its own transaction, since
+// Postgres aborts an entire transaction on any statement error (including
+// this expected, retried collision) and re-generating inside a still-open,
+// already-errored transaction isn't an option without SAVEPOINTs.
 func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (accountCreateOutcome, string, error) {
 	for attempt := 0; attempt < maxAccountNumberAttempts; attempt++ {
 		accountNumber, err := generateAccountNumber()
@@ -96,31 +111,70 @@ func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string
 			return 0, "", fmt.Errorf("generate account number: %w", err)
 		}
 
-		var accountID string
-		err = pool.QueryRow(ctx,
-			"INSERT INTO accounts (user_id, account_number) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING RETURNING id",
-			userID, accountNumber,
-		).Scan(&accountID)
-		if err == nil {
-			return accountCreated, accountID, nil
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			// user_id conflict: the account already exists. Fetch its id.
-			var existingID string
-			if serr := pool.QueryRow(ctx, "SELECT id FROM accounts WHERE user_id = $1", userID).Scan(&existingID); serr != nil {
-				return 0, "", fmt.Errorf("look up existing account for user %s: %w", userID, serr)
+		outcome, accountID, err := tryCreateAccount(ctx, pool, userID, accountNumber)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation &&
+				pgErr.ConstraintName == accountsAccountNumberConstraint {
+				continue // regenerate and retry
 			}
-			return accountAlreadyExists, existingID, nil
+			return 0, "", err
 		}
-
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation &&
-			pgErr.ConstraintName == accountsAccountNumberConstraint {
-			continue // regenerate and retry
-		}
-		return 0, "", err
+		return outcome, accountID, nil
 	}
 	return 0, "", fmt.Errorf("failed to generate a unique account number after %d attempts", maxAccountNumberAttempts)
+}
+
+// tryCreateAccount makes one INSERT ... ON CONFLICT (user_id) DO NOTHING
+// attempt inside its own transaction, writing an AccountCreated outbox
+// event in that SAME transaction — but only when the row is actually
+// freshly created. A redelivery that finds the account already there
+// (accountAlreadyExists) must not re-publish the event a second time:
+// AccountCreated already went out the first time this account was made.
+func tryCreateAccount(ctx context.Context, pool *pgxpool.Pool, userID, accountNumber string) (accountCreateOutcome, string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	defer tx.Rollback(ctx)
+
+	var accountID string
+	err = tx.QueryRow(ctx,
+		"INSERT INTO accounts (user_id, account_number) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING RETURNING id",
+		userID, accountNumber,
+	).Scan(&accountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// user_id conflict: the account already exists. Fetch its id — no
+		// outbox write here, see the doc comment above.
+		var existingID string
+		if serr := tx.QueryRow(ctx, "SELECT id FROM accounts WHERE user_id = $1", userID).Scan(&existingID); serr != nil {
+			return 0, "", fmt.Errorf("look up existing account for user %s: %w", userID, serr)
+		}
+		return accountAlreadyExists, existingID, tx.Commit(ctx)
+	}
+	if err != nil {
+		return 0, "", err
+	}
+
+	eventID, err := outbox.GenerateEventID()
+	if err != nil {
+		return 0, "", fmt.Errorf("generate event id: %w", err)
+	}
+	payload, err := proto.Marshal(&eventsv1.AccountCreated{
+		EventId:       eventID,
+		UserId:        userID,
+		AccountId:     accountID,
+		AccountNumber: accountNumber,
+		OccurredAt:    timestamppb.New(time.Now()),
+	})
+	if err != nil {
+		return 0, "", fmt.Errorf("marshal AccountCreated event: %w", err)
+	}
+	if err := outbox.InsertEvent(ctx, tx, accountsOutboxTable, eventID, "AccountCreated", userID, payload); err != nil {
+		return 0, "", fmt.Errorf("insert outbox event: %w", err)
+	}
+
+	return accountCreated, accountID, tx.Commit(ctx)
 }
 
 // generateAccountNumber returns a synthetic account number of the form

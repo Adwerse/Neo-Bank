@@ -16,17 +16,21 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
+	"neobank/pkg/outbox"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
 const (
-	defaultPort         = "8082"
-	defaultGRPCPort     = "9082"
-	defaultKafkaBrokers = "kafka:9092"
-	defaultKafkaTopic   = "user.events"
-	kafkaConsumerGroup  = "accounts-svc"
-	defaultLedgerAddr   = "ledger-svc:8083"
+	defaultPort               = "8082"
+	defaultGRPCPort           = "9082"
+	defaultKafkaBrokers       = "kafka:9092"
+	defaultKafkaTopic         = "user.events"
+	defaultAccountEventsTopic = "account.events"
+	kafkaConsumerGroup        = "accounts-svc"
+	defaultLedgerAddr         = "ledger-svc:8083"
+	defaultOutboxRetention    = 7 * 24 * time.Hour
+	outboxRelayInterval       = 1 * time.Second
 )
 
 func main() {
@@ -42,9 +46,21 @@ func main() {
 	if kafkaTopic == "" {
 		kafkaTopic = defaultKafkaTopic
 	}
+	accountEventsTopic := os.Getenv("KAFKA_ACCOUNT_EVENTS_TOPIC")
+	if accountEventsTopic == "" {
+		accountEventsTopic = defaultAccountEventsTopic
+	}
 	ledgerAddr := os.Getenv("LEDGER_GRPC_ADDR")
 	if ledgerAddr == "" {
 		ledgerAddr = defaultLedgerAddr
+	}
+	outboxRetention := defaultOutboxRetention
+	if v := os.Getenv("OUTBOX_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			log.Fatalf("accounts-svc: invalid OUTBOX_RETENTION %q: %v", v, err)
+		}
+		outboxRetention = d
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
@@ -73,7 +89,12 @@ func main() {
 	kafkaReader := newKafkaReader(kafkaBrokers, kafkaTopic, kafkaConsumerGroup)
 	defer kafkaReader.Close()
 
+	kafkaWriter := newKafkaWriter(kafkaBrokers, accountEventsTopic)
+	defer kafkaWriter.Close()
+
 	go runUserActivatedConsumer(context.Background(), kafkaReader, pool, ledgerClient)
+	go outbox.RunRelay(context.Background(), pool, accountsOutboxTable, kafkaWriter, outboxRelayInterval, outbox.DefaultBatchSize, "accounts-svc")
+	go outbox.RunCleanupWorker(context.Background(), pool, accountsOutboxTable, outboxRetention, outbox.DefaultCleanupInterval, "accounts-svc")
 
 	grpcPort := os.Getenv("GRPC_PORT")
 	if grpcPort == "" {

@@ -43,12 +43,15 @@ services:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: user.events
+      KAFKA_ACCOUNT_EVENTS_TOPIC: account.events
       LEDGER_GRPC_ADDR: ledger-svc:8083
       GRPC_PORT: "9082"
     depends_on:
       postgres:
         condition: service_healthy
       ledger-svc:
+        condition: service_started
+      kafka:
         condition: service_started
 
   ledger-svc:
@@ -108,6 +111,16 @@ services:
       dockerfile: services/notifications-svc/Dockerfile
     ports:
       - "8086:8086"
+    environment:
+      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_USER_EVENTS_TOPIC: user.events
+      KAFKA_ACCOUNT_EVENTS_TOPIC: account.events
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
 
   postgres:
     image: postgres:16-alpine
@@ -151,6 +164,25 @@ services:
       KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka_data:/bitnami/kafka
+
+  # One-shot provisioning: creates user.events/account.events with
+  # cleanup.policy=compact (idempotent — --if-not-exists on create, and
+  # --alter --add-config is safe to reapply) so a late-subscribing
+  # consumer group (notifications-svc) can always read every historical
+  # event for a still-live key, not just whatever survived time-based
+  # retention. See README's "Kafka: offset reset и retention" section.
+  kafka-init:
+    image: bitnamilegacy/kafka:3.7.1
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        until kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do sleep 2; done
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic user.events --config cleanup.policy=compact
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic account.events --config cleanup.policy=compact
+        kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic user.events --add-config cleanup.policy=compact
+        kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic account.events --add-config cleanup.policy=compact
 
   mailpit:
     image: axllent/mailpit
