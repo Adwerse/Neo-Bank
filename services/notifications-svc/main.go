@@ -6,10 +6,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"neobank/pkg/health"
 )
 
 const (
@@ -18,11 +20,18 @@ const (
 	defaultUserEventsTopic     = "user.events"
 	defaultAccountEventsTopic  = "account.events"
 	defaultTransferEventsTopic = "transfer.events"
+	defaultTransferDLQTopic    = "transfer.events.dlq"
 	// Identical to auth-svc's defaults on purpose: both services should
 	// land in the same Mailpit inbox from the same sender, and switching
 	// to a real provider should be one pair of env vars, not two.
 	defaultSMTPAddr = "mailpit:1025"
 	defaultSMTPFrom = "noreply@neobank.local"
+
+	// shutdownTimeout bounds how long a SIGTERM/SIGINT gives the HTTP
+	// server to stop accepting new connections. It does NOT bound the
+	// Kafka consumers — see main()'s comment on wg.Wait for why those are
+	// left unbounded on purpose.
+	shutdownTimeout = 10 * time.Second
 )
 
 func main() {
@@ -45,6 +54,10 @@ func main() {
 	transferEventsTopic := os.Getenv("KAFKA_TRANSFER_EVENTS_TOPIC")
 	if transferEventsTopic == "" {
 		transferEventsTopic = defaultTransferEventsTopic
+	}
+	transferDLQTopic := os.Getenv("KAFKA_TRANSFER_DLQ_TOPIC")
+	if transferDLQTopic == "" {
+		transferDLQTopic = defaultTransferDLQTopic
 	}
 	smtpAddr := os.Getenv("SMTP_ADDR")
 	if smtpAddr == "" {
@@ -78,20 +91,113 @@ func main() {
 	defer accountEventsReader.Close()
 	transferEventsReader := newNotificationReader(kafkaBrokers, transferEventsTopic)
 	defer transferEventsReader.Close()
+	dlqWriter := newKafkaWriter(kafkaBrokers, transferDLQTopic)
+	defer dlqWriter.Close()
 
-	go runUserActivatedConsumer(context.Background(), userEventsReader, pool)
-	go runAccountCreatedConsumer(context.Background(), accountEventsReader, pool)
-	go runTransferEventsConsumer(context.Background(), transferEventsReader, pool, smtpAddr, smtpFrom)
+	// ctx cancels on SIGTERM/SIGINT. Every reader's FetchMessage blocks on
+	// it, so cancellation is what unblocks an idle consumer and lets its
+	// goroutine return. It is deliberately NOT threaded into the handling
+	// of a message already fetched — see runTransferEventsConsumer's doc
+	// comment for why a message in flight must finish on its own context.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	health := &consumerHealth{}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		runUserActivatedConsumer(ctx, userEventsReader, pool)
+	}()
+	go func() {
+		defer wg.Done()
+		runAccountCreatedConsumer(ctx, accountEventsReader, pool)
+	}()
+	go func() {
+		defer wg.Done()
+		runTransferEventsConsumer(ctx, transferEventsReader, pool, smtpAddr, smtpFrom, dlqWriter, transferDLQTopic)
+	}()
+
+	go monitorConsumers(ctx, []namedReader{
+		{userEventsTopic, userEventsReader},
+		{accountEventsTopic, accountEventsReader},
+		{transferEventsTopic, transferEventsReader},
+	})
+	go monitorKafkaHealth(ctx, kafkaBrokers, health)
+
+	// An explicit mux, not the package-level http.DefaultServeMux, so
+	// "/healthz" can be method-qualified below without any ambiguity —
+	// same reasoning as transfers-svc/accounts-svc.
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotImplemented)
 		json.NewEncoder(w).Encode(map[string]string{"service": "notifications-svc"})
 	})
-	http.HandleFunc("/healthz", health.Handler("notifications-svc"))
+
+	// Honest, unlike pkg/health.Handler (still used by gateway, which has
+	// no dependency worth checking): reports 503 if Postgres is
+	// unreachable OR any of the three Kafka readers is currently failing
+	// to fetch, instead of always answering 200 for a process that is
+	// merely still running. consumer_lag surfaces the same numbers
+	// logConsumerLag writes to the log, so a quick curl answers "did it
+	// fall behind or die" without needing log access.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		checkCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		w.Header().Set("Content-Type", "application/json")
+
+		var result int
+		dbErr := pool.QueryRow(checkCtx, "SELECT 1").Scan(&result)
+		kafkaOK := health.ok()
+
+		body := map[string]any{
+			"service":  "notifications-svc",
+			"postgres": dbErr == nil,
+			"kafka":    kafkaOK,
+			"consumer_lag": map[string]int64{
+				userEventsTopic:     userEventsReader.Stats().Lag,
+				accountEventsTopic:  accountEventsReader.Stats().Lag,
+				transferEventsTopic: transferEventsReader.Stats().Lag,
+			},
+		}
+		if dbErr != nil || !kafkaOK {
+			body["status"] = "error"
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(body)
+			return
+		}
+		body["status"] = "ok"
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(body)
+	})
+
+	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		log.Printf("notifications-svc: shutdown signal received, draining in-flight work")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("notifications-svc: http server shutdown: %v", err)
+		}
+	}()
 
 	log.Printf("notifications-svc listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+
+	// wg.Wait, not a timeout: each consumer goroutine returns as soon as
+	// its FetchMessage unblocks on ctx with nothing in flight, or once
+	// the message it already holds finishes — every retry attempt, a
+	// possible DLQ publish, and the commit (see
+	// runTransferEventsConsumer's doc comment). Cutting this off with a
+	// deadline would recreate the exact "abandoned mid-message" problem
+	// graceful shutdown exists to avoid.
+	log.Printf("notifications-svc: waiting for consumers to finish their current message")
+	wg.Wait()
+	log.Printf("notifications-svc: shutdown complete")
 }

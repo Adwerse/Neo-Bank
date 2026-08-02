@@ -111,12 +111,26 @@ services:
       dockerfile: services/notifications-svc/Dockerfile
     ports:
       - "8086:8086"
+    # main() drains the in-flight message on SIGTERM before exiting — see
+    # services/notifications-svc/main.go and README's "notifications-svc:
+    # устойчивость консьюмера" — and that drain is deliberately not
+    # bounded by a timeout of its own. Docker's default 10s grace period
+    # before SIGKILL is shorter than transfer.events' worst case (up to
+    # transferMaxAttempts retries of a fully-down SMTP dependency, plus
+    # backoff between them), so a plain `docker compose stop` could still
+    # SIGKILL mid-retry. That is not data loss — the message just stays
+    # uncommitted and 'processing', and claimEvent reclaims it on the next
+    # start, the same recovery path a hard crash already relies on — but
+    # a generous grace period here is what lets a routine restart finish
+    # gracefully instead of falling back to that path every time.
+    stop_grace_period: 60s
     environment:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_USER_EVENTS_TOPIC: user.events
       KAFKA_ACCOUNT_EVENTS_TOPIC: account.events
       KAFKA_TRANSFER_EVENTS_TOPIC: transfer.events
+      KAFKA_TRANSFER_DLQ_TOPIC: transfer.events.dlq
       # Byte-identical to auth-svc's, so both services deliver into the
       # same Mailpit inbox from the same sender. Switching to a real
       # provider is a change to these two values plus SMTP credentials,
@@ -193,6 +207,13 @@ services:
   # auto-creation so notifications-svc's depends_on actually covers all
   # three of the topics it reads — otherwise, on a stack where nobody has
   # transferred yet, its reader spins against a topic that doesn't exist.
+  #
+  # transfer.events.dlq holds messages notifications-svc gave up on after
+  # transferMaxAttempts (see services/notifications-svc/kafka.go) —
+  # poison payloads, permanently-refused addresses, anything that failed
+  # the same way every retry. delete, not compact, for the same reason as
+  # transfer.events itself: each DLQ entry is a distinct failure worth
+  # keeping, not a snapshot to collapse by key.
   kafka-init:
     image: bitnamilegacy/kafka:3.7.1
     depends_on:
@@ -204,9 +225,11 @@ services:
         kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic user.events --config cleanup.policy=compact
         kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic account.events --config cleanup.policy=compact
         kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transfer.events --config cleanup.policy=delete
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transfer.events.dlq --config cleanup.policy=delete
         kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic user.events --add-config cleanup.policy=compact
         kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic account.events --add-config cleanup.policy=compact
         kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic transfer.events --add-config cleanup.policy=delete
+        kafka-configs.sh --bootstrap-server kafka:9092 --alter --topic transfer.events.dlq --add-config cleanup.policy=delete
 
   mailpit:
     image: axllent/mailpit

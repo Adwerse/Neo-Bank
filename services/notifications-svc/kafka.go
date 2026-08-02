@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,17 +33,53 @@ const contactWaitDelay = 200 * time.Millisecond
 // exist yet — burning CPU and drowning the log.
 const fetchErrorBackoff = time.Second
 
+// transferMaxAttempts bounds how many times runTransferEventsConsumer
+// tries to fully process one transfer.events message — unmarshal,
+// dispatch, and handle — before giving up on it and routing it to the
+// dead letter topic. Without this, one message this service can never
+// process (a payload that will never unmarshal, an address net/smtp
+// permanently refuses) would previously just be logged once and silently
+// lost the moment a later message's offset committed past it — not
+// retried forever, and not blocking the partition either, since
+// kafka-go's Reader always advances on FetchMessage regardless of commit
+// state. See handleTransferMessageWithRetry.
+const transferMaxAttempts = 5
+
+// transferRetryBaseDelay is the sleep before the second attempt;
+// transferRetryDelay doubles it on each subsequent attempt, capped at
+// transferRetryMaxDelay so a long losing streak still reaches the DLQ in
+// bounded time.
+const transferRetryBaseDelay = 500 * time.Millisecond
+const transferRetryMaxDelay = 8 * time.Second
+
+// consumerLagLogInterval is how often monitorConsumers reports each
+// reader's lag.
+const consumerLagLogInterval = 30 * time.Second
+
+// kafkaHealthProbeInterval is how often monitorKafkaHealth dials the
+// brokers to check reachability. Shorter than consumerLagLogInterval on
+// purpose: the probe is a cheap, independent connection attempt, not
+// something that needs to wait for a reader's own fetch cycle.
+const kafkaHealthProbeInterval = 10 * time.Second
+
+// kafkaHealthProbeTimeout bounds a single probe dial, so a broker that
+// accepts a TCP connection but never completes the Kafka handshake can't
+// wedge the health goroutine past the next tick.
+const kafkaHealthProbeTimeout = 5 * time.Second
+
 // eventTypeHeader is the Kafka message header carrying the event's type.
 // It duplicates pkg/outbox's HeaderEventType literal rather than
 // importing that module: what's needed here is one string, and
 // pkg/outbox is the PUBLISHING side (write into an outbox table in the
 // same transaction, then relay it). notifications-svc owns no outbox
-// table and publishes nothing; a pure consumer depending on the
-// producers' library would invert the layering and mislead the next
-// reader into thinking this service emits events. pkg/outbox's
-// TestHeaderEventType_IsWireContract pins the literal there so a rename
-// fails loudly on the producing side instead of silently producing a
-// topic nobody can route.
+// table for the topics it reads and publishes nothing there; a pure
+// consumer depending on the producers' library would invert the layering
+// and mislead the next reader into thinking this service emits those
+// events. (This service does now publish to one topic of its own, the
+// DLQ — see kafkaMessageWriter — but that doesn't change the reasoning
+// for the events it reads.) pkg/outbox's TestHeaderEventType_IsWireContract
+// pins the literal there so a rename fails loudly on the producing side
+// instead of silently producing a topic nobody can route.
 const eventTypeHeader = "event_type"
 
 // The event_type values transfers-svc writes into its outbox rows, which
@@ -104,6 +142,52 @@ func newKafkaReader(brokers, topic string, startOffset int64) *kafka.Reader {
 	})
 }
 
+// newKafkaWriter constructs this service's one producer — the dead
+// letter topic. Same shape as transfers-svc's newKafkaWriter:
+// AllowAutoTopicCreation must be set true client-side even though the
+// broker already has auto-creation enabled, and Balancer is set
+// explicitly (rather than the zero-value default, which ignores the
+// message key) so a DLQ'd event's key — the same partition key its
+// source topic used — still groups by account the way an operator
+// skimming the DLQ would expect.
+func newKafkaWriter(brokers, topic string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:                   kafka.TCP(strings.Split(brokers, ",")...),
+		Topic:                  topic,
+		Balancer:               &kafka.Hash{},
+		AllowAutoTopicCreation: true,
+	}
+}
+
+// kafkaMessageWriter is the narrow slice of *kafka.Writer's API sendToDLQ
+// needs, narrowed to an interface so tests can substitute a fake instead
+// of a live broker. *kafka.Writer satisfies this implicitly. Same shape
+// as pkg/outbox.KafkaMessageWriter, duplicated rather than imported — see
+// eventTypeHeader's doc comment for why this service avoids depending on
+// pkg/outbox.
+type kafkaMessageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+}
+
+// consumerHealth tracks whether this service can currently reach the
+// Kafka brokers, so /healthz can report Kafka connectivity honestly
+// instead of the process's mere liveness. Zero value is false —
+// "reachable" — so a freshly constructed consumerHealth reads as healthy
+// before monitorKafkaHealth's first probe.
+//
+// One flag for the whole broker set, not one per reader: this repo's
+// dev stack is a single broker, and all three readers share the same
+// Brokers list, so "is Kafka reachable" is one fact, not three. See
+// monitorKafkaHealth for how it's determined and why not from the
+// readers themselves.
+type consumerHealth struct {
+	unreachable atomic.Bool
+}
+
+func (h *consumerHealth) ok() bool {
+	return !h.unreachable.Load()
+}
+
 // eventTypeOf reads the discriminator the outbox relay stamps on every
 // message. Returns "" when the header is absent — which means the message
 // predates the relay change, since nothing publishes without it now.
@@ -134,22 +218,38 @@ func commitMessage(ctx context.Context, reader *kafka.Reader, msg kafka.Message,
 // FetchMessage + explicit CommitMessages, only after the handler
 // succeeds, so a crash or DB error between fetch and commit leaves the
 // message uncommitted for redelivery rather than silently skipped.
-func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
+//
+// fetchCtx is the shutdown signal, not a deadline on the work a fetched
+// message triggers: FetchMessage blocks on it, so cancelling it (SIGTERM,
+// via main) unblocks a reader that is idle waiting for the next message
+// and this loop returns without starting new work. A message already
+// fetched is still handled and committed using context.Background(), not
+// fetchCtx, so it runs to completion even if shutdown was signalled a
+// moment after the fetch returned — see runTransferEventsConsumer's doc
+// comment, which spells this out in more depth since that loop also owns
+// a retry/DLQ decision.
+func runUserActivatedConsumer(fetchCtx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
+	const topic = "user.events"
 	for {
-		msg, err := reader.FetchMessage(ctx)
+		msg, err := reader.FetchMessage(fetchCtx)
 		if err != nil {
-			log.Printf("notifications-svc: user.events: failed to fetch message: %v", err)
+			if fetchCtx.Err() != nil {
+				log.Printf("notifications-svc: %s: shutting down", topic)
+				return
+			}
+			log.Printf("notifications-svc: %s: failed to fetch message: %v", topic, err)
 			time.Sleep(fetchErrorBackoff)
 			continue
 		}
+		ctx := context.Background()
 
 		var event eventsv1.UserActivated
 		if err := proto.Unmarshal(msg.Value, &event); err != nil {
-			log.Printf("notifications-svc: user.events: failed to unmarshal UserActivated at offset %d: %v", msg.Offset, err)
+			log.Printf("notifications-svc: %s: failed to unmarshal UserActivated at offset %d: %v", topic, msg.Offset, err)
 			// No amount of redelivery makes an unparseable payload
 			// parseable — commit it so a poison message doesn't block
 			// the partition forever.
-			commitMessage(ctx, reader, msg, "user.events")
+			commitMessage(ctx, reader, msg, topic)
 			continue
 		}
 
@@ -158,23 +258,29 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 			continue // do not commit — message will be redelivered
 		}
 
-		commitMessage(ctx, reader, msg, "user.events")
+		commitMessage(ctx, reader, msg, topic)
 	}
 }
 
-func runAccountCreatedConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
+func runAccountCreatedConsumer(fetchCtx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
+	const topic = "account.events"
 	for {
-		msg, err := reader.FetchMessage(ctx)
+		msg, err := reader.FetchMessage(fetchCtx)
 		if err != nil {
-			log.Printf("notifications-svc: account.events: failed to fetch message: %v", err)
+			if fetchCtx.Err() != nil {
+				log.Printf("notifications-svc: %s: shutting down", topic)
+				return
+			}
+			log.Printf("notifications-svc: %s: failed to fetch message: %v", topic, err)
 			time.Sleep(fetchErrorBackoff)
 			continue
 		}
+		ctx := context.Background()
 
 		var event eventsv1.AccountCreated
 		if err := proto.Unmarshal(msg.Value, &event); err != nil {
-			log.Printf("notifications-svc: account.events: failed to unmarshal AccountCreated at offset %d: %v", msg.Offset, err)
-			commitMessage(ctx, reader, msg, "account.events")
+			log.Printf("notifications-svc: %s: failed to unmarshal AccountCreated at offset %d: %v", topic, msg.Offset, err)
+			commitMessage(ctx, reader, msg, topic)
 			continue
 		}
 
@@ -183,7 +289,7 @@ func runAccountCreatedConsumer(ctx context.Context, reader *kafka.Reader, pool *
 			continue
 		}
 
-		commitMessage(ctx, reader, msg, "account.events")
+		commitMessage(ctx, reader, msg, topic)
 	}
 }
 
@@ -273,95 +379,211 @@ func handleAccountCreated(ctx context.Context, pool *pgxpool.Pool, event *events
 }
 
 // runTransferEventsConsumer is the one loop in this service whose
-// handlers reach outside the process. It differs from the two projection
-// loops in two ways.
+// handlers reach outside the process, and the only one backed by a dead
+// letter topic.
 //
-// First, it must decide what it is holding before it can unmarshal.
+// fetchCtx is the shutdown signal, exactly as in runUserActivatedConsumer:
+// FetchMessage blocks on it, so cancelling it unblocks an idle reader and
+// this loop returns without starting new work. Once a message IS in
+// hand, though, it is handed to handleTransferMessageWithRetry with a
+// fresh context.Background(), not fetchCtx — a message already being
+// processed runs to completion (every retry attempt, a possible DLQ
+// publish, and the final commit) even if shutdown was signalled a moment
+// after the fetch returned. That is what "finish the current message
+// before exiting" means operationally: the boundary is per-message, not
+// per-goroutine, and it would be wrong to let a shutdown signal abort a
+// handler mid-send — that's how a message ends up neither committed nor
+// fully handled.
+func runTransferEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, pool *pgxpool.Pool, smtpAddr, smtpFrom string, dlqWriter kafkaMessageWriter, dlqTopic string) {
+	const topic = "transfer.events"
+	for {
+		msg, err := reader.FetchMessage(fetchCtx)
+		if err != nil {
+			if fetchCtx.Err() != nil {
+				log.Printf("notifications-svc: %s: shutting down", topic)
+				return
+			}
+			log.Printf("notifications-svc: %s: failed to fetch message: %v", topic, err)
+			time.Sleep(fetchErrorBackoff)
+			continue
+		}
+
+		handleTransferMessageWithRetry(context.Background(), reader, msg, pool, smtpAddr, smtpFrom, dlqWriter, dlqTopic)
+	}
+}
+
+// processTransferMessage unmarshals msg according to its event_type
+// header and runs the matching handler. It is the unit
+// handleTransferMessageWithRetry retries as a whole — unmarshal and
+// handle together — so a retry after a transient failure re-derives the
+// event from the original bytes rather than trusting state left over from
+// a failed previous attempt.
+//
+// eventID is returned whenever it could be determined — i.e. unmarshal
+// succeeded — even when err is also non-nil, so a caller that gives up
+// after exhausting retries can still close out a notifications_processed_events
+// barrier row a partially-completed handler left at 'processing'. It is
+// "" when the message never got that far: no header, an unrecognized
+// header, or a payload proto.Unmarshal itself rejected — cases with no
+// event_id to key that table with at all.
+//
 // transfer.events carries three message types, and protobuf's wire
 // format cannot tell them apart: TransferCompleted/Failed/Rejected share
 // field numbers and types for fields 1-5, and field 6 is a string in all
 // three, so decoding any one of them as any other SUCCEEDS and quietly
 // files a failure reason under LedgerTransactionId. The event_type header
 // the outbox relay stamps is the only discriminator; see eventTypeHeader.
+func processTransferMessage(ctx context.Context, pool *pgxpool.Pool, smtpAddr, smtpFrom string, msg kafka.Message) (eventID, eventType string, err error) {
+	eventType = eventTypeOf(msg)
+
+	switch eventType {
+	case eventTypeTransferCompleted:
+		var event eventsv1.TransferCompleted
+		if err := proto.Unmarshal(msg.Value, &event); err != nil {
+			return "", eventType, fmt.Errorf("unmarshal %s at offset %d: %w", eventType, msg.Offset, err)
+		}
+		return event.GetEventId(), eventType, handleTransferCompleted(ctx, pool, smtpAddr, smtpFrom, &event)
+
+	case eventTypeTransferFailed:
+		var event eventsv1.TransferFailed
+		if err := proto.Unmarshal(msg.Value, &event); err != nil {
+			return "", eventType, fmt.Errorf("unmarshal %s at offset %d: %w", eventType, msg.Offset, err)
+		}
+		return event.GetEventId(), eventType, handleTransferFailed(ctx, pool, smtpAddr, smtpFrom, &event)
+
+	case eventTypeTransferRejected:
+		var event eventsv1.TransferRejected
+		if err := proto.Unmarshal(msg.Value, &event); err != nil {
+			return "", eventType, fmt.Errorf("unmarshal %s at offset %d: %w", eventType, msg.Offset, err)
+		}
+		return event.GetEventId(), eventType, handleTransferRejected(ctx, pool, smtpAddr, smtpFrom, &event)
+
+	case "":
+		// Published before the relay started stamping the header. An old
+		// message will never grow one, so this is structurally poison —
+		// no number of retries changes the outcome, but it still goes
+		// through the same retry-then-DLQ path as everything else rather
+		// than a special-cased immediate commit, so the DLQ (not just a
+		// log line) ends up holding the bytes.
+		//
+		// Deliberately NOT unmarshaled as TransferCompleted just to
+		// recover an event_id for this error, tempting as that is with
+		// fields 1-5 identical: that is exactly the accidental
+		// cross-decode the header exists to prevent. Partition and
+		// offset are what an operator needs to inspect it anyway, and
+		// both travel with the DLQ'd message.
+		return "", eventType, fmt.Errorf("message at partition %d offset %d has no %q header (published before the discriminator existed)", msg.Partition, msg.Offset, eventTypeHeader)
+
+	default:
+		// Forward compatibility: a type a later sprint adds must not
+		// permanently wedge an older binary's partition. It retries like
+		// anything else (harmlessly futile against an older binary) and
+		// lands in the DLQ, where a redeployed binary that knows the type
+		// — or a human — can replay it.
+		return "", eventType, fmt.Errorf("unknown event_type %q at partition %d offset %d", eventType, msg.Partition, msg.Offset)
+	}
+}
+
+// transferRetryDelay is the exponential backoff between attempts:
+// transferRetryBaseDelay doubled per attempt, capped at
+// transferRetryMaxDelay.
+func transferRetryDelay(attempt int) time.Duration {
+	d := transferRetryBaseDelay * time.Duration(uint64(1)<<uint(attempt-1))
+	if d > transferRetryMaxDelay {
+		return transferRetryMaxDelay
+	}
+	return d
+}
+
+// handleTransferMessageWithRetry is the durability boundary for
+// transfer.events: it owns the decision between "try again" and "give up
+// and move on," which the old runTransferEventsConsumer used to make only
+// implicitly, and not quite correctly — "don't commit on error" does not
+// actually retry anything here, since kafka-go's Reader always advances
+// past a fetched message regardless of commit state. A failure on message
+// N followed by success on message N+1 committed right past N, losing it
+// silently the moment that later commit landed.
 //
-// Second, "don't commit on error" buys much less here than its
-// familiarity suggests. kafka-go's Reader has no per-message redelivery
-// inside a running process — FetchMessage always advances — so leaving an
-// offset uncommitted only helps if the process restarts before any later
-// offset on that partition commits. It is still the right default (a
-// broken SMTP server usually breaks the next message too, so nothing
-// later commits past it and a restart genuinely does replay), but the
-// mechanism actually carrying a transient outage is sendEmailWithRetry.
-func runTransferEventsConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool, smtpAddr, smtpFrom string) {
+// This retries the SAME message up to transferMaxAttempts times with
+// exponential backoff, calling processTransferMessage fresh each time.
+// That re-entrancy is safe because of claimEvent: an attempt that got far
+// enough to claim the event leaves the barrier row at 'processing' on
+// failure, and the next attempt's claimEvent call reclaims that same row
+// rather than treating it as already handled — the "duplicate over loss"
+// policy this service already applies to a crash mid-send now also
+// covers a retried transient failure. See contacts.go's claimEvent.
+//
+// Exhausting every attempt means this message is poison — a payload that
+// will never unmarshal, an address SMTP permanently refuses, or a
+// downstream dependency that stayed down for the entire retry window.
+// Rather than lose it (the old behavior for an unmarshal failure) or park
+// this goroutine on it forever (blocking every transfer notification
+// behind it), it is republished verbatim to dlqTopic with the failure
+// reason attached as a header, any barrier row is closed out as
+// 'skipped', and the offset is committed so the partition moves on.
+// Nothing is lost — the DLQ holds the original bytes for a human to
+// inspect and, if the fix is on this service's side, replay by hand.
+//
+// A permanently-missing contact does NOT reach this function as an error:
+// waitForContactByAccountID treats "still not found after its own bounded
+// wait" as a terminal, non-error outcome (see its doc comment), so it
+// never enters this retry loop and never lands in the DLQ. That is
+// deliberate — a contact that never appears means the projection itself
+// is inconsistent, not that this message is malformed, and a DLQ built
+// for "an operator can fix and replay this" is the wrong place for it.
+func handleTransferMessageWithRetry(ctx context.Context, reader *kafka.Reader, msg kafka.Message, pool *pgxpool.Pool, smtpAddr, smtpFrom string, dlqWriter kafkaMessageWriter, dlqTopic string) {
 	const topic = "transfer.events"
-	for {
-		msg, err := reader.FetchMessage(ctx)
-		if err != nil {
-			log.Printf("notifications-svc: %s: failed to fetch message: %v", topic, err)
-			time.Sleep(fetchErrorBackoff)
-			continue
-		}
+	var eventID, eventType string
+	var err error
 
-		eventType := eventTypeOf(msg)
-		var handleErr error
-
-		switch eventType {
-		case eventTypeTransferCompleted:
-			var event eventsv1.TransferCompleted
-			if err := proto.Unmarshal(msg.Value, &event); err != nil {
-				log.Printf("notifications-svc: %s: failed to unmarshal %s at offset %d: %v", topic, eventType, msg.Offset, err)
-				commitMessage(ctx, reader, msg, topic)
-				continue
-			}
-			handleErr = handleTransferCompleted(ctx, pool, smtpAddr, smtpFrom, &event)
-
-		case eventTypeTransferFailed:
-			var event eventsv1.TransferFailed
-			if err := proto.Unmarshal(msg.Value, &event); err != nil {
-				log.Printf("notifications-svc: %s: failed to unmarshal %s at offset %d: %v", topic, eventType, msg.Offset, err)
-				commitMessage(ctx, reader, msg, topic)
-				continue
-			}
-			handleErr = handleTransferFailed(ctx, pool, smtpAddr, smtpFrom, &event)
-
-		case eventTypeTransferRejected:
-			var event eventsv1.TransferRejected
-			if err := proto.Unmarshal(msg.Value, &event); err != nil {
-				log.Printf("notifications-svc: %s: failed to unmarshal %s at offset %d: %v", topic, eventType, msg.Offset, err)
-				commitMessage(ctx, reader, msg, topic)
-				continue
-			}
-			handleErr = handleTransferRejected(ctx, pool, smtpAddr, smtpFrom, &event)
-
-		case "":
-			// Published before the relay started stamping the header. An
-			// old message will never grow one, so this is structurally a
-			// poison message: commit rather than wedge the partition on a
-			// notification nobody is still waiting for. Transitional — it
-			// disappears once the topic ages past retention.
-			//
-			// Deliberately NOT unmarshaled as TransferCompleted just to
-			// recover an event_id for this log line, tempting as that is
-			// with fields 1-5 identical: that is exactly the accidental
-			// cross-decode the header exists to prevent. Partition and
-			// offset are what an operator needs to inspect it anyway.
-			log.Printf("notifications-svc: %s: message at partition %d offset %d has no %q header (published before the discriminator existed), skipping", topic, msg.Partition, msg.Offset, eventTypeHeader)
+	for attempt := 1; attempt <= transferMaxAttempts; attempt++ {
+		eventID, eventType, err = processTransferMessage(ctx, pool, smtpAddr, smtpFrom, msg)
+		if err == nil {
 			commitMessage(ctx, reader, msg, topic)
-			continue
-
-		default:
-			// Forward compatibility: a type a later sprint adds must not
-			// brick this partition for an older binary.
-			log.Printf("notifications-svc: %s: unknown event_type %q at partition %d offset %d, skipping", topic, eventType, msg.Partition, msg.Offset)
-			commitMessage(ctx, reader, msg, topic)
-			continue
+			return
 		}
-
-		if handleErr != nil {
-			log.Printf("notifications-svc: %s: failed to handle %s at offset %d: %v", topic, eventType, msg.Offset, handleErr)
-			continue // do not commit
+		log.Printf("notifications-svc: %s: attempt %d/%d failed for %s at offset %d: %v", topic, attempt, transferMaxAttempts, eventType, msg.Offset, err)
+		if attempt < transferMaxAttempts {
+			time.Sleep(transferRetryDelay(attempt))
 		}
-		commitMessage(ctx, reader, msg, topic)
+	}
+
+	log.Printf("notifications-svc: %s: giving up on %s at offset %d after %d attempts, sending to %s: %v", topic, eventType, msg.Offset, transferMaxAttempts, dlqTopic, err)
+	sendToDLQ(ctx, dlqWriter, dlqTopic, msg, eventType, err)
+
+	if eventID != "" {
+		if err := finishEvent(ctx, pool, eventID, eventStatusSkipped); err != nil {
+			log.Printf("notifications-svc: %s: failed to close out barrier row for event %s after DLQ: %v", topic, eventID, err)
+		}
+	}
+	commitMessage(ctx, reader, msg, topic)
+}
+
+// sendToDLQ republishes msg to the dead letter topic unchanged — same
+// key, same value, same original headers — plus three headers recording
+// why and where it came from, so an operator (or a replay tool) can
+// inspect it without needing log access.
+func sendToDLQ(ctx context.Context, writer kafkaMessageWriter, dlqTopic string, msg kafka.Message, eventType string, cause error) {
+	headers := make([]kafka.Header, len(msg.Headers), len(msg.Headers)+3)
+	copy(headers, msg.Headers)
+	headers = append(headers,
+		kafka.Header{Key: "dlq_reason", Value: []byte(cause.Error())},
+		kafka.Header{Key: "dlq_source_partition", Value: []byte(strconv.Itoa(msg.Partition))},
+		kafka.Header{Key: "dlq_source_offset", Value: []byte(strconv.FormatInt(msg.Offset, 10))},
+	)
+
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := writer.WriteMessages(writeCtx, kafka.Message{
+		Key:     msg.Key,
+		Value:   msg.Value,
+		Headers: headers,
+	}); err != nil {
+		// The source offset still commits regardless (see the caller) —
+		// otherwise a DLQ outage would turn into an infinite retry loop
+		// on a message we already know is poison. This log line is, in
+		// that case, the only remaining record of it.
+		log.Printf("notifications-svc: %s: failed to publish poison message (offset %d, type %s) to %s: %v", "transfer.events", msg.Offset, eventType, dlqTopic, err)
 	}
 }
 
@@ -537,13 +759,16 @@ func finishTransferEvent(ctx context.Context, pool *pgxpool.Pool, eventID string
 // projection.
 //
 // A "not found" that outlasts the wait is terminal for the callers, not
-// retried forever: every account in this system is created by accounts-svc
-// in response to a UserActivated, so a permanently unresolvable account
-// means the projection is broken, and parking the consumer on a message it
-// can never satisfy would cost the notifications behind it for nothing. A
-// malformed UUID is a different case — Postgres rejects it (22P02) and it
-// surfaces as an error here, which is the right treatment for genuinely
-// corrupt data.
+// retried forever, and — deliberately — not an error: every account in
+// this system is created by accounts-svc in response to a UserActivated,
+// so a permanently unresolvable account means the projection is broken,
+// not that this message is malformed. Returning it as an error would pull
+// it into handleTransferMessageWithRetry's retry-then-DLQ path built for
+// poison payloads, which is the wrong bucket for "the data isn't here
+// yet, and may never be" — see that function's doc comment. A malformed
+// UUID is a different case — Postgres rejects it (22P02) and it surfaces
+// as an error here, which is the right treatment for genuinely corrupt
+// data.
 func waitForContactByAccountID(ctx context.Context, pool *pgxpool.Pool, accountID string) (contact, bool, error) {
 	for attempt := 0; attempt < contactWaitAttempts; attempt++ {
 		c, found, err := getContactByAccountID(ctx, pool, accountID)
@@ -568,4 +793,84 @@ func eventTime(ts *timestamppb.Timestamp) time.Time {
 		return time.Time{}
 	}
 	return ts.AsTime().UTC()
+}
+
+// namedReader pairs a Reader with the topic name it reads, only so
+// monitorConsumers can log something more useful than the reader's
+// config object.
+type namedReader struct {
+	topic  string
+	reader *kafka.Reader
+}
+
+// monitorConsumers periodically logs each reader's lag — how many
+// messages on its topic it has not yet consumed — from
+// Reader.Stats().Lag, computed internally on every fetch from the
+// batch's high water mark. Not the deprecated Reader.Lag() method, which
+// returns -1 in consumer-group mode (every reader here has a GroupID);
+// Stats().Lag is populated regardless of mode. Without this,
+// "notifications aren't arriving" is indistinguishable from the outside
+// from "nobody transferred anything" — both look like silence in
+// Mailpit. Lag is what tells them apart.
+//
+// Deliberately does NOT drive consumerHealth — see monitorKafkaHealth's
+// doc comment for why Stats() turned out to be the wrong signal for that.
+func monitorConsumers(ctx context.Context, readers []namedReader) {
+	ticker := time.NewTicker(consumerLagLogInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, nr := range readers {
+				stats := nr.reader.Stats()
+				log.Printf("notifications-svc: consumer lag: topic=%s lag=%d offset=%d", nr.topic, stats.Lag, stats.Offset)
+			}
+		}
+	}
+}
+
+// monitorKafkaHealth periodically dials the Kafka brokers directly and
+// updates consumerHealth from whether that succeeds.
+//
+// This used to be inferred from the three readers themselves — first
+// from whether the last FetchMessage call errored (wrong: FetchMessage
+// only returns once a message is ready or the fetch context is
+// cancelled, so on an idle topic a recovered-but-quiet reader never gets
+// a moment to flip the flag back), then from Reader.Stats().Errors
+// compared between ticks, reasoning that kafka-go retries the broker
+// connection in the background regardless of whether FetchMessage is
+// blocked. Measured against a real outage (`docker compose stop kafka`),
+// that second assumption was also wrong: repeatedly-logged "failed to
+// dial" errors from FetchMessage did not move Stats().Errors at all
+// after the first few, during startup — that counter tracks a narrower
+// set of internal retry paths than a consumer-group reader's dial
+// failures actually go through.
+//
+// A direct, independent probe sidesteps needing to know which internal
+// counter happens to reflect which failure mode: it dials the brokers
+// itself, on its own schedule, and the result IS the signal, not
+// something inferred from reader internals that turned out not to mean
+// what they looked like they meant.
+func monitorKafkaHealth(ctx context.Context, brokers string, health *consumerHealth) {
+	addrs := strings.Split(brokers, ",")
+	ticker := time.NewTicker(kafkaHealthProbeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			probeCtx, cancel := context.WithTimeout(ctx, kafkaHealthProbeTimeout)
+			conn, err := kafka.DialContext(probeCtx, "tcp", addrs[0])
+			cancel()
+			health.unreachable.Store(err != nil)
+			if err != nil {
+				log.Printf("notifications-svc: kafka health probe: %v", err)
+				continue
+			}
+			conn.Close()
+		}
+	}
 }
