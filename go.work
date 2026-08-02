@@ -3,6 +3,7 @@ go 1.25.0
 use (
 	./gateway
 	./pkg/health
+	./pkg/outbox
 	./proto/gen/go
 	./services/accounts-svc
 	./services/auth-svc
