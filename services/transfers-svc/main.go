@@ -89,6 +89,15 @@ func main() {
 	// stripe.NewClient does no network I/O — same lazy-init philosophy as
 	// the grpc.NewClient calls below.
 	stripeClient = stripe.NewClient(stripeSecretKey)
+	// Separate from STRIPE_SECRET_KEY by design: this signs webhook
+	// deliveries, not API requests, and is the one thing standing between
+	// stripeWebhookHandler and anyone on the internet claiming a payment
+	// succeeded (see README, "Локальная разработка" for how to obtain a
+	// local value via the Stripe CLI).
+	stripeWebhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
+	if stripeWebhookSecret == "" {
+		log.Fatal("transfers-svc: STRIPE_WEBHOOK_SECRET environment variable is required")
+	}
 
 	databaseURL := os.Getenv("DATABASE_URL")
 
@@ -173,6 +182,7 @@ func main() {
 	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, fraudClient, ledgerClient))
 	mux.HandleFunc("GET /", listTransfersHandler(pool, accountsClient))
 	mux.HandleFunc("POST /deposits", createDepositHandler(pool, accountsClient, stripeClient.V1PaymentIntents))
+	mux.HandleFunc("POST /webhooks/stripe", stripeWebhookHandler(pool, stripeWebhookSecret))
 
 	log.Printf("transfers-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {

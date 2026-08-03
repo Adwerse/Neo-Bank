@@ -80,6 +80,7 @@ services:
       KAFKA_BROKERS: kafka:9092
       KAFKA_TRANSFER_EVENTS_TOPIC: transfer.events
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
     depends_on:
       postgres:
         condition: service_healthy

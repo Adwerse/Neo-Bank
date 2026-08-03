@@ -213,13 +213,14 @@ curl -s -X POST http://localhost:8080/transfers/ \
 
 ## Stripe-фондированные депозиты (transfers-svc, ledger-svc)
 
-Инфраструктура для Stripe-депозитов: две новые таблицы в transfers-svc,
-новый gRPC-метод `ledger-svc.Deposit` и `POST /deposits`, создающий
-Stripe `PaymentIntent`. Обработка Stripe-вебхуков (с проверкой подписи,
-там же — фактическое зачисление через `ledger-svc.Deposit`) и фронтенд —
-предмет отдельных последующих шагов: платёж пока попросту некому
-подтвердить, а `POST /deposits` внутренний — наружу через Gateway тоже
-отдельным шагом.
+Stripe-депозиты в transfers-svc: две новые таблицы, `ledger-svc.Deposit`,
+`POST /deposits` (создаёт Stripe `PaymentIntent`) и
+`POST /webhooks/stripe` (подтверждает исход платежа по подписанному
+событию от Stripe). Депозит доходит только до `deposits.status =
+'succeeded'` — фактическое зачисление в ledger через
+`ledger-svc.Deposit` из вебхука, и фронтенд, которому нужен
+`client_secret`, — отдельные следующие шаги; `POST /deposits` пока
+внутренний, наружу через Gateway тоже отдельным шагом.
 
 ### Почему депозиты живут в transfers-svc, а не в новом payments-svc
 
@@ -350,7 +351,7 @@ SET stripe_payment_intent_id`. Эти два шага принципиально
 покидает `main()` ни при каких обстоятельствах, а из самого объекта
 `PaymentIntent` наружу уходит единственное поле — `client_secret`.
 
-### Тесты
+### Тесты `POST /deposits`
 
 `services/transfers-svc/deposit_test.go`, через `fakePaymentIntentCreator`
 (тот же fake-по-функции паттерн, что и `fakeLedgerClient`/
@@ -392,7 +393,7 @@ transfers-svc` без `.env` (или с закомментированной п�
 environment variable is required`, не долетая даже до подключения к
 Postgres.
 
-### Тесты
+### Тесты `ledger.Deposit`
 
 `services/ledger-svc/ledger_test.go`: `TestDeposit_Success` (целевой счёт
 растёт на `amount`, genesis падает на `amount`, `SUM(entries)` по
@@ -407,8 +408,130 @@ Postgres.
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/ledger-svc/... -run TestDeposit -v
 ```
-Новые таблицы transfers-svc (`deposits`, `processed_stripe_events`) — без
-Go-тестов на этом шаге: их ещё не читает и не пишет ни один Go-код.
+
+### `POST /webhooks/stripe` — подтверждение платежа
+
+Ответ фронта после оплаты ничего не гарантирует: пользователь может
+закрыть вкладку сразу после того, как деньги списались, и до backend это
+никогда не долетит. Единственный надёжный источник исхода — вебхук от
+Stripe, который приходит асинхронно и независимо от того, жив ли ещё
+клиент. `POST /webhooks/stripe` (`services/transfers-svc/webhook.go`) —
+публичный эндпоинт: у Stripe нет нашего JWT, поэтому проверка подписи —
+не опция, а единственное, что отличает настоящий вебхук от любого, кто
+угадал URL и прислал `{"type":"payment_intent.succeeded",...}` от себя,
+чтобы бесплатно зачислить деньги.
+
+**Подпись.** `webhook.ConstructEvent(payload, header, webhookSecret)` из
+`stripe-go` — секрет для этого (`whsec_...`) отдельный от
+`STRIPE_SECRET_KEY`, специально не тот же самый: компрометация одного не
+должна автоматически компрометировать другой. Критично — подпись
+считается по **сырым байтам тела**, поэтому `io.ReadAll(r.Body)`
+происходит первым делом, до любого JSON-парсинга: если тело сначала
+распарсить, а потом пересериализовать (другой порядок полей, другие
+пробелы — не важно), подпись перестанет совпадать. Невалидная подпись —
+`400`, без какой-либо обработки, только лог попытки.
+
+**Идемпотентность.** Stripe доставляет вебхуки at-least-once и ретраит
+недоставленные — один и тот же `evt_...` может прийти несколько раз.
+Дедупликация — `INSERT event_id` в `processed_stripe_events`; на
+unique-violation — это дубль, `200` без повторной обработки. Проверяющий
+арбитр — сам constraint БД, а не `SELECT exists(...)` в коде: два
+вебхука с одним `event_id` могут прийти параллельно, и только constraint
+корректно разруливает эту гонку (проверка-потом-вставка в коде её не
+ловит).
+
+Важный нюанс, которого нет в буквальной формулировке задачи, но который
+проявляется на практике: `INSERT` в `processed_stripe_events` и апдейт
+`deposits` выполняются **в одной Postgres-транзакции**
+(`processStripeEvent`). Если бы событие помечалось обработанным ДО того,
+как реально применился эффект (апдейт статуса), временный сбой между
+этими двумя шагами означал бы: ответ `500` (проси Stripe повторить), но
+при этом полноценный повтор той же доставки уже никогда не сработает —
+он попадёт в ветку «дубль, игнорируем», а нужный апдейт так и не
+произойдёт. Одна транзакция на оба шага — единственный способ, которым
+`400`/дубль/сбой ведут себя ровно так, как описано в DoD: сбой в
+обработке откатывает и вставку `processed_stripe_events`, так что
+следующая доставка того же `event_id` — это честная первая попытка, а не
+проигнорированный дубль.
+
+**События.** Три типа обрабатываются: `payment_intent.succeeded` →
+`deposits.status = 'succeeded'`; `payment_intent.payment_failed` →
+`status = 'failed'` + `failure_reason` (код ошибки Stripe, например
+`card_declined`); `charge.refunded` → **не меняет status** (у `deposits`
+нет отдельного статуса `refunded` — полноценный reversal, включая
+возможное расширение схемы, откладывается до соответствующего шага), а
+пишет `failure_reason = 'refunded'` как метку для будущей сверки —
+переиспользование поля по контексту, тот же приём, что и у `Transfer`
+(`FailureReason` уже несёт разный смысл в зависимости от `Status`, см.
+выше). Любой другой тип события — `200` и игнорирование без обработки:
+Stripe шлёт десятки типов событий, и падение на незнакомом заставило бы
+его ретраить бесконечно без всякой пользы.
+
+**Скорость.** Обработчик умышленно ничего не делает, кроме проверки
+подписи, дедупликации и одного `UPDATE` — зачисление в `ledger-svc`
+(более медленный, кросс-сервисный вызов) сюда не входит и переезжает в
+отдельный шаг. У Stripe есть таймаут на ответ вебхука; долгая
+синхронная обработка здесь означала бы ложные ретраи от Stripe поверх
+уже случившегося платежа.
+
+### Локальная разработка вебхуков: Stripe CLI
+
+Stripe не может достучаться до `localhost` напрямую. Локально это решает
+[Stripe CLI](https://docs.stripe.com/stripe-cli):
+
+```bash
+stripe login
+stripe listen --forward-to localhost:8084/webhooks/stripe
+```
+
+`stripe listen` держит туннель открытым и печатает **локальный** webhook
+signing secret (`whsec_...`, отдельный от продового/дашбордного) — его и
+нужно положить в `.env` как `STRIPE_WEBHOOK_SECRET`. Пока `stripe listen`
+не перезапущен, значение остаётся тем же.
+
+С запущенными `transfers-svc` и `stripe listen` в соседнем терминале:
+```bash
+stripe trigger payment_intent.succeeded
+```
+шлёт настоящее подписанное событие на форвардящийся URL — в логе
+`stripe listen` виден код ответа (`200`), а в БД — обновлённый
+`deposits.status`.
+
+### Проверка вручную
+
+`STRIPE_WEBHOOK_SECRET` обязателен так же, как `STRIPE_SECRET_KEY`:
+`docker compose up transfers-svc` без него в `.env` — контейнер падает с
+логом `transfers-svc: STRIPE_WEBHOOK_SECRET environment variable is
+required`, ещё до подключения к Postgres.
+
+Поддельная подпись:
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8084/webhooks/stripe \
+  -H "Stripe-Signature: t=0,v1=deadbeef" \
+  -d '{"type":"payment_intent.succeeded"}'
+```
+`400`, запись в `processed_stripe_events` не появляется.
+
+### Тесты `POST /webhooks/stripe`
+
+`services/transfers-svc/webhook_test.go` — через
+`webhook.GenerateTestSignedPayload` (из `stripe-go/webhook`), то есть с
+настоящим вычислением HMAC-подписи, без единого реального обращения к
+Stripe: `TestStripeWebhookHandler_PaymentIntentSucceeded`,
+`TestStripeWebhookHandler_PaymentIntentPaymentFailed`,
+`TestStripeWebhookHandler_ChargeRefunded`,
+`TestStripeWebhookHandler_UnknownEventTypeIsIgnored`,
+`TestStripeWebhookHandler_InvalidSignature` (проверяет и `400`, и
+отсутствие записи в `processed_stripe_events`),
+`TestStripeWebhookHandler_DuplicateDeliveryIsNotReprocessed` (вторая
+доставка того же `event_id` — `200`, но `deposits.updated_at` не
+меняется и `processed_stripe_events` содержит ровно одну строку),
+`TestProcessStripeEvent_ProcessingFailureDoesNotRecordEvent` (доказывает
+именно то поведение с одной транзакцией на оба шага, что описано выше).
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/transfers-svc/... -run "TestStripeWebhook|TestProcessStripeEvent" -v
+```
 
 ## fraud-svc: подключение к Postgres, схема
 
