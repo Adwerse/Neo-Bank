@@ -211,15 +211,15 @@ curl -s -X POST http://localhost:8080/transfers/ \
 ```
 Успешный перевод — `201` и `"status":"completed"` с заполненным `ledger_transaction_id`; сумма больше баланса — `201` и `"status":"failed","failure_reason":"insufficient_funds"`; оба случая проверяются balance-diff через `GET /accounts/me` обеих сторон (см. `cmd/devtopup` выше — им удобно завести отправителю стартовый баланс).
 
-## Stripe-фондированные депозиты: инфраструктура (transfers-svc, ledger-svc)
+## Stripe-фондированные депозиты (transfers-svc, ledger-svc)
 
-Этот шаг — только инфраструктура для будущих Stripe-депозитов: две новые
-таблицы в transfers-svc и один новый gRPC-метод `ledger-svc.Deposit`.
-Создание `PaymentIntent`, обработка Stripe-вебхуков (с проверкой подписи)
-и фронтенд — предмет отдельных последующих шагов; здесь Go-код
-transfers-svc ещё не читает и не пишет ни в `deposits`, ни в
-`processed_stripe_events` — только таблицы существуют и накатываются
-миграциями.
+Инфраструктура для Stripe-депозитов: две новые таблицы в transfers-svc,
+новый gRPC-метод `ledger-svc.Deposit` и `POST /deposits`, создающий
+Stripe `PaymentIntent`. Обработка Stripe-вебхуков (с проверкой подписи,
+там же — фактическое зачисление через `ledger-svc.Deposit`) и фронтенд —
+предмет отдельных последующих шагов: платёж пока попросту некому
+подтвердить, а `POST /deposits` внутренний — наружу через Gateway тоже
+отдельным шагом.
 
 ### Почему депозиты живут в transfers-svc, а не в новом payments-svc
 
@@ -302,14 +302,79 @@ Stripe-ключ — куда более чувствительный секре�
 
 Клиент — `github.com/stripe/stripe-go/v86`, создаётся один раз в `main()`
 вызовом `stripe.NewClient(stripeSecretKey)` и хранится в пакетной (не
-локальной) `var stripeClient *stripe.Client` — до появления HTTP-хендлера,
-создающего `PaymentIntent` (следующий шаг), у клиента внутри transfers-svc
-попросту нет потребителя, а Go требует использования только локальных
-переменных, не пакетных. `stripe.NewClient` ничего не делает по сети — как
-и остальные клиенты этого `main()` (`grpc.NewClient` к
-accounts-svc/fraud-svc/ledger-svc), он ленивый: если ключ окажется
-невалидным, это проявится только на первом реальном вызове Stripe API — за
-пределами этого шага.
+локальной) `var stripeClient *stripe.Client`. `stripe.NewClient` ничего не
+делает по сети — как и остальные клиенты этого `main()` (`grpc.NewClient`
+к accounts-svc/fraud-svc/ledger-svc), он ленивый: если ключ окажется
+невалидным, это проявится только на первом реальном вызове Stripe API.
+
+### `POST /deposits` — создание PaymentIntent
+
+Как устроен платёж: `PaymentIntent` — объект на стороне Stripe,
+представляющий намерение списать деньги. transfers-svc создаёт его и
+получает `client_secret`; этот секрет уходит на фронт, где Stripe.js
+подтверждает платёж **напрямую со Stripe** — данные карты никогда не
+проходят через backend. Это не деталь реализации, а осознанная граница
+PCI-scope: сервис никогда не хранит, не логирует и не видит номера карт.
+Результат придёт вебхуком (следующий шаг), не в ответе на этот запрос.
+
+`createDepositHandler` (`services/transfers-svc/http.go`), зарегистрирован
+как `POST /deposits`:
+- `account_id` берётся из `X-User-Id` (тот же `resolveSenderAccountID`, что
+  и у переводов) — никогда из тела запроса, чтобы клиент не мог задепозитить
+  на чужой счёт.
+- `amount` проверяется на `[depositMinAmount, depositMaxAmount]`
+  (`services/transfers-svc/deposit.go`): нижняя граница — 50 (минимум
+  Stripe для EUR, €0.50 — иначе Stripe сам отклонит запрос, но менее
+  информативно), верхняя — 1 000 000 центов (€10 000) — не бизнес-лимит, а
+  защита от опечатки в лишние нули.
+- счёт должен быть `active` — на `frozen`/`closed` не зачисляем.
+
+Порядок операций в `createDeposit`: сначала `INSERT INTO deposits`
+(`status='pending'`), потом Stripe `PaymentIntent`, потом `UPDATE ...
+SET stripe_payment_intent_id`. Эти два шага принципиально нельзя завернуть
+в одну транзакцию — между ними живой вызов Stripe API, который не умеет
+участвовать в транзакции Postgres. Если процесс упадёт между шагами,
+останется `pending`-депозит без `stripe_payment_intent_id`: это безопасно
+(деньги не двигались, Stripe в большинстве таких сбоев даже не получил
+запрос) — заброшенная попытка, а не что-то, что нужно чинить прямо здесь.
+
+`Metadata: {deposit_id, account_id}` на самом `PaymentIntent` — то, что
+свяжет будущий вебхук с этой записью: у Stripe нет понятия о наших
+первичных ключах, кроме того, что мы сами туда положим.
+`IdempotencyKey = deposit_id` (через `stripe-go`'s `Params.IdempotencyKey`)
+привязывает Stripe-side защиту от дублей к конкретной попытке: повторный
+вызов `Create` с тем же `deposit_id` (например, наш собственный ретрай
+после сетевого сбоя) вернёт тот же `PaymentIntent`, а не создаст второй.
+
+Ответ — только `{deposit_id, client_secret}`. Секретный ключ Stripe не
+покидает `main()` ни при каких обстоятельствах, а из самого объекта
+`PaymentIntent` наружу уходит единственное поле — `client_secret`.
+
+### Тесты
+
+`services/transfers-svc/deposit_test.go`, через `fakePaymentIntentCreator`
+(тот же fake-по-функции паттерн, что и `fakeLedgerClient`/
+`fakeAccountsClient` — реальные вызовы к Stripe в тестах не идут):
+`TestCreateDeposit_Success` (в т.ч. `IdempotencyKey`/`metadata` доходят до
+Stripe правильно), `TestCreateDeposit_InvalidAmount` (обе границы),
+`TestCreateDeposit_AccountNotActive`,
+`TestCreateDeposit_StripeErrorLeavesRowPending` (проверяет именно то
+безопасное состояние, которое описано выше).
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/transfers-svc/... -run TestCreateDeposit -v
+```
+Ручная проверка (нужен настоящий `STRIPE_SECRET_KEY` в `.env` —
+см. выше):
+```bash
+curl -s -X POST http://localhost:8084/deposits \
+  -H "X-User-Id: <account's user id>" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 5000}'
+```
+`201` с `{"deposit_id": "...", "client_secret": "pi_..._secret_..."}`;
+в Stripe-дашборде (тестовый режим) — созданный `PaymentIntent` с
+`metadata.deposit_id`/`metadata.account_id`.
 
 ### Проверка вручную
 

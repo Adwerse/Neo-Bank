@@ -160,6 +160,66 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 	}
 }
 
+type createDepositRequest struct {
+	Amount int64 `json:"amount"`
+}
+
+// createDepositResponse deliberately exposes only deposit_id and
+// client_secret — never the Stripe secret key (never held anywhere near
+// this response), and nothing else off the Stripe PaymentIntent object
+// either. client_secret is the one piece of Stripe-issued data the
+// frontend needs to hand to Stripe.js to confirm the payment directly with
+// Stripe; everything else about the deposit's state is queryable through
+// the deposit resource itself once that exists.
+type createDepositResponse struct {
+	DepositID    string `json:"deposit_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
+// createDepositHandler is registered at "POST /deposits" — internal-only
+// for now, not yet routed through the gateway (see README). account_id is
+// always the authenticated caller's own account (resolved from
+// X-User-Id), never taken from the request body — same reasoning as
+// createTransferHandler's sender resolution.
+func createDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, paymentIntents stripePaymentIntentCreator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if accountID == "" {
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		}
+
+		var req createDepositRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		deposit, clientSecret, outcome, err := createDeposit(r.Context(), pool, accountsClient, paymentIntents, accountID, req.Amount)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		switch outcome {
+		case createDepositInvalidAmount:
+			writeJSONError(w, http.StatusBadRequest, "invalid amount")
+			return
+		case createDepositAccountNotActive:
+			writeJSONError(w, http.StatusConflict, "account is not active")
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(createDepositResponse{DepositID: deposit.ID, ClientSecret: clientSecret})
+	}
+}
+
 // transferHistoryEntry enriches a raw Transfer with which side of it
 // accountID was on and the counterparty's human-readable account_number —
 // the recipient was always identified by account_number throughout this

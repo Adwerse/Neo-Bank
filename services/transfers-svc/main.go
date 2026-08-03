@@ -172,6 +172,7 @@ func main() {
 
 	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, fraudClient, ledgerClient))
 	mux.HandleFunc("GET /", listTransfersHandler(pool, accountsClient))
+	mux.HandleFunc("POST /deposits", createDepositHandler(pool, accountsClient, stripeClient.V1PaymentIntents))
 
 	log.Printf("transfers-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
