@@ -27,6 +27,12 @@ service LedgerService {
   // was never received) and need ledger-svc's own data, not a guess, to
   // find out.
   rpc GetTransactionByReference(GetTransactionByReferenceRequest) returns (GetTransactionByReferenceResponse);
+  // Deposit posts a genesis -> account_id credit: the ledger-side
+  // counterpart of an external, Stripe-funded top-up. Unlike
+  // ExecuteTransfer, there is no insufficient-funds outcome — genesis is
+  // allowed to go arbitrarily negative by design, representing money
+  // entering the system from outside.
+  rpc Deposit(DepositRequest) returns (DepositResponse);
 }
 
 message GetBalanceRequest {
@@ -88,4 +94,17 @@ message CreateLedgerAccountRequest {
 message CreateLedgerAccountResponse {
   string account_id = 1;
   google.protobuf.Timestamp created_at = 2;
+}
+
+message DepositRequest {
+  string account_id = 1;
+  int64 amount = 2;
+  // Same role as ExecuteTransferRequest.reference — intended to carry the
+  // future deposits.id, so a caller can later ask
+  // GetTransactionByReference whether a deposit was already posted.
+  string reference = 3;
+}
+
+message DepositResponse {
+  string transaction_id = 1;
 }

@@ -59,6 +59,25 @@ func (s *ledgerServer) ExecuteTransfer(ctx context.Context, req *ledgerv1.Execut
 	}
 }
 
+func (s *ledgerServer) Deposit(ctx context.Context, req *ledgerv1.DepositRequest) (*ledgerv1.DepositResponse, error) {
+	transactionID, outcome, err := deposit(ctx, s.pool, req.GetAccountId(), req.GetAmount(), req.GetReference())
+	if err != nil {
+		log.Printf("ledger-svc: Deposit: %v", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	switch outcome {
+	case depositOK:
+		return &ledgerv1.DepositResponse{TransactionId: transactionID}, nil
+	case depositInvalidAmount:
+		return nil, status.Error(codes.InvalidArgument, "amount must be positive")
+	case depositAccountNotFound:
+		return nil, status.Error(codes.NotFound, "account not found")
+	default:
+		log.Printf("ledger-svc: Deposit: unhandled outcome %v", outcome)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+}
+
 func (s *ledgerServer) GetHistory(ctx context.Context, req *ledgerv1.GetHistoryRequest) (*ledgerv1.GetHistoryResponse, error) {
 	entries, err := getHistory(ctx, s.pool, req.GetAccountId(), req.GetLimit(), req.GetOffset())
 	if errors.Is(err, ErrLedgerAccountNotFound) {

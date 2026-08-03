@@ -734,3 +734,196 @@ func TestExecuteTransfer_ConcurrentOverdraftPrevention(t *testing.T) {
 		t.Errorf("SUM(entries) across all accounts touched by this test = %d, want 0", totalSum)
 	}
 }
+
+// cleanupDepositEntries deletes the entries deposit wrote for transactionID
+// and rebuilds genesis's cached account_balances afterward. Unlike every
+// other account in this file, genesis is a fixed, shared row (provisioned
+// by migration 000005, not created fresh per test via insertLedgerAccount)
+// that tests can't simply tear down wholesale — other tests and real
+// dev-tool usage (cmd/seed, cmd/devtopup) depend on it continuing to exist.
+// Deleting just this test's entries and calling the already-proven
+// rebuildBalance keeps genesis's cache consistent with its log without
+// hand-rolling delta arithmetic.
+func cleanupDepositEntries(t *testing.T, pool *pgxpool.Pool, transactionID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, "DELETE FROM entries WHERE transaction_id = $1", transactionID); err != nil {
+		t.Logf("cleanup: delete deposit entries for transaction_id=%s: %v", transactionID, err)
+	}
+	if _, err := rebuildBalance(ctx, pool, genesisAccountID); err != nil {
+		t.Logf("cleanup: rebuild genesis cached balance: %v", err)
+	}
+}
+
+// TestDeposit_Success proves deposit credits toAccountID by amount and
+// debits genesis by the same amount in one balanced pair of entries sharing
+// a transaction_id. Genesis's balance can already be arbitrarily negative
+// from prior test runs or dev-tool usage, so this asserts the delta, not an
+// absolute value.
+func TestDeposit_Success(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	toAccountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, toAccountID)
+
+	genesisBalanceBefore, err := getBalance(ctx, pool, genesisAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(genesis) before deposit: unexpected error (has migration 000005 run?): %v", err)
+	}
+
+	const amount = 4200
+	transactionID, outcome, err := deposit(ctx, pool, toAccountID, amount, "")
+	if err != nil {
+		t.Fatalf("deposit: unexpected error: %v", err)
+	}
+	if outcome != depositOK {
+		t.Fatalf("deposit outcome = %v, want depositOK", outcome)
+	}
+	if transactionID == "" {
+		t.Fatal("deposit: transactionID is empty on success")
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, transactionID) })
+
+	toBalance, err := getBalance(ctx, pool, toAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(to): unexpected error: %v", err)
+	}
+	if toBalance != amount {
+		t.Errorf("to balance = %d, want %d", toBalance, amount)
+	}
+
+	genesisBalanceAfter, err := getBalance(ctx, pool, genesisAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(genesis) after deposit: unexpected error: %v", err)
+	}
+	if genesisBalanceAfter != genesisBalanceBefore-amount {
+		t.Errorf("genesis balance = %d, want %d (before %d minus deposited %d)", genesisBalanceAfter, genesisBalanceBefore-amount, genesisBalanceBefore, amount)
+	}
+
+	rows, err := pool.Query(ctx, "SELECT amount FROM entries WHERE transaction_id = $1", transactionID)
+	if err != nil {
+		t.Fatalf("query entries for transaction_id=%s: %v", transactionID, err)
+	}
+	defer rows.Close()
+	var sum int64
+	var n int
+	for rows.Next() {
+		var amt int64
+		if err := rows.Scan(&amt); err != nil {
+			t.Fatalf("scan entry: %v", err)
+		}
+		sum += amt
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate entries: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("entries for transaction_id=%s: got %d rows, want 2", transactionID, n)
+	}
+	if sum != 0 {
+		t.Errorf("SUM(entries) for transaction_id=%s = %d, want 0", transactionID, sum)
+	}
+}
+
+// TestDeposit_InvalidAmount proves deposit rejects non-positive amounts the
+// same way executeTransfer does, without touching the database.
+func TestDeposit_InvalidAmount(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	toAccountID := randomUUID(t)
+
+	for _, amount := range []int64{0, -100} {
+		transactionID, outcome, err := deposit(ctx, pool, toAccountID, amount, "")
+		if err != nil {
+			t.Fatalf("deposit(amount=%d): unexpected error: %v", amount, err)
+		}
+		if outcome != depositInvalidAmount {
+			t.Errorf("deposit(amount=%d) outcome = %v, want depositInvalidAmount", amount, outcome)
+		}
+		if transactionID != "" {
+			t.Errorf("deposit(amount=%d): transactionID = %q, want empty", amount, transactionID)
+		}
+	}
+}
+
+// TestDeposit_AccountNotFound proves a nonexistent target account is a
+// reachable, expected outcome (not an error), mirroring
+// executeTransfer's transferToAccountNotFound.
+func TestDeposit_AccountNotFound(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	_, outcome, err := deposit(ctx, pool, randomUUID(t), 100, "")
+	if err != nil {
+		t.Fatalf("deposit: unexpected error: %v", err)
+	}
+	if outcome != depositAccountNotFound {
+		t.Errorf("deposit outcome = %v, want depositAccountNotFound", outcome)
+	}
+}
+
+// TestDeposit_WithReference proves reference is stored on both entries a
+// deposit writes and that getTransactionByReference — the same lookup
+// executeTransfer's reconciliation already relies on — finds it. This is
+// the exact mechanism a future Stripe-webhook handler will use to ask "did
+// I already credit this deposit.id" before crediting it again.
+func TestDeposit_WithReference(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	toAccountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, toAccountID)
+
+	reference := randomUUID(t)
+	transactionID, outcome, err := deposit(ctx, pool, toAccountID, 1500, reference)
+	if err != nil {
+		t.Fatalf("deposit: unexpected error: %v", err)
+	}
+	if outcome != depositOK {
+		t.Fatalf("deposit outcome = %v, want depositOK", outcome)
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, transactionID) })
+
+	foundTransactionID, found, err := getTransactionByReference(ctx, pool, reference)
+	if err != nil {
+		t.Fatalf("getTransactionByReference: unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatal("getTransactionByReference: found = false, want true")
+	}
+	if foundTransactionID != transactionID {
+		t.Errorf("getTransactionByReference: transactionID = %q, want %q", foundTransactionID, transactionID)
+	}
+}
+
+// TestDeposit_ReferenceIsNotIdempotencyKey locks in that deposit, like
+// executeTransfer, does NOT deduplicate on reference: two calls with the
+// same reference post two separate transactions. Idempotency is the
+// caller's job (check GetTransactionByReference first) — this test exists
+// so that behavior stays intentional, not accidental.
+func TestDeposit_ReferenceIsNotIdempotencyKey(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	toAccountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, toAccountID)
+	reference := randomUUID(t)
+
+	firstTxnID, outcome, err := deposit(ctx, pool, toAccountID, 500, reference)
+	if err != nil || outcome != depositOK {
+		t.Fatalf("first deposit: outcome=%v err=%v, want depositOK/nil", outcome, err)
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, firstTxnID) })
+
+	secondTxnID, outcome, err := deposit(ctx, pool, toAccountID, 500, reference)
+	if err != nil || outcome != depositOK {
+		t.Fatalf("second deposit: outcome=%v err=%v, want depositOK/nil", outcome, err)
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, secondTxnID) })
+
+	if firstTxnID == secondTxnID {
+		t.Fatal("two deposit calls with the same reference produced the same transaction_id — reference must not be an idempotency key")
+	}
+}

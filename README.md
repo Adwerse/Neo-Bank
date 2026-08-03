@@ -211,6 +211,140 @@ curl -s -X POST http://localhost:8080/transfers/ \
 ```
 Успешный перевод — `201` и `"status":"completed"` с заполненным `ledger_transaction_id`; сумма больше баланса — `201` и `"status":"failed","failure_reason":"insufficient_funds"`; оба случая проверяются balance-diff через `GET /accounts/me` обеих сторон (см. `cmd/devtopup` выше — им удобно завести отправителю стартовый баланс).
 
+## Stripe-фондированные депозиты: инфраструктура (transfers-svc, ledger-svc)
+
+Этот шаг — только инфраструктура для будущих Stripe-депозитов: две новые
+таблицы в transfers-svc и один новый gRPC-метод `ledger-svc.Deposit`.
+Создание `PaymentIntent`, обработка Stripe-вебхуков (с проверкой подписи)
+и фронтенд — предмет отдельных последующих шагов; здесь Go-код
+transfers-svc ещё не читает и не пишет ни в `deposits`, ни в
+`processed_stripe_events` — только таблицы существуют и накатываются
+миграциями.
+
+### Почему депозиты живут в transfers-svc, а не в новом payments-svc
+
+Депозит — тот же класс задачи, что и перевод: движение денег с
+неопределённостью на стороне внешней системы (там — `ledger-svc`, здесь —
+Stripe), которую нужно уметь дожидаться и сверять, а не гарантированно
+знать синхронно в момент HTTP-ответа. transfers-svc уже несёт всю нужную
+для этого инфраструктуру — клиент `ledger-svc`, outbox для надёжной
+публикации событий, воркер reconciliation для зависших состояний (см.
+разделы выше и ниже). Заводить отдельный payments-svc означало бы
+дублировать всё это заново ради разделения ответственности, которое для
+MVP не окупается; если/когда депозиты обрастут собственной сложностью
+(возвраты, несколько провайдеров), выделение в отдельный сервис — разумный
+следующий шаг, но не сейчас.
+
+### Схема (`services/transfers-svc/migrations/000006`, `000007`)
+
+`deposits` — одна строка на попытку депозита; `stripe_payment_intent_id`
+уникален — естественная защита от двух записей на один и тот же
+PaymentIntent. Статусы `succeeded` и `credited` — **сознательно разные**:
+`succeeded` значит «Stripe подтвердил списание карты», `credited` — «мы
+провели проводку в ledger». Это два факта в двух разных системах;
+схлопнуть их в один статус означало бы потерять восстановимое состояние
+«Stripe уже взял деньги, а мы их ещё не зачислили» — ровно то место, где
+будущему обработчику вебхука будет что чинить.
+
+`processed_stripe_events` — идемпотентность на уровне `event_id` Stripe
+(`evt_...`): `PRIMARY KEY` на `event_id` надёжнее, чем полагаться на то,
+что Stripe никогда не пришлёт вебхук дважды.
+
+### `ledger-svc.Deposit` — genesis → счёт пользователя
+
+`Deposit(account_id, amount, reference)` — новый gRPC-метод
+(`proto/ledger/v1/ledger.proto`): genesis-проводка, атомарно списывающая
+`amount` с системного genesis-счёта и зачисляющая его на `account_id` той
+же механикой, что и `ExecuteTransfer` (одна Postgres-транзакция,
+сбалансированная пара `entries` с общим `transaction_id`, инкрементальное
+обновление `account_balances`) — но **отдельной функцией** (`deposit` в
+`ledger.go`), а не веткой внутри `executeTransfer`. Единственное
+поведенческое отличие: здесь **нет проверки достаточности средств** на
+стороне genesis — он по определению обязан уметь уходить в минус (это и
+есть представление денег, входящих в систему извне), тогда как
+`executeTransfer` обязан делать эту проверку для каждого обычного счёта.
+Встраивать genesis-исключение в `executeTransfer` означало бы добавить
+особый случай в функцию, от которой зависит каждый обычный перевод, —
+отдельная функция оставляет `executeTransfer` полностью нетронутым.
+
+`reference` — необязательный будущий `deposits.id` (UUID), та же роль, что
+и `ExecuteTransferRequest.reference` у переводов (см. «Reconciliation»
+ниже): позволяет будущему обработчику вебхука спросить
+`GetTransactionByReference`, не была ли эта проводка уже проведена, вместо
+повторного зачисления. `Deposit`, как и `ExecuteTransfer`, **не
+идемпотентен сам по себе** — два вызова с одним и тем же `reference` дают
+две отдельные проводки; идемпотентность — ответственность вызывающей
+стороны, как и раньше.
+
+Системный genesis-счёт (`00000000-0000-0000-0000-000000000001`) теперь
+детерминированно создаётся миграцией
+`services/ledger-svc/migrations/000005_create_genesis_ledger_account` — до
+этого шага он существовал только как побочный эффект первого запуска
+`cmd/seed`/`cmd/devtopup`. Оба dev-инструмента не тронуты: их собственные
+идемпотентные upsert'ы того же genesis-счёта остаются безвредными
+no-op'ами, раз миграция уже создала строку первой.
+
+### Секрет Stripe: только через переменную окружения
+
+`STRIPE_SECRET_KEY` (`sk_test_...`) читается один раз при старте
+transfers-svc (`main.go`) через `os.Getenv`, тем же паттерном, что и
+`JWT_SECRET` у auth-svc — процесс останавливается (`log.Fatal`), если
+переменная не задана, до подключения к Postgres и до миграций. В отличие
+от `JWT_SECRET`, чьё dev-значение — просто захардкоженная в
+`docker-compose.yml` строка (безопасно для внутреннего секрета), реальный
+Stripe-ключ — куда более чувствительный секрет от третьей стороны:
+`docker-compose.yml` берёт его из `${STRIPE_SECRET_KEY}` (docker compose
+сам подставляет значения из `.env` в корне репозитория, рядом с
+`docker-compose.yml`, — механизм работает без единой строчки кода), а
+`.env` — в `.gitignore`; в репозитории лежит только `.env.example` c
+плейсхолдером. Publishable-ключ (`pk_test_...`) сюда не входит — он
+фронтенд-only и отложен до соответствующего шага.
+
+Клиент — `github.com/stripe/stripe-go/v86`, создаётся один раз в `main()`
+вызовом `stripe.NewClient(stripeSecretKey)` и хранится в пакетной (не
+локальной) `var stripeClient *stripe.Client` — до появления HTTP-хендлера,
+создающего `PaymentIntent` (следующий шаг), у клиента внутри transfers-svc
+попросту нет потребителя, а Go требует использования только локальных
+переменных, не пакетных. `stripe.NewClient` ничего не делает по сети — как
+и остальные клиенты этого `main()` (`grpc.NewClient` к
+accounts-svc/fraud-svc/ledger-svc), он ленивый: если ключ окажется
+невалидным, это проявится только на первом реальном вызове Stripe API — за
+пределами этого шага.
+
+### Проверка вручную
+
+```bash
+grpcurl -plaintext -d '{"account_id": "<uuid>", "amount": 1000}' \
+  localhost:8083 ledger.v1.LedgerService/Deposit
+```
+Баланс `account_id` (`GET /accounts/me` через Gateway) вырастет ровно на
+`amount`; genesis (`00000000-0000-0000-0000-000000000001`) уйдёт в минус
+ровно на ту же сумму — так и задумано.
+
+`STRIPE_SECRET_KEY` действительно обязателен: `docker compose up
+transfers-svc` без `.env` (или с закомментированной переменной) —
+контейнер падает сразу с логом `transfers-svc: STRIPE_SECRET_KEY
+environment variable is required`, не долетая даже до подключения к
+Postgres.
+
+### Тесты
+
+`services/ledger-svc/ledger_test.go`: `TestDeposit_Success` (целевой счёт
+растёт на `amount`, genesis падает на `amount`, `SUM(entries)` по
+транзакции равен 0), `TestDeposit_InvalidAmount`,
+`TestDeposit_AccountNotFound`, `TestDeposit_WithReference` (`reference`
+находится через `getTransactionByReference` — тот же путь, которым в
+будущем воспользуется сверка Stripe-депозитов),
+`TestDeposit_ReferenceIsNotIdempotencyKey` (два вызова с одним `reference`
+— две разные проводки, то же поведение, что и у `ExecuteTransfer`,
+специально не переизобретается).
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/ledger-svc/... -run TestDeposit -v
+```
+Новые таблицы transfers-svc (`deposits`, `processed_stripe_events`) — без
+Go-тестов на этом шаге: их ещё не читает и не пишет ни один Go-код.
+
 ## fraud-svc: подключение к Postgres, схема
 
 `fraud-svc` получил Postgres-соединение и схему (`pgx/v5` + `golang-migrate`, тот же паттерн, что и у `ledger-svc`/`accounts-svc`/`transfers-svc`: миграции встроены через `//go:embed migrations/*.sql` и накатываются автоматически при старте, таблица версий миграций — namespaced `schema_migrations_fraud_svc`, т.к. все сервисы делят одну физическую БД `neobank`). Логика проверок появилась следующим шагом (см. «fraud-svc: rule-based скоринг переводов» ниже), а интеграция в поток перевода — ещё одним шагом после (см. «fraud-check перед ledger» в самом низу).

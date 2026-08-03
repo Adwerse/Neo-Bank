@@ -24,6 +24,7 @@ const (
 	LedgerService_GetHistory_FullMethodName                = "/ledger.v1.LedgerService/GetHistory"
 	LedgerService_CreateLedgerAccount_FullMethodName       = "/ledger.v1.LedgerService/CreateLedgerAccount"
 	LedgerService_GetTransactionByReference_FullMethodName = "/ledger.v1.LedgerService/GetTransactionByReference"
+	LedgerService_Deposit_FullMethodName                   = "/ledger.v1.LedgerService/Deposit"
 )
 
 // LedgerServiceClient is the client API for LedgerService service.
@@ -51,6 +52,12 @@ type LedgerServiceClient interface {
 	// was never received) and need ledger-svc's own data, not a guess, to
 	// find out.
 	GetTransactionByReference(ctx context.Context, in *GetTransactionByReferenceRequest, opts ...grpc.CallOption) (*GetTransactionByReferenceResponse, error)
+	// Deposit posts a genesis -> account_id credit: the ledger-side
+	// counterpart of an external, Stripe-funded top-up. Unlike
+	// ExecuteTransfer, there is no insufficient-funds outcome — genesis is
+	// allowed to go arbitrarily negative by design, representing money
+	// entering the system from outside.
+	Deposit(ctx context.Context, in *DepositRequest, opts ...grpc.CallOption) (*DepositResponse, error)
 }
 
 type ledgerServiceClient struct {
@@ -111,6 +118,16 @@ func (c *ledgerServiceClient) GetTransactionByReference(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *ledgerServiceClient) Deposit(ctx context.Context, in *DepositRequest, opts ...grpc.CallOption) (*DepositResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DepositResponse)
+	err := c.cc.Invoke(ctx, LedgerService_Deposit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LedgerServiceServer is the server API for LedgerService service.
 // All implementations must embed UnimplementedLedgerServiceServer
 // for forward compatibility.
@@ -136,6 +153,12 @@ type LedgerServiceServer interface {
 	// was never received) and need ledger-svc's own data, not a guess, to
 	// find out.
 	GetTransactionByReference(context.Context, *GetTransactionByReferenceRequest) (*GetTransactionByReferenceResponse, error)
+	// Deposit posts a genesis -> account_id credit: the ledger-side
+	// counterpart of an external, Stripe-funded top-up. Unlike
+	// ExecuteTransfer, there is no insufficient-funds outcome — genesis is
+	// allowed to go arbitrarily negative by design, representing money
+	// entering the system from outside.
+	Deposit(context.Context, *DepositRequest) (*DepositResponse, error)
 	mustEmbedUnimplementedLedgerServiceServer()
 }
 
@@ -160,6 +183,9 @@ func (UnimplementedLedgerServiceServer) CreateLedgerAccount(context.Context, *Cr
 }
 func (UnimplementedLedgerServiceServer) GetTransactionByReference(context.Context, *GetTransactionByReferenceRequest) (*GetTransactionByReferenceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetTransactionByReference not implemented")
+}
+func (UnimplementedLedgerServiceServer) Deposit(context.Context, *DepositRequest) (*DepositResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Deposit not implemented")
 }
 func (UnimplementedLedgerServiceServer) mustEmbedUnimplementedLedgerServiceServer() {}
 func (UnimplementedLedgerServiceServer) testEmbeddedByValue()                       {}
@@ -272,6 +298,24 @@ func _LedgerService_GetTransactionByReference_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LedgerService_Deposit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DepositRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).Deposit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_Deposit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).Deposit(ctx, req.(*DepositRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // LedgerService_ServiceDesc is the grpc.ServiceDesc for LedgerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -298,6 +342,10 @@ var LedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTransactionByReference",
 			Handler:    _LedgerService_GetTransactionByReference_Handler,
+		},
+		{
+			MethodName: "Deposit",
+			Handler:    _LedgerService_Deposit_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

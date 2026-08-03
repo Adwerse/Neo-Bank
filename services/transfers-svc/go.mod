@@ -6,6 +6,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.18.2
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/segmentio/kafka-go v0.4.51
+	github.com/stripe/stripe-go/v86 v86.2.0
 	google.golang.org/grpc v1.75.0
 	google.golang.org/protobuf v1.36.11
 	neobank/pkg/outbox v0.0.0

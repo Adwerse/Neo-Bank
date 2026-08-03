@@ -325,6 +325,141 @@ func executeTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toA
 	return transactionID, transferOK, nil
 }
 
+// genesisAccountID is the fixed account_id of the system's genesis ledger
+// account, provisioned deterministically by migration
+// 000005_create_genesis_ledger_account (both id and account_id pinned to
+// this same UUID there). It is the same constant independently hardcoded
+// as genesisAccountID in cmd/seed/main.go and cmd/devtopup/main.go — that
+// duplication across the three main packages is consistent with the
+// existing pattern in those two files, not a new problem introduced here.
+const genesisAccountID = "00000000-0000-0000-0000-000000000001"
+
+// depositOutcome distinguishes the business-level results of deposit,
+// mirroring transferOutcome. There is deliberately no
+// depositInsufficientFunds: genesis is allowed to go arbitrarily negative
+// by design — see the doc comment on deposit.
+type depositOutcome int
+
+const (
+	depositOK depositOutcome = iota
+	depositInvalidAmount
+	depositAccountNotFound
+)
+
+// deposit atomically credits amount into toAccountID from the genesis
+// account — the ledger-side counterpart of an external, Stripe-funded
+// top-up. Money entering the system from outside is represented as
+// genesis's balance going negative by exactly amount, the standard
+// double-entry treatment of issuance (the same principle cmd/seed and
+// cmd/devtopup already apply by hand via direct SQL).
+//
+// deposit shares its locking and balanced-entries mechanics with
+// executeTransfer (lockLedgerAccount, applyBalanceDelta, one Postgres
+// transaction, a debit/credit pair sharing one transaction_id, the same
+// reference-nil-if-empty handling) but is a separate function rather than
+// a code path through executeTransfer, for one deliberate reason:
+// executeTransfer unconditionally enforces "fromAccountID's balance must
+// cover amount", and genesis is specifically exempt from that rule.
+// Bolting a genesis-specific exemption onto executeTransfer would add a
+// special case to the one function every ordinary transfer depends on —
+// keeping deposit standalone leaves executeTransfer's tested behavior
+// completely unchanged.
+//
+// reference is intended to carry the future deposits.id (a UUID), so a
+// caller can later ask GetTransactionByReference "did I already post this
+// deposit" — the same pattern ExecuteTransferRequest.reference already
+// supports for transfers reconciliation. Like executeTransfer, deposit is
+// not itself idempotent on reference: two calls with the same reference
+// post two separate transactions. Idempotency is the caller's
+// responsibility (check GetTransactionByReference first), exactly as it
+// already is for transfers.
+func deposit(ctx context.Context, pool *pgxpool.Pool, toAccountID string, amount int64, reference string) (transactionID string, outcome depositOutcome, err error) {
+	if amount <= 0 {
+		return "", depositInvalidAmount, nil
+	}
+
+	// Same NULL-vs-empty-string reasoning as executeTransfer: an empty
+	// string fails Postgres's uuid input parsing, so a nil interface{}
+	// (SQL NULL) is used instead when no reference is given.
+	var referenceParam any
+	if reference != "" {
+		referenceParam = reference
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock in the same deterministic ascending-account_id order as
+	// executeTransfer, so a deposit can never deadlock against a
+	// concurrent executeTransfer or deposit call that also touches
+	// genesis and toAccountID.
+	first, second := genesisAccountID, toAccountID
+	if strings.ToLower(toAccountID) < strings.ToLower(genesisAccountID) {
+		first, second = toAccountID, genesisAccountID
+	}
+
+	locked := make(map[string]string, 2) // account_id -> ledger_accounts.id
+	for _, accountID := range [2]string{first, second} {
+		ledgerAccountID, found, lockErr := lockLedgerAccount(ctx, tx, accountID)
+		if lockErr != nil {
+			return "", 0, lockErr
+		}
+		if !found {
+			if accountID == genesisAccountID {
+				// Should never happen once migration 000005 has run;
+				// handled defensively rather than assumed. This is a
+				// genuine infra failure, not a business outcome — the
+				// caller can't do anything about a missing genesis row.
+				return "", 0, fmt.Errorf("genesis ledger account (account_id=%s) not found — has migration 000005_create_genesis_ledger_account run?", genesisAccountID)
+			}
+			// toAccountID not existing is the one expected, reachable
+			// not-found case.
+			return "", depositAccountNotFound, nil
+		}
+		locked[accountID] = ledgerAccountID
+	}
+	genesisLedgerAccountID := locked[genesisAccountID]
+	toLedgerAccountID := locked[toAccountID]
+
+	// Deliberately no balance check here — the one behavioral difference
+	// from executeTransfer. Genesis is allowed to go arbitrarily negative:
+	// it represents money entering the system from outside, not a real
+	// user's funds that could ever be overdrawn.
+
+	err = tx.QueryRow(ctx,
+		`INSERT INTO entries (transaction_id, ledger_account_id, amount, reference)
+		 VALUES (gen_random_uuid(), $1, $2, $3)
+		 RETURNING transaction_id`,
+		genesisLedgerAccountID, -amount, referenceParam,
+	).Scan(&transactionID)
+	if err != nil {
+		return "", 0, fmt.Errorf("insert genesis debit entry: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
+		"INSERT INTO entries (transaction_id, ledger_account_id, amount, reference) VALUES ($1, $2, $3, $4)",
+		transactionID, toLedgerAccountID, amount, referenceParam,
+	)
+	if err != nil {
+		return "", 0, fmt.Errorf("insert credit entry: %w", err)
+	}
+
+	if err := applyBalanceDelta(ctx, tx, genesisLedgerAccountID, -amount); err != nil {
+		return "", 0, err
+	}
+	if err := applyBalanceDelta(ctx, tx, toLedgerAccountID, amount); err != nil {
+		return "", 0, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", 0, fmt.Errorf("commit deposit: %w", err)
+	}
+	return transactionID, depositOK, nil
+}
+
 // getTransactionByReference answers whether executeTransfer ever committed
 // a transfer tagged with this reference, and if so, its transaction_id.
 // found=false is a normal, meaningful answer (the reference was never

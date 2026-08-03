@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stripe/stripe-go/v86"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -29,6 +30,16 @@ const (
 	defaultOutboxRetention     = 7 * 24 * time.Hour
 	outboxRelayInterval        = 1 * time.Second
 )
+
+// stripeClient is the Stripe SDK client, constructed once at startup from
+// STRIPE_SECRET_KEY (see main()). It is package-level rather than a
+// main()-local variable because no HTTP handler in transfers-svc consumes
+// it yet — PaymentIntent creation and webhook handling are future work
+// (see README, "Stripe-фондированные депозиты"). Go only rejects unused
+// *local* variables, so this compiles cleanly without a fabricated
+// consumer, while the client is still fully constructed and validated
+// (secret key present) before the service starts serving traffic.
+var stripeClient *stripe.Client
 
 func main() {
 	port := os.Getenv("PORT")
@@ -71,6 +82,14 @@ func main() {
 	if transferEventsTopic == "" {
 		transferEventsTopic = defaultTransferEventsTopic
 	}
+	stripeSecretKey := os.Getenv("STRIPE_SECRET_KEY")
+	if stripeSecretKey == "" {
+		log.Fatal("transfers-svc: STRIPE_SECRET_KEY environment variable is required")
+	}
+	// stripe.NewClient does no network I/O — same lazy-init philosophy as
+	// the grpc.NewClient calls below.
+	stripeClient = stripe.NewClient(stripeSecretKey)
+
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	if err := runMigrations(databaseURL); err != nil {

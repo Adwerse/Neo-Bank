@@ -79,6 +79,7 @@ services:
       LEDGER_GRPC_ADDR: ledger-svc:8083
       KAFKA_BROKERS: kafka:9092
       KAFKA_TRANSFER_EVENTS_TOPIC: transfer.events
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
     depends_on:
       postgres:
         condition: service_healthy

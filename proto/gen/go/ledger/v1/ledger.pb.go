@@ -586,6 +586,113 @@ func (x *CreateLedgerAccountResponse) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+type DepositRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	AccountId string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	Amount    int64                  `protobuf:"varint,2,opt,name=amount,proto3" json:"amount,omitempty"`
+	// Same role as ExecuteTransferRequest.reference — intended to carry the
+	// future deposits.id, so a caller can later ask
+	// GetTransactionByReference whether a deposit was already posted.
+	Reference     string `protobuf:"bytes,3,opt,name=reference,proto3" json:"reference,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DepositRequest) Reset() {
+	*x = DepositRequest{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DepositRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DepositRequest) ProtoMessage() {}
+
+func (x *DepositRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DepositRequest.ProtoReflect.Descriptor instead.
+func (*DepositRequest) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *DepositRequest) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *DepositRequest) GetAmount() int64 {
+	if x != nil {
+		return x.Amount
+	}
+	return 0
+}
+
+func (x *DepositRequest) GetReference() string {
+	if x != nil {
+		return x.Reference
+	}
+	return ""
+}
+
+type DepositResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DepositResponse) Reset() {
+	*x = DepositResponse{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DepositResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DepositResponse) ProtoMessage() {}
+
+func (x *DepositResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DepositResponse.ProtoReflect.Descriptor instead.
+func (*DepositResponse) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DepositResponse) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
 var File_ledger_v1_ledger_proto protoreflect.FileDescriptor
 
 const file_ledger_v1_ledger_proto_rawDesc = "" +
@@ -627,7 +734,14 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\n" +
 	"account_id\x18\x01 \x01(\tR\taccountId\x129\n" +
 	"\n" +
-	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt2\xdd\x03\n" +
+	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"e\n" +
+	"\x0eDepositRequest\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\x12\x16\n" +
+	"\x06amount\x18\x02 \x01(\x03R\x06amount\x12\x1c\n" +
+	"\treference\x18\x03 \x01(\tR\treference\"8\n" +
+	"\x0fDepositResponse\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId2\x9f\x04\n" +
 	"\rLedgerService\x12I\n" +
 	"\n" +
 	"GetBalance\x12\x1c.ledger.v1.GetBalanceRequest\x1a\x1d.ledger.v1.GetBalanceResponse\x12X\n" +
@@ -635,7 +749,8 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\n" +
 	"GetHistory\x12\x1c.ledger.v1.GetHistoryRequest\x1a\x1d.ledger.v1.GetHistoryResponse\x12d\n" +
 	"\x13CreateLedgerAccount\x12%.ledger.v1.CreateLedgerAccountRequest\x1a&.ledger.v1.CreateLedgerAccountResponse\x12v\n" +
-	"\x19GetTransactionByReference\x12+.ledger.v1.GetTransactionByReferenceRequest\x1a,.ledger.v1.GetTransactionByReferenceResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
+	"\x19GetTransactionByReference\x12+.ledger.v1.GetTransactionByReferenceRequest\x1a,.ledger.v1.GetTransactionByReferenceResponse\x12@\n" +
+	"\aDeposit\x12\x19.ledger.v1.DepositRequest\x1a\x1a.ledger.v1.DepositResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
 
 var (
 	file_ledger_v1_ledger_proto_rawDescOnce sync.Once
@@ -649,7 +764,7 @@ func file_ledger_v1_ledger_proto_rawDescGZIP() []byte {
 	return file_ledger_v1_ledger_proto_rawDescData
 }
 
-var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_ledger_v1_ledger_proto_goTypes = []any{
 	(*GetBalanceRequest)(nil),                 // 0: ledger.v1.GetBalanceRequest
 	(*GetBalanceResponse)(nil),                // 1: ledger.v1.GetBalanceResponse
@@ -662,24 +777,28 @@ var file_ledger_v1_ledger_proto_goTypes = []any{
 	(*Entry)(nil),                             // 8: ledger.v1.Entry
 	(*CreateLedgerAccountRequest)(nil),        // 9: ledger.v1.CreateLedgerAccountRequest
 	(*CreateLedgerAccountResponse)(nil),       // 10: ledger.v1.CreateLedgerAccountResponse
-	(*timestamppb.Timestamp)(nil),             // 11: google.protobuf.Timestamp
+	(*DepositRequest)(nil),                    // 11: ledger.v1.DepositRequest
+	(*DepositResponse)(nil),                   // 12: ledger.v1.DepositResponse
+	(*timestamppb.Timestamp)(nil),             // 13: google.protobuf.Timestamp
 }
 var file_ledger_v1_ledger_proto_depIdxs = []int32{
 	8,  // 0: ledger.v1.GetHistoryResponse.entries:type_name -> ledger.v1.Entry
-	11, // 1: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
-	11, // 2: ledger.v1.CreateLedgerAccountResponse.created_at:type_name -> google.protobuf.Timestamp
+	13, // 1: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
+	13, // 2: ledger.v1.CreateLedgerAccountResponse.created_at:type_name -> google.protobuf.Timestamp
 	0,  // 3: ledger.v1.LedgerService.GetBalance:input_type -> ledger.v1.GetBalanceRequest
 	2,  // 4: ledger.v1.LedgerService.ExecuteTransfer:input_type -> ledger.v1.ExecuteTransferRequest
 	6,  // 5: ledger.v1.LedgerService.GetHistory:input_type -> ledger.v1.GetHistoryRequest
 	9,  // 6: ledger.v1.LedgerService.CreateLedgerAccount:input_type -> ledger.v1.CreateLedgerAccountRequest
 	4,  // 7: ledger.v1.LedgerService.GetTransactionByReference:input_type -> ledger.v1.GetTransactionByReferenceRequest
-	1,  // 8: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
-	3,  // 9: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
-	7,  // 10: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
-	10, // 11: ledger.v1.LedgerService.CreateLedgerAccount:output_type -> ledger.v1.CreateLedgerAccountResponse
-	5,  // 12: ledger.v1.LedgerService.GetTransactionByReference:output_type -> ledger.v1.GetTransactionByReferenceResponse
-	8,  // [8:13] is the sub-list for method output_type
-	3,  // [3:8] is the sub-list for method input_type
+	11, // 8: ledger.v1.LedgerService.Deposit:input_type -> ledger.v1.DepositRequest
+	1,  // 9: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
+	3,  // 10: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
+	7,  // 11: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
+	10, // 12: ledger.v1.LedgerService.CreateLedgerAccount:output_type -> ledger.v1.CreateLedgerAccountResponse
+	5,  // 13: ledger.v1.LedgerService.GetTransactionByReference:output_type -> ledger.v1.GetTransactionByReferenceResponse
+	12, // 14: ledger.v1.LedgerService.Deposit:output_type -> ledger.v1.DepositResponse
+	9,  // [9:15] is the sub-list for method output_type
+	3,  // [3:9] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name
@@ -696,7 +815,7 @@ func file_ledger_v1_ledger_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ledger_v1_ledger_proto_rawDesc), len(file_ledger_v1_ledger_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
