@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "neobank/proto/gen/go/events/v1;eventsv1";
+
+// DepositCredited is published when a Stripe-funded deposit has actually
+// been credited in ledger-svc (deposits.status transitions to
+// 'credited') — the last of three facts a deposit passes through
+// ('succeeded' meaning Stripe confirmed the charge is a separate,
+// earlier fact recorded directly on the deposits row, not its own
+// event). Published by transfers-svc's deposit-crediting worker in the
+// same Postgres transaction as that status update, same outbox pattern
+// as TransferCompleted.
+message DepositCredited {
+  string event_id = 1;
+  string deposit_id = 2;
+  string account_id = 3;
+  int64 amount = 4;
+  string ledger_transaction_id = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+}

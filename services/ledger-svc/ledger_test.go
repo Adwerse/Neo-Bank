@@ -898,12 +898,16 @@ func TestDeposit_WithReference(t *testing.T) {
 	}
 }
 
-// TestDeposit_ReferenceIsNotIdempotencyKey locks in that deposit, like
-// executeTransfer, does NOT deduplicate on reference: two calls with the
-// same reference post two separate transactions. Idempotency is the
-// caller's job (check GetTransactionByReference first) — this test exists
-// so that behavior stays intentional, not accidental.
-func TestDeposit_ReferenceIsNotIdempotencyKey(t *testing.T) {
+// TestDeposit_IsIdempotentByReference proves deposit's idempotency
+// contract: two calls with the same reference return the SAME
+// transaction_id rather than posting twice. This matters because
+// transfers-svc's crediting worker can genuinely call deposit more than
+// once for the same logical deposit (e.g. it credited successfully but
+// crashed before recording that locally, so the next reconciliation tick
+// tries again) with no idempotency-key layer of its own above this call
+// to catch it — unlike a transfer, which does have one (transfers-svc's
+// own idempotency_key column).
+func TestDeposit_IsIdempotentByReference(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
 
@@ -921,9 +925,188 @@ func TestDeposit_ReferenceIsNotIdempotencyKey(t *testing.T) {
 	if err != nil || outcome != depositOK {
 		t.Fatalf("second deposit: outcome=%v err=%v, want depositOK/nil", outcome, err)
 	}
-	t.Cleanup(func() { cleanupDepositEntries(t, pool, secondTxnID) })
 
-	if firstTxnID == secondTxnID {
-		t.Fatal("two deposit calls with the same reference produced the same transaction_id — reference must not be an idempotency key")
+	if firstTxnID != secondTxnID {
+		t.Fatalf("two deposit calls with the same reference produced different transaction_ids (%s, %s) — want the same one returned both times", firstTxnID, secondTxnID)
+	}
+
+	toBalance, err := getBalance(ctx, pool, toAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(to): unexpected error: %v", err)
+	}
+	if toBalance != 500 {
+		t.Errorf("to balance = %d, want 500 (the second call must not have posted a second credit)", toBalance)
+	}
+}
+
+// TestDeposit_ConcurrentSameReferenceDoesNotDoublePost fires many
+// concurrent deposit calls sharing one reference and proves exactly one
+// entry pair gets posted — the property the transaction-scoped advisory
+// lock in postUncheckedTransfer exists to guarantee, exercised under
+// real concurrency rather than only sequentially (see
+// TestExecuteTransfer_ConcurrentOverdraftPrevention for the same
+// reasoning applied to executeTransfer's own locking).
+func TestDeposit_ConcurrentSameReferenceDoesNotDoublePost(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	toAccountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, toAccountID)
+	reference := randomUUID(t)
+
+	const attempts = 20
+	transactionIDs := make([]string, attempts)
+	errs := make([]error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			txnID, outcome, err := deposit(ctx, pool, toAccountID, 500, reference)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			if outcome != depositOK {
+				errs[i] = fmt.Errorf("outcome = %v, want depositOK", outcome)
+				return
+			}
+			transactionIDs[i] = txnID
+		}(i)
+	}
+	wg.Wait()
+
+	var firstTxnID string
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+		if firstTxnID == "" {
+			firstTxnID = transactionIDs[i]
+		} else if transactionIDs[i] != firstTxnID {
+			t.Fatalf("goroutine %d got transaction_id %s, want %s (every concurrent call must resolve to the same posting)", i, transactionIDs[i], firstTxnID)
+		}
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, firstTxnID) })
+
+	toBalance, err := getBalance(ctx, pool, toAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(to): unexpected error: %v", err)
+	}
+	if toBalance != 500 {
+		t.Errorf("to balance = %d, want 500 (exactly one of %d concurrent same-reference calls must have actually posted)", toBalance, attempts)
+	}
+}
+
+// TestReverseDeposit_Success proves reverseDeposit debits the target
+// account and credits genesis by the same amount — the mirror image of
+// deposit, checked the same way TestDeposit_Success checks deposit.
+func TestReverseDeposit_Success(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, accountID)
+	depositTxnID, outcome, err := deposit(ctx, pool, accountID, 5000, "")
+	if err != nil || outcome != depositOK {
+		t.Fatalf("precondition deposit: outcome=%v err=%v, want depositOK/nil", outcome, err)
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, depositTxnID) })
+
+	genesisBalanceBefore, err := getBalance(ctx, pool, genesisAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(genesis) before reverseDeposit: unexpected error: %v", err)
+	}
+
+	reverseTxnID, outcome, err := reverseDeposit(ctx, pool, accountID, 5000, "")
+	if err != nil {
+		t.Fatalf("reverseDeposit: unexpected error: %v", err)
+	}
+	if outcome != depositOK {
+		t.Fatalf("reverseDeposit outcome = %v, want depositOK", outcome)
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, reverseTxnID) })
+
+	accountBalance, err := getBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("getBalance(account): unexpected error: %v", err)
+	}
+	if accountBalance != 0 {
+		t.Errorf("account balance = %d, want 0 (deposited 5000, reversed 5000)", accountBalance)
+	}
+
+	genesisBalanceAfter, err := getBalance(ctx, pool, genesisAccountID)
+	if err != nil {
+		t.Fatalf("getBalance(genesis) after reverseDeposit: unexpected error: %v", err)
+	}
+	if genesisBalanceAfter != genesisBalanceBefore+5000 {
+		t.Errorf("genesis balance = %d, want %d (before %d plus reversed 5000)", genesisBalanceAfter, genesisBalanceBefore+5000, genesisBalanceBefore)
+	}
+}
+
+// TestReverseDeposit_AllowsNegativeBalance proves reverseDeposit does NOT
+// enforce a balance check on the account being reversed — the deliberate
+// behavior difference from a normal withdrawal (executeTransfer), since a
+// Stripe refund already happened regardless of what the account currently
+// holds in-ledger.
+func TestReverseDeposit_AllowsNegativeBalance(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, accountID)
+	// No prior deposit: accountID starts at balance 0.
+
+	transactionID, outcome, err := reverseDeposit(ctx, pool, accountID, 1500, "")
+	if err != nil {
+		t.Fatalf("reverseDeposit: unexpected error: %v", err)
+	}
+	if outcome != depositOK {
+		t.Fatalf("reverseDeposit outcome = %v, want depositOK (no insufficient-funds outcome exists for this operation)", outcome)
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, transactionID) })
+
+	accountBalance, err := getBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("getBalance: unexpected error: %v", err)
+	}
+	if accountBalance != -1500 {
+		t.Errorf("account balance = %d, want -1500", accountBalance)
+	}
+}
+
+// TestReverseDeposit_IsIdempotentByReference mirrors
+// TestDeposit_IsIdempotentByReference for the reversal direction: a
+// redelivered charge.refunded webhook must not reverse the same deposit
+// twice.
+func TestReverseDeposit_IsIdempotentByReference(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, accountID)
+	reference := randomUUID(t)
+
+	firstTxnID, outcome, err := reverseDeposit(ctx, pool, accountID, 800, reference)
+	if err != nil || outcome != depositOK {
+		t.Fatalf("first reverseDeposit: outcome=%v err=%v, want depositOK/nil", outcome, err)
+	}
+	t.Cleanup(func() { cleanupDepositEntries(t, pool, firstTxnID) })
+
+	secondTxnID, outcome, err := reverseDeposit(ctx, pool, accountID, 800, reference)
+	if err != nil || outcome != depositOK {
+		t.Fatalf("second reverseDeposit: outcome=%v err=%v, want depositOK/nil", outcome, err)
+	}
+
+	if firstTxnID != secondTxnID {
+		t.Fatalf("two reverseDeposit calls with the same reference produced different transaction_ids (%s, %s)", firstTxnID, secondTxnID)
+	}
+
+	accountBalance, err := getBalance(ctx, pool, accountID)
+	if err != nil {
+		t.Fatalf("getBalance: unexpected error: %v", err)
+	}
+	if accountBalance != -800 {
+		t.Errorf("account balance = %d, want -800 (the second call must not have reversed a second time)", accountBalance)
 	}
 }

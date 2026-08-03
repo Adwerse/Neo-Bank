@@ -37,11 +37,18 @@ const reconcileInterval = 30 * time.Second
 //   - ledger-svc has no such entry: it never executed. No money moved, so
 //     there is nothing to compensate either (failed).
 //
+// This same worker also drives deposit reconciliation (reconcileDepositsOnce,
+// deposit_reconcile.go) on every tick — including, notably, the everyday
+// crediting of Stripe-confirmed deposits, not just resolving stuck ones.
+// See README, "Депозиты: почему фоновый воркер" for why that lives here
+// rather than in the webhook handler or a separate task queue this repo
+// doesn't otherwise have.
+//
 // Like every background loop in this repo (accounts-svc's Kafka consumer
 // being the other example), this runs for the lifetime of the process with
 // no graceful shutdown — ctx is context.Background() from main(), and the
 // loop just stops when the process does.
-func runReconciliationWorker(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, staleAfter time.Duration) {
+func runReconciliationWorker(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, staleAfter time.Duration, paymentIntents stripePaymentIntentRetriever, depositStaleAfter time.Duration) {
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
 	for {
@@ -50,6 +57,7 @@ func runReconciliationWorker(ctx context.Context, pool *pgxpool.Pool, ledgerClie
 			return
 		case <-ticker.C:
 			reconcileOnce(ctx, pool, ledgerClient, staleAfter)
+			reconcileDepositsOnce(ctx, pool, ledgerClient, paymentIntents, depositStaleAfter)
 		}
 	}
 }

@@ -25,6 +25,7 @@ const (
 	LedgerService_CreateLedgerAccount_FullMethodName       = "/ledger.v1.LedgerService/CreateLedgerAccount"
 	LedgerService_GetTransactionByReference_FullMethodName = "/ledger.v1.LedgerService/GetTransactionByReference"
 	LedgerService_Deposit_FullMethodName                   = "/ledger.v1.LedgerService/Deposit"
+	LedgerService_ReverseDeposit_FullMethodName            = "/ledger.v1.LedgerService/ReverseDeposit"
 )
 
 // LedgerServiceClient is the client API for LedgerService service.
@@ -56,8 +57,22 @@ type LedgerServiceClient interface {
 	// counterpart of an external, Stripe-funded top-up. Unlike
 	// ExecuteTransfer, there is no insufficient-funds outcome — genesis is
 	// allowed to go arbitrarily negative by design, representing money
-	// entering the system from outside.
+	// entering the system from outside. Idempotent on reference: a repeat
+	// call with a reference that already has an entry returns that entry's
+	// transaction_id instead of posting a second one — unlike
+	// ExecuteTransfer, which is not idempotent, because Deposit's callers
+	// (transfers-svc's crediting worker, in particular) can genuinely be
+	// invoked more than once for the same logical deposit with no
+	// idempotency-key layer of their own above this call to catch it.
 	Deposit(ctx context.Context, in *DepositRequest, opts ...grpc.CallOption) (*DepositResponse, error)
+	// ReverseDeposit posts the opposite of Deposit: account_id -> genesis,
+	// for compensating a deposit that was credited and then refunded in
+	// Stripe. Also has no insufficient-funds outcome, deliberately — the
+	// refund already happened in Stripe regardless of what account_id
+	// currently holds in-ledger, so the books must reflect it even if that
+	// leaves account_id negative (a known MVP limitation, see README). Same
+	// idempotency-on-reference contract as Deposit.
+	ReverseDeposit(ctx context.Context, in *DepositRequest, opts ...grpc.CallOption) (*DepositResponse, error)
 }
 
 type ledgerServiceClient struct {
@@ -128,6 +143,16 @@ func (c *ledgerServiceClient) Deposit(ctx context.Context, in *DepositRequest, o
 	return out, nil
 }
 
+func (c *ledgerServiceClient) ReverseDeposit(ctx context.Context, in *DepositRequest, opts ...grpc.CallOption) (*DepositResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DepositResponse)
+	err := c.cc.Invoke(ctx, LedgerService_ReverseDeposit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LedgerServiceServer is the server API for LedgerService service.
 // All implementations must embed UnimplementedLedgerServiceServer
 // for forward compatibility.
@@ -157,8 +182,22 @@ type LedgerServiceServer interface {
 	// counterpart of an external, Stripe-funded top-up. Unlike
 	// ExecuteTransfer, there is no insufficient-funds outcome — genesis is
 	// allowed to go arbitrarily negative by design, representing money
-	// entering the system from outside.
+	// entering the system from outside. Idempotent on reference: a repeat
+	// call with a reference that already has an entry returns that entry's
+	// transaction_id instead of posting a second one — unlike
+	// ExecuteTransfer, which is not idempotent, because Deposit's callers
+	// (transfers-svc's crediting worker, in particular) can genuinely be
+	// invoked more than once for the same logical deposit with no
+	// idempotency-key layer of their own above this call to catch it.
 	Deposit(context.Context, *DepositRequest) (*DepositResponse, error)
+	// ReverseDeposit posts the opposite of Deposit: account_id -> genesis,
+	// for compensating a deposit that was credited and then refunded in
+	// Stripe. Also has no insufficient-funds outcome, deliberately — the
+	// refund already happened in Stripe regardless of what account_id
+	// currently holds in-ledger, so the books must reflect it even if that
+	// leaves account_id negative (a known MVP limitation, see README). Same
+	// idempotency-on-reference contract as Deposit.
+	ReverseDeposit(context.Context, *DepositRequest) (*DepositResponse, error)
 	mustEmbedUnimplementedLedgerServiceServer()
 }
 
@@ -186,6 +225,9 @@ func (UnimplementedLedgerServiceServer) GetTransactionByReference(context.Contex
 }
 func (UnimplementedLedgerServiceServer) Deposit(context.Context, *DepositRequest) (*DepositResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Deposit not implemented")
+}
+func (UnimplementedLedgerServiceServer) ReverseDeposit(context.Context, *DepositRequest) (*DepositResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReverseDeposit not implemented")
 }
 func (UnimplementedLedgerServiceServer) mustEmbedUnimplementedLedgerServiceServer() {}
 func (UnimplementedLedgerServiceServer) testEmbeddedByValue()                       {}
@@ -316,6 +358,24 @@ func _LedgerService_Deposit_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LedgerService_ReverseDeposit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DepositRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).ReverseDeposit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_ReverseDeposit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).ReverseDeposit(ctx, req.(*DepositRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // LedgerService_ServiceDesc is the grpc.ServiceDesc for LedgerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -346,6 +406,10 @@ var LedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Deposit",
 			Handler:    _LedgerService_Deposit_Handler,
+		},
+		{
+			MethodName: "ReverseDeposit",
+			Handler:    _LedgerService_ReverseDeposit_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

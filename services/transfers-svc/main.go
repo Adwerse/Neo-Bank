@@ -20,15 +20,16 @@ import (
 )
 
 const (
-	defaultPort                = "8084"
-	defaultAccountsAddr        = "accounts-svc:9082"
-	defaultFraudAddr           = "fraud-svc:9085"
-	defaultLedgerAddr          = "ledger-svc:8083"
-	defaultReconcileStaleAfter = 2 * time.Minute
-	defaultKafkaBrokers        = "kafka:9092"
-	defaultTransferEventsTopic = "transfer.events"
-	defaultOutboxRetention     = 7 * 24 * time.Hour
-	outboxRelayInterval        = 1 * time.Second
+	defaultPort                       = "8084"
+	defaultAccountsAddr               = "accounts-svc:9082"
+	defaultFraudAddr                  = "fraud-svc:9085"
+	defaultLedgerAddr                 = "ledger-svc:8083"
+	defaultReconcileStaleAfter        = 2 * time.Minute
+	defaultDepositReconcileStaleAfter = 2 * time.Minute
+	defaultKafkaBrokers               = "kafka:9092"
+	defaultTransferEventsTopic        = "transfer.events"
+	defaultOutboxRetention            = 7 * 24 * time.Hour
+	outboxRelayInterval               = 1 * time.Second
 )
 
 // stripeClient is the Stripe SDK client, constructed once at startup from
@@ -65,6 +66,14 @@ func main() {
 			log.Fatalf("transfers-svc: invalid RECONCILE_STALE_AFTER %q: %v", v, err)
 		}
 		reconcileStaleAfter = d
+	}
+	depositReconcileStaleAfter := defaultDepositReconcileStaleAfter
+	if v := os.Getenv("DEPOSIT_RECONCILE_STALE_AFTER"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			log.Fatalf("transfers-svc: invalid DEPOSIT_RECONCILE_STALE_AFTER %q: %v", v, err)
+		}
+		depositReconcileStaleAfter = d
 	}
 	outboxRetention := defaultOutboxRetention
 	if v := os.Getenv("OUTBOX_RETENTION"); v != "" {
@@ -142,7 +151,7 @@ func main() {
 	kafkaWriter := newKafkaWriter(kafkaBrokers, transferEventsTopic)
 	defer kafkaWriter.Close()
 
-	go runReconciliationWorker(context.Background(), pool, ledgerClient, reconcileStaleAfter)
+	go runReconciliationWorker(context.Background(), pool, ledgerClient, reconcileStaleAfter, stripeClient.V1PaymentIntents, depositReconcileStaleAfter)
 	go outbox.RunRelay(context.Background(), pool, outboxTable, kafkaWriter, outboxRelayInterval, outbox.DefaultBatchSize, "transfers-svc")
 	go outbox.RunCleanupWorker(context.Background(), pool, outboxTable, outboxRetention, outbox.DefaultCleanupInterval, "transfers-svc")
 
@@ -182,7 +191,8 @@ func main() {
 	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, fraudClient, ledgerClient))
 	mux.HandleFunc("GET /", listTransfersHandler(pool, accountsClient))
 	mux.HandleFunc("POST /deposits", createDepositHandler(pool, accountsClient, stripeClient.V1PaymentIntents))
-	mux.HandleFunc("POST /webhooks/stripe", stripeWebhookHandler(pool, stripeWebhookSecret))
+	mux.HandleFunc("POST /webhooks/stripe", stripeWebhookHandler(pool, ledgerClient, stripeWebhookSecret))
+	mux.HandleFunc("POST /withdrawals", createWithdrawalHandler(pool, accountsClient, ledgerClient))
 
 	log.Printf("transfers-svc listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {

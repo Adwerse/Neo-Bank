@@ -118,6 +118,20 @@ func buildTransferDeclinedEmail(amount int64, transferID string, at time.Time) e
 	return email{Subject: "Neo-Bank: transfer declined", Body: b.String()}
 }
 
+// buildDepositCreditedEmail is the one email a Stripe-funded deposit
+// produces, sent only once the deposit reaches 'credited' — not at
+// 'succeeded' (Stripe confirmed the card charge, but the balance hasn't
+// moved yet). See DepositCredited's own doc comment
+// (proto/events/v1/deposit_events.proto) for why that distinction exists.
+func buildDepositCreditedEmail(amount int64, depositID string, at time.Time) email {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Your account has been topped up by %s.\r\n\r\n", formatAmount(amount))
+	fmt.Fprintf(&b, "Deposit ID: %s\r\n", depositID)
+	writeDateLine(&b, at)
+	fmt.Fprintf(&b, "\r\n%s\r\n", emailFooter)
+	return email{Subject: "Neo-Bank: account topped up", Body: b.String()}
+}
+
 // formatAmount is the one place " EUR" is appended, so the currency can't
 // drift between templates. See money.go for why the symbol isn't used.
 func formatAmount(minorUnits int64) string {

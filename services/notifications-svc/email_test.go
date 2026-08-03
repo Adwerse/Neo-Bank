@@ -12,10 +12,11 @@ const testTransferID = "4f2c9e11-8a3d-4b7e-9c10-2d5a6f8b3c41"
 
 func allTestEmails() map[string]email {
 	return map[string]email{
-		"sent":     buildTransferSentEmail(123456, testTransferID, "NB0012345678", testTime),
-		"received": buildTransferReceivedEmail(123456, testTransferID, "NB0098765432", testTime),
-		"failed":   buildTransferFailedEmail(123456, testTransferID, "insufficient_funds", testTime),
-		"declined": buildTransferDeclinedEmail(123456, testTransferID, testTime),
+		"sent":             buildTransferSentEmail(123456, testTransferID, "NB0012345678", testTime),
+		"received":         buildTransferReceivedEmail(123456, testTransferID, "NB0098765432", testTime),
+		"failed":           buildTransferFailedEmail(123456, testTransferID, "insufficient_funds", testTime),
+		"declined":         buildTransferDeclinedEmail(123456, testTransferID, testTime),
+		"deposit_credited": buildDepositCreditedEmail(123456, testTransferID, testTime),
 	}
 }
 

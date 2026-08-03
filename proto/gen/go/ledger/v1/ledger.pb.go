@@ -586,13 +586,18 @@ func (x *CreateLedgerAccountResponse) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// DepositRequest is shared by Deposit and ReverseDeposit — account_id is
+// the account credited by Deposit, or debited by ReverseDeposit.
 type DepositRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	AccountId string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
 	Amount    int64                  `protobuf:"varint,2,opt,name=amount,proto3" json:"amount,omitempty"`
-	// Same role as ExecuteTransferRequest.reference — intended to carry the
-	// future deposits.id, so a caller can later ask
-	// GetTransactionByReference whether a deposit was already posted.
+	// Unlike ExecuteTransferRequest.reference (an optional correlation id),
+	// this is also the idempotency key: see Deposit/ReverseDeposit's doc
+	// comments. Intended to carry the transfers-svc deposits.id (Deposit)
+	// or a value deterministically derived from it (ReverseDeposit, so a
+	// reversal doesn't collide with its own deposit's original credit
+	// reference).
 	Reference     string `protobuf:"bytes,3,opt,name=reference,proto3" json:"reference,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -741,7 +746,7 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x06amount\x18\x02 \x01(\x03R\x06amount\x12\x1c\n" +
 	"\treference\x18\x03 \x01(\tR\treference\"8\n" +
 	"\x0fDepositResponse\x12%\n" +
-	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId2\x9f\x04\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId2\xe8\x04\n" +
 	"\rLedgerService\x12I\n" +
 	"\n" +
 	"GetBalance\x12\x1c.ledger.v1.GetBalanceRequest\x1a\x1d.ledger.v1.GetBalanceResponse\x12X\n" +
@@ -750,7 +755,8 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"GetHistory\x12\x1c.ledger.v1.GetHistoryRequest\x1a\x1d.ledger.v1.GetHistoryResponse\x12d\n" +
 	"\x13CreateLedgerAccount\x12%.ledger.v1.CreateLedgerAccountRequest\x1a&.ledger.v1.CreateLedgerAccountResponse\x12v\n" +
 	"\x19GetTransactionByReference\x12+.ledger.v1.GetTransactionByReferenceRequest\x1a,.ledger.v1.GetTransactionByReferenceResponse\x12@\n" +
-	"\aDeposit\x12\x19.ledger.v1.DepositRequest\x1a\x1a.ledger.v1.DepositResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
+	"\aDeposit\x12\x19.ledger.v1.DepositRequest\x1a\x1a.ledger.v1.DepositResponse\x12G\n" +
+	"\x0eReverseDeposit\x12\x19.ledger.v1.DepositRequest\x1a\x1a.ledger.v1.DepositResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
 
 var (
 	file_ledger_v1_ledger_proto_rawDescOnce sync.Once
@@ -791,14 +797,16 @@ var file_ledger_v1_ledger_proto_depIdxs = []int32{
 	9,  // 6: ledger.v1.LedgerService.CreateLedgerAccount:input_type -> ledger.v1.CreateLedgerAccountRequest
 	4,  // 7: ledger.v1.LedgerService.GetTransactionByReference:input_type -> ledger.v1.GetTransactionByReferenceRequest
 	11, // 8: ledger.v1.LedgerService.Deposit:input_type -> ledger.v1.DepositRequest
-	1,  // 9: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
-	3,  // 10: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
-	7,  // 11: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
-	10, // 12: ledger.v1.LedgerService.CreateLedgerAccount:output_type -> ledger.v1.CreateLedgerAccountResponse
-	5,  // 13: ledger.v1.LedgerService.GetTransactionByReference:output_type -> ledger.v1.GetTransactionByReferenceResponse
-	12, // 14: ledger.v1.LedgerService.Deposit:output_type -> ledger.v1.DepositResponse
-	9,  // [9:15] is the sub-list for method output_type
-	3,  // [3:9] is the sub-list for method input_type
+	11, // 9: ledger.v1.LedgerService.ReverseDeposit:input_type -> ledger.v1.DepositRequest
+	1,  // 10: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
+	3,  // 11: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
+	7,  // 12: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
+	10, // 13: ledger.v1.LedgerService.CreateLedgerAccount:output_type -> ledger.v1.CreateLedgerAccountResponse
+	5,  // 14: ledger.v1.LedgerService.GetTransactionByReference:output_type -> ledger.v1.GetTransactionByReferenceResponse
+	12, // 15: ledger.v1.LedgerService.Deposit:output_type -> ledger.v1.DepositResponse
+	12, // 16: ledger.v1.LedgerService.ReverseDeposit:output_type -> ledger.v1.DepositResponse
+	10, // [10:17] is the sub-list for method output_type
+	3,  // [3:10] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name

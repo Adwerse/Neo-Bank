@@ -11,7 +11,25 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stripe/stripe-go/v86"
 	"github.com/stripe/stripe-go/v86/webhook"
+
+	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
+
+// noReverseDepositExpectedLedgerClient is a fakeLedgerClient whose
+// reverseDepositFunc fails the test if called — the default for every
+// webhook test that isn't specifically exercising charge.refunded's
+// credited-deposit reversal path, so an accidental/unwanted ledger call
+// is caught immediately instead of silently doing nothing (a nil
+// reverseDepositFunc would panic instead, which is a less clear failure).
+func noReverseDepositExpectedLedgerClient(t *testing.T) *fakeLedgerClient {
+	t.Helper()
+	return &fakeLedgerClient{
+		reverseDepositFunc: func(ctx context.Context, req *ledgerv1.DepositRequest) (*ledgerv1.DepositResponse, error) {
+			t.Fatal("ReverseDeposit should not be called for this event")
+			return nil, nil
+		},
+	}
+}
 
 const testWebhookSecret = "whsec_test_secret_not_a_real_stripe_value"
 
@@ -64,13 +82,13 @@ func stripeEventJSON(eventID, eventType, dataObjectJSON string) []byte {
 // (via webhook.GenerateTestSignedPayload — real HMAC computation, not a
 // mock) and delivers it to stripeWebhookHandler, which always verifies
 // against testWebhookSecret.
-func sendSignedWebhook(t *testing.T, pool *pgxpool.Pool, payload []byte, secret string) *httptest.ResponseRecorder {
+func sendSignedWebhook(t *testing.T, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, payload []byte, secret string) *httptest.ResponseRecorder {
 	t.Helper()
 	signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{Payload: payload, Secret: secret})
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/stripe", bytes.NewReader(signed.Payload))
 	req.Header.Set("Stripe-Signature", signed.Header)
 	rec := httptest.NewRecorder()
-	stripeWebhookHandler(pool, testWebhookSecret)(rec, req)
+	stripeWebhookHandler(pool, ledgerClient, testWebhookSecret)(rec, req)
 	return rec
 }
 
@@ -85,7 +103,7 @@ func TestStripeWebhookHandler_PaymentIntentSucceeded(t *testing.T) {
 	cleanupProcessedStripeEvent(t, pool, eventID)
 
 	payload := stripeEventJSON(eventID, "payment_intent.succeeded", fmt.Sprintf(`{"id":%q,"object":"payment_intent"}`, intentID))
-	rec := sendSignedWebhook(t, pool, payload, testWebhookSecret)
+	rec := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -120,7 +138,7 @@ func TestStripeWebhookHandler_PaymentIntentPaymentFailed(t *testing.T) {
 
 	dataObject := fmt.Sprintf(`{"id":%q,"object":"payment_intent","last_payment_error":{"code":"card_declined","message":"Your card was declined."}}`, intentID)
 	payload := stripeEventJSON(eventID, "payment_intent.payment_failed", dataObject)
-	rec := sendSignedWebhook(t, pool, payload, testWebhookSecret)
+	rec := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -139,7 +157,73 @@ func TestStripeWebhookHandler_PaymentIntentPaymentFailed(t *testing.T) {
 	}
 }
 
-func TestStripeWebhookHandler_ChargeRefunded(t *testing.T) {
+// TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit is the core
+// refund case: a deposit that was already credited (money moved into the
+// user's ledger balance) gets refunded in Stripe, so ledger-svc must be
+// asked to reverse it (account -> genesis), and the deposit's status
+// moves to 'refunded'.
+func TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUIDForTest(t)
+	intentID := "pi_" + randomUUIDForTest(t)
+	eventID := "evt_" + randomUUIDForTest(t)
+	depositID := insertDepositWithIntent(t, ctx, pool, accountID, intentID, 5000)
+	cleanupProcessedStripeEvent(t, pool, eventID)
+	if _, err := pool.Exec(ctx, "UPDATE deposits SET status = 'credited' WHERE id = $1", depositID); err != nil {
+		t.Fatalf("precondition: mark deposit credited: %v", err)
+	}
+
+	wantReversalTxnID := randomUUIDForTest(t)
+	var gotReference string
+	ledgerClient := &fakeLedgerClient{
+		reverseDepositFunc: func(ctx context.Context, req *ledgerv1.DepositRequest) (*ledgerv1.DepositResponse, error) {
+			if req.GetAccountId() != accountID || req.GetAmount() != 5000 {
+				t.Errorf("ReverseDeposit request = %+v, want account=%s amount=5000", req, accountID)
+			}
+			if req.GetReference() == depositID {
+				t.Error("ReverseDeposit reference must not equal the deposit's own id — it would collide with the original credit's reference in ledger-svc's idempotency check")
+			}
+			gotReference = req.GetReference()
+			return &ledgerv1.DepositResponse{TransactionId: wantReversalTxnID}, nil
+		},
+	}
+
+	dataObject := fmt.Sprintf(`{"id":"ch_%s","object":"charge","payment_intent":%q}`, randomUUIDForTest(t), intentID)
+	payload := stripeEventJSON(eventID, "charge.refunded", dataObject)
+	rec := sendSignedWebhook(t, pool, ledgerClient, payload, testWebhookSecret)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if gotReference == "" {
+		t.Fatal("ReverseDeposit was never called")
+	}
+
+	var status string
+	var failureReason *string
+	if err := pool.QueryRow(ctx, "SELECT status, failure_reason FROM deposits WHERE id = $1", depositID).Scan(&status, &failureReason); err != nil {
+		t.Fatalf("query deposit: %v", err)
+	}
+	if status != "refunded" {
+		t.Errorf("deposit status = %q, want %q", status, "refunded")
+	}
+
+	// Redelivery of the same event: by now the deposit is no longer
+	// 'credited', so this must NOT call ReverseDeposit again.
+	second := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
+	if second.Code != http.StatusOK {
+		t.Fatalf("redelivery: status = %d, want 200; body=%s", second.Code, second.Body.String())
+	}
+}
+
+// TestStripeWebhookHandler_ChargeRefunded_SucceededNotYetCreditedDeposit
+// covers the case processChargeRefundedEvent exists specifically to
+// handle correctly: Stripe refunded the charge before this service got
+// around to crediting it. There is no ledger entry to reverse, so the
+// deposit is marked failed instead of ever being credited.
+func TestStripeWebhookHandler_ChargeRefunded_SucceededNotYetCreditedDeposit(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
 
@@ -154,7 +238,7 @@ func TestStripeWebhookHandler_ChargeRefunded(t *testing.T) {
 
 	dataObject := fmt.Sprintf(`{"id":"ch_%s","object":"charge","payment_intent":%q}`, randomUUIDForTest(t), intentID)
 	payload := stripeEventJSON(eventID, "charge.refunded", dataObject)
-	rec := sendSignedWebhook(t, pool, payload, testWebhookSecret)
+	rec := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -165,11 +249,42 @@ func TestStripeWebhookHandler_ChargeRefunded(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT status, failure_reason FROM deposits WHERE id = $1", depositID).Scan(&status, &failureReason); err != nil {
 		t.Fatalf("query deposit: %v", err)
 	}
-	if status != "succeeded" {
-		t.Errorf("deposit status = %q, want %q (refund doesn't change status — see markDepositRefunded)", status, "succeeded")
+	if status != "failed" {
+		t.Errorf("deposit status = %q, want %q", status, "failed")
 	}
-	if failureReason == nil || *failureReason != "refunded" {
-		t.Errorf("deposit failure_reason = %v, want %q", failureReason, "refunded")
+	if failureReason == nil || *failureReason != "refunded_before_credit" {
+		t.Errorf("deposit failure_reason = %v, want %q", failureReason, "refunded_before_credit")
+	}
+}
+
+// TestStripeWebhookHandler_ChargeRefunded_PendingDepositIsIgnored proves
+// a refund on a deposit that never even reached 'succeeded' (nothing was
+// ever confirmed, let alone credited) is a no-op besides being recorded
+// as processed — there is nothing to reverse or fail.
+func TestStripeWebhookHandler_ChargeRefunded_PendingDepositIsIgnored(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUIDForTest(t)
+	intentID := "pi_" + randomUUIDForTest(t)
+	eventID := "evt_" + randomUUIDForTest(t)
+	depositID := insertDepositWithIntent(t, ctx, pool, accountID, intentID, 5000)
+	cleanupProcessedStripeEvent(t, pool, eventID)
+
+	dataObject := fmt.Sprintf(`{"id":"ch_%s","object":"charge","payment_intent":%q}`, randomUUIDForTest(t), intentID)
+	payload := stripeEventJSON(eventID, "charge.refunded", dataObject)
+	rec := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, "SELECT status FROM deposits WHERE id = $1", depositID).Scan(&status); err != nil {
+		t.Fatalf("query deposit: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("deposit status = %q, want %q (unchanged)", status, "pending")
 	}
 }
 
@@ -179,7 +294,7 @@ func TestStripeWebhookHandler_UnknownEventTypeIsIgnored(t *testing.T) {
 	cleanupProcessedStripeEvent(t, pool, eventID)
 
 	payload := stripeEventJSON(eventID, "customer.created", `{"id":"cus_irrelevant"}`)
-	rec := sendSignedWebhook(t, pool, payload, testWebhookSecret)
+	rec := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (unknown event types must be acknowledged, not retried forever); body=%s", rec.Code, rec.Body.String())
@@ -197,7 +312,7 @@ func TestStripeWebhookHandler_InvalidSignature(t *testing.T) {
 	cleanupProcessedStripeEvent(t, pool, eventID)
 
 	payload := stripeEventJSON(eventID, "payment_intent.succeeded", `{"id":"pi_irrelevant","object":"payment_intent"}`)
-	rec := sendSignedWebhook(t, pool, payload, "whsec_a_completely_different_secret")
+	rec := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, "whsec_a_completely_different_secret")
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -229,7 +344,7 @@ func TestStripeWebhookHandler_DuplicateDeliveryIsNotReprocessed(t *testing.T) {
 
 	payload := stripeEventJSON(eventID, "payment_intent.succeeded", fmt.Sprintf(`{"id":%q,"object":"payment_intent"}`, intentID))
 
-	first := sendSignedWebhook(t, pool, payload, testWebhookSecret)
+	first := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
 	if first.Code != http.StatusOK {
 		t.Fatalf("first delivery: status = %d, want 200; body=%s", first.Code, first.Body.String())
 	}
@@ -241,7 +356,7 @@ func TestStripeWebhookHandler_DuplicateDeliveryIsNotReprocessed(t *testing.T) {
 
 	// A second, real redelivery of the exact same signed bytes — exactly
 	// what Stripe sends on retry.
-	second := sendSignedWebhook(t, pool, payload, testWebhookSecret)
+	second := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
 	if second.Code != http.StatusOK {
 		t.Fatalf("second delivery: status = %d, want 200; body=%s", second.Code, second.Body.String())
 	}
@@ -286,7 +401,7 @@ func TestProcessStripeEvent_ProcessingFailureDoesNotRecordEvent(t *testing.T) {
 	// applyStripeEvent to return an error after the processed_stripe_events
 	// insert already ran.
 	payload := stripeEventJSON(eventID, "payment_intent.succeeded", `{"id":"pi_malformed","object":"payment_intent","amount":"not-a-number"}`)
-	rec := sendSignedWebhook(t, pool, payload, testWebhookSecret)
+	rec := sendSignedWebhook(t, pool, noReverseDepositExpectedLedgerClient(t), payload, testWebhookSecret)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (so Stripe retries)", rec.Code)

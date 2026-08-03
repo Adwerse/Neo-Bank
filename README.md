@@ -213,14 +213,14 @@ curl -s -X POST http://localhost:8080/transfers/ \
 
 ## Stripe-фондированные депозиты (transfers-svc, ledger-svc)
 
-Stripe-депозиты в transfers-svc: две новые таблицы, `ledger-svc.Deposit`,
-`POST /deposits` (создаёт Stripe `PaymentIntent`) и
-`POST /webhooks/stripe` (подтверждает исход платежа по подписанному
-событию от Stripe). Депозит доходит только до `deposits.status =
-'succeeded'` — фактическое зачисление в ledger через
-`ledger-svc.Deposit` из вебхука, и фронтенд, которому нужен
-`client_secret`, — отдельные следующие шаги; `POST /deposits` пока
-внутренний, наружу через Gateway тоже отдельным шагом.
+Stripe-депозиты, целиком: `ledger-svc.Deposit`/`ReverseDeposit`,
+`POST /deposits` (Stripe `PaymentIntent`), `POST /webhooks/stripe`
+(подтверждение), фоновое зачисление succeeded → credited, сверка
+(reconciliation) для трёх видов зависших депозитов, обратные проводки на
+возврат (`charge.refunded`) и симулированный вывод денег
+(`POST /withdrawals`). Из всей саги за пределами этого шага остаётся
+только фронтенд (нужен `client_secret`) и вынос `POST /deposits`/
+`POST /withdrawals` наружу через Gateway.
 
 ### Почему депозиты живут в transfers-svc, а не в новом payments-svc
 
@@ -251,31 +251,45 @@ PaymentIntent. Статусы `succeeded` и `credited` — **сознатель
 (`evt_...`): `PRIMARY KEY` на `event_id` надёжнее, чем полагаться на то,
 что Stripe никогда не пришлёт вебхук дважды.
 
-### `ledger-svc.Deposit` — genesis → счёт пользователя
+### `ledger-svc.Deposit` / `ReverseDeposit` — genesis ↔ счёт пользователя
 
-`Deposit(account_id, amount, reference)` — новый gRPC-метод
-(`proto/ledger/v1/ledger.proto`): genesis-проводка, атомарно списывающая
-`amount` с системного genesis-счёта и зачисляющая его на `account_id` той
-же механикой, что и `ExecuteTransfer` (одна Postgres-транзакция,
-сбалансированная пара `entries` с общим `transaction_id`, инкрементальное
-обновление `account_balances`) — но **отдельной функцией** (`deposit` в
-`ledger.go`), а не веткой внутри `executeTransfer`. Единственное
-поведенческое отличие: здесь **нет проверки достаточности средств** на
-стороне genesis — он по определению обязан уметь уходить в минус (это и
-есть представление денег, входящих в систему извне), тогда как
-`executeTransfer` обязан делать эту проверку для каждого обычного счёта.
-Встраивать genesis-исключение в `executeTransfer` означало бы добавить
-особый случай в функцию, от которой зависит каждый обычный перевод, —
-отдельная функция оставляет `executeTransfer` полностью нетронутым.
+`Deposit(account_id, amount, reference)` (`proto/ledger/v1/ledger.proto`):
+genesis-проводка, атомарно списывающая `amount` с системного
+genesis-счёта и зачисляющая его на `account_id` той же механикой, что и
+`ExecuteTransfer` (одна Postgres-транзакция, сбалансированная пара
+`entries` с общим `transaction_id`, инкрементальное обновление
+`account_balances`). `ReverseDeposit(account_id, amount, reference)` —
+зеркало в обратную сторону (`account_id` → genesis), для возвратов (см.
+ниже). Обе — **отдельные функции**, обёртки над общей
+`postUncheckedTransfer(from, to, amount, reference)` в `ledger.go`, а не
+ветки внутри `executeTransfer`: единственное поведенческое отличие —
+**нет проверки достаточности средств** на стороне, которая уходит в
+минус (genesis — он по определению обязан это уметь, представляя деньги,
+входящие в систему извне; для `ReverseDeposit` — счёт пользователя,
+объяснение ниже). Встраивать это исключение в `executeTransfer` означало
+бы добавить особый случай в функцию, от которой зависит каждый обычный
+перевод, — общая обёртка переиспользует те же `lockLedgerAccount`/
+`applyBalanceDelta`, что и `executeTransfer`, но оставляет саму
+`executeTransfer` полностью нетронутой.
 
-`reference` — необязательный будущий `deposits.id` (UUID), та же роль, что
-и `ExecuteTransferRequest.reference` у переводов (см. «Reconciliation»
-ниже): позволяет будущему обработчику вебхука спросить
-`GetTransactionByReference`, не была ли эта проводка уже проведена, вместо
-повторного зачисления. `Deposit`, как и `ExecuteTransfer`, **не
-идемпотентен сам по себе** — два вызова с одним и тем же `reference` дают
-две отдельные проводки; идемпотентность — ответственность вызывающей
-стороны, как и раньше.
+**Идемпотентны по `reference` — в отличие от `ExecuteTransfer`.**
+`reference` — будущий `deposits.id` (UUID) для `Deposit`, или значение,
+детерминированно выведенное из него, для `ReverseDeposit` (см. ниже
+`reversalReference`). Повторный вызов с уже использованным `reference`
+возвращает существующую проводку, а не создаёт вторую. Это сознательно
+другое поведение, чем у `ExecuteTransfer` (переводы остаются
+неидемпотентными, идемпотентность там — на уровне `transfers.
+idempotency_key` в transfers-svc, отдельным слоем выше): у депозита и его
+возврата такого слоя нет, а вызывающая сторона (фоновый воркер
+зачисления, повторная доставка вебхука `charge.refunded`) закономерно
+может вызвать их больше одного раза для одной и той же логической
+операции. Реализовано через `pg_advisory_xact_lock(hashtext(reference))`
+внутри транзакции: сериализует конкурентные вызовы с одним `reference`,
+затем проверяет `SELECT transaction_id FROM entries WHERE reference = $1`
+и либо возвращает найденное, либо проводит как обычно. Обычный `UNIQUE`
+на `entries.reference` не подошёл бы — `executeTransfer` уже легитимно
+пишет две строки (дебет и кредит) с одинаковым `reference` на одну
+проводку.
 
 Системный genesis-счёт (`00000000-0000-0000-0000-000000000001`) теперь
 детерминированно создаётся миграцией
@@ -393,20 +407,25 @@ transfers-svc` без `.env` (или с закомментированной п�
 environment variable is required`, не долетая даже до подключения к
 Postgres.
 
-### Тесты `ledger.Deposit`
+### Тесты `ledger.Deposit` / `ReverseDeposit`
 
 `services/ledger-svc/ledger_test.go`: `TestDeposit_Success` (целевой счёт
 растёт на `amount`, genesis падает на `amount`, `SUM(entries)` по
 транзакции равен 0), `TestDeposit_InvalidAmount`,
 `TestDeposit_AccountNotFound`, `TestDeposit_WithReference` (`reference`
-находится через `getTransactionByReference` — тот же путь, которым в
-будущем воспользуется сверка Stripe-депозитов),
-`TestDeposit_ReferenceIsNotIdempotencyKey` (два вызова с одним `reference`
-— две разные проводки, то же поведение, что и у `ExecuteTransfer`,
-специально не переизобретается).
+находится через `getTransactionByReference`),
+`TestDeposit_IsIdempotentByReference` (два вызова с одним `reference` —
+одна и та же проводка, а не две),
+`TestDeposit_ConcurrentSameReferenceDoesNotDoublePost` (20 конкурентных
+вызовов с одним `reference` — ровно одна проводка; доказывает, что
+`pg_advisory_xact_lock` действительно сериализует гонку, а не просто
+выглядит корректно при последовательном вызове), `TestReverseDeposit_
+Success`, `TestReverseDeposit_AllowsNegativeBalance` (нет проверки
+баланса — зеркало отсутствия проверки genesis у `Deposit`),
+`TestReverseDeposit_IsIdempotentByReference`.
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
-  go test ./services/ledger-svc/... -run TestDeposit -v
+  go test ./services/ledger-svc/... -run "TestDeposit|TestReverseDeposit" -v
 ```
 
 ### `POST /webhooks/stripe` — подтверждение платежа
@@ -519,8 +538,9 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8084/webhooks/
 настоящим вычислением HMAC-подписи, без единого реального обращения к
 Stripe: `TestStripeWebhookHandler_PaymentIntentSucceeded`,
 `TestStripeWebhookHandler_PaymentIntentPaymentFailed`,
-`TestStripeWebhookHandler_ChargeRefunded`,
-`TestStripeWebhookHandler_UnknownEventTypeIsIgnored`,
+`TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit`/
+`_SucceededNotYetCreditedDeposit`/`_PendingDepositIsIgnored` (см.
+«Возвраты» ниже), `TestStripeWebhookHandler_UnknownEventTypeIsIgnored`,
 `TestStripeWebhookHandler_InvalidSignature` (проверяет и `400`, и
 отсутствие записи в `processed_stripe_events`),
 `TestStripeWebhookHandler_DuplicateDeliveryIsNotReprocessed` (вторая
@@ -531,6 +551,257 @@ Stripe: `TestStripeWebhookHandler_PaymentIntentSucceeded`,
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -run "TestStripeWebhook|TestProcessStripeEvent" -v
+```
+
+### Зачисление: `succeeded` → `credited` — почему фоновый воркер, а не вебхук-хендлер или очередь задач
+
+Вебхук доводит депозит только до `succeeded` — Stripe подтвердил
+списание с карты. Деньги в ledger ещё не зачислены; между этими двумя
+фактами и живёт вся эта сага, а `succeeded`/`credited` разделены как
+раз для того, чтобы это состояние было видимым, а не спрятанным.
+
+Зачисление (`ledger-svc.Deposit`) сознательно не происходит внутри
+`stripeWebhookHandler`: у Stripe есть таймаут на ответ вебхука, а
+кросс-сервисный вызов `ledger-svc` — не то, что стоит держать на пути
+`200 OK`, который и так должен уйти быстро (проверка подписи,
+дедупликация, один `UPDATE` — см. выше).
+
+Выбор стоял между двумя вариантами: фоновым воркером, опрашивающим
+`succeeded`-депозиты, и асинхронной задачей, поставленной обработчиком
+(что потребовало бы очереди задач — инфраструктуры, которой в этом
+репозитории попросту нет). Выбран воркер:
+- Совпадает с уже существующим паттерном этого сервиса — `transfers-svc`
+  уже гоняет `runReconciliationWorker` (`reconcile.go`, тикер каждые 30с)
+  именно для этого класса задач: "перечитать источник истины и привести
+  локальное состояние в соответствие".
+- Не требует новой инфраструктуры (очередь задач, ещё один Kafka-топик
+  для "сделай зачисление") ради единственного нового потребителя.
+- Естественно ретраится: поллер, а не событие "долети один раз" — если
+  зачисление не удалось на этом тике, оно просто повторится на
+  следующем, без отдельной логики ретраев/DLQ, которая уже понадобилась
+  бы очереди задач.
+
+Технически: `creditSucceededDeposits`
+(`services/transfers-svc/deposit_reconcile.go`) теперь вызывается на
+**каждом** тике того же самого воркера, рядом с существующей `reconcileOnce`
+(переводы) — тот же тикер, тот же процесс, две независимые заботы. Это
+буквально «расширение существующего воркера», а не новый воркер рядом.
+Для каждого `succeeded`-депозита: `ledger.Deposit(account_id, amount,
+reference=deposit_id)` (идемпотентен — см. выше, поэтому безопасно
+вызывать на каждом тике для одного и того же депозита, пока он не
+станет `credited`), затем `markDepositCreditedIfSucceeded` — `UPDATE
+... WHERE status = 'succeeded'` + запись `DepositCredited` в outbox, в
+одной транзакции (`services/transfers-svc/deposit.go`), тот же паттерн,
+что и `markTransferCompletedIfPending` для переводов. Условие `WHERE
+status = 'succeeded'` — та же защита от гонки с конкурентным вызовом
+(другая реплика transfers-svc, тот же тик), что и у переводов:
+проигравший просто не находит строку для обновления (`RowsAffected() ==
+0`) и молча уступает.
+
+### `DepositCredited` — событие в outbox и письмо
+
+`UPDATE deposits ... credited` и `INSERT INTO outbox (...,
+'DepositCredited', ...)` — в одной транзакции, тот же паттерн outbox, что
+уже используется для `TransferCompleted`/`Failed`/`Rejected` (см.
+«Outbox» выше). Контракт события —
+`proto/events/v1/deposit_events.proto`.
+
+**Сознательное решение: `DepositCredited` едет по тому же топику
+`transfer.events`**, через ту же таблицу `outbox`, а не по отдельному
+`deposit.events`. Депозит — тот же класс события, что и перевод (деньги
+подтверждённо двинулись), и у `transfer.events` уже есть механизм
+мультиплексирования нескольких типов сообщений через заголовок
+`event_type` — он и добавлен специально для этого (см. секцию про
+`event_type`-заголовок выше). Заводить вторую физическую таблицу outbox,
+второй Kafka-топик, второй relay/cleanup-воркер и второго consumer'а в
+notifications-svc ради одного дополнительного типа события — не
+оправдано для MVP; тот же выбор, что уже сделан для инфраструктуры
+депозитов в целом (см. «Почему депозиты живут в transfers-svc» выше).
+
+notifications-svc подписан на этот же `transfer.events` (никакого нового
+consumer'а не заводилось): `eventTypeDepositCredited = "DepositCredited"`
+добавлен в существующий `processTransferMessage`'s switch
+(`services/notifications-svc/kafka.go`), `handleDepositCredited` — той же
+формы, что и `handleTransferFailed` (один получатель, одно письмо,
+`claimEvent`/`finishTransferEvent` для идемпотентности), `buildDepositCreditedEmail`
+(`email.go`) — письмо "счёт пополнен", **отправленное только при
+`credited`**, не раньше.
+
+### Тесты
+
+`services/transfers-svc/deposit_reconcile_test.go`:
+`TestCreditSucceededDeposits_Success` (статус меняется на `credited`,
+`ledger_transaction_id` заполнен, ровно одна строка `DepositCredited` в
+outbox), `TestCreditSucceededDeposits_LedgerErrorLeavesSucceeded` (сбой
+ledger-svc не портит депозит — он просто остаётся `succeeded` для
+следующего тика).
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/transfers-svc/... -run TestCreditSucceeded -v
+```
+
+### Reconciliation депозитов — три вида зависших
+
+`reconcileDepositsOnce` (`services/transfers-svc/deposit_reconcile.go`)
+расширяет тот же воркер, что уже сверяет переводы (`reconcile.go`, см.
+«Reconciliation: закрываем pending переводы» выше) — три независимые
+категории на каждом тике:
+
+1. **`succeeded` долго не становится `credited`** — не отдельная
+   категория с собственным опросом, а тот же `creditSucceededDeposits` из
+   раздела выше: он и так пытается зачислить каждый `succeeded`-депозит
+   на каждом тике, так что "давно висит" и "только что стал succeeded"
+   обрабатываются идентично, без специального кода для "застрявших".
+2. **`pending` долго без вебхука** (`reconcilePendingDepositsWithIntent`)
+   — у депозита ЕСТЬ `stripe_payment_intent_id` (значит, `createDeposit`
+   успешно создал `PaymentIntent`), но статус не сдвинулся дольше
+   `DEPOSIT_RECONCILE_STALE_AFTER` (по умолчанию 2 минуты, как и у
+   переводов). Вебхук мог потеряться — опрос Stripe напрямую
+   (`PaymentIntent.Retrieve`) стандартная практика: вебхук — быстрый путь,
+   опрос — надёжный fallback. `succeeded`/`canceled` разрешают статус
+   (через `*IfPending`-варианты записи — гонка с настоящим вебхуком,
+   если он всё-таки долетит одновременно, разрешается так же, как и у
+   переводов: конкурентная запись просто не находит строку). Любой
+   другой статус Stripe (`requires_action`, `processing`, ...) оставляет
+   депозит как есть — платёж всё ещё в процессе.
+3. **`pending` без `stripe_payment_intent_id` старше N минут**
+   (`reconcileOrphanedPendingDeposits`) — мусор из шага `POST /deposits`:
+   `createDeposit` упал (или сам вызов Stripe не удался) между `INSERT`
+   и записью `intent_id`. Денег не двигалось ни в одну сторону — просто
+   помечается `failed` (`abandoned_before_payment_intent`), с
+   дополнительной защитой `AND stripe_payment_intent_id IS NULL` — на
+   случай, если исходный (медленный) вызов `createDeposit` всё же
+   дозавершится между чтением и записью реконсиляции.
+
+### Самый важный инвариант: сверка `succeeded` vs `credited`
+
+Ради чего вообще разделены статусы `succeeded` и `credited`: не должно
+существовать депозита, где Stripe списал деньги, а ledger не зачислил, и
+это осталось незамеченным. `creditDeposit`
+(`deposit_reconcile.go`) проверяет это на каждом тике для каждого
+`succeeded`-депозита: если `now() - updated_at` превышает
+`DEPOSIT_RECONCILE_STALE_AFTER`, пишется отдельная, явно помеченная
+строка лога —
+```
+transfers-svc: DIVERGENCE ALERT: deposit <id> has been 'succeeded' ... for over 2m0s without becoming 'credited' ...
+```
+— независимо от исхода попытки зачисления в этом же тике. В реальном
+банке это был бы алерт с пейджингом; здесь наблюдаемый, легко grep'ается
+лог — ровно то, что в реальном банке называют сверкой (reconciliation):
+не просто "почини зависшее", а "докажи, что ничего не разошлось, и
+громко скажи, если разошлось".
+
+### Тесты reconciliation
+
+`services/transfers-svc/deposit_reconcile_test.go`:
+`TestCreditDeposit_LogsDivergenceAlertWhenStale` (перехватывает
+`log.SetOutput` и проверяет, что алерт реально пишется — не просто что
+код для этого существует),
+`TestReconcilePendingDepositsWithIntent_ResolvesToSucceeded`/
+`_ResolvesToFailedOnCanceled`/`_StillInProgressLeftPending`/
+`_RespectsStaleness`, `TestReconcileOrphanedPendingDeposits_MarksFailed`/
+`_RespectsStaleness`.
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/transfers-svc/... -run "TestReconcilePendingDepositsWithIntent|TestReconcileOrphaned|TestCreditDeposit" -v
+```
+
+### Возвраты (`charge.refunded`): обратная проводка, не удаление истории
+
+`ledger` — append-only: исходные `entries` депозита никогда не
+удаляются и не редактируются. Компенсация возврата — это **новая**
+обратная проводка (`account_id` → genesis), а не стирание истории; так
+всегда видно и исходное зачисление, и то, что оно было отменено.
+
+Что именно происходит, зависит от того, докуда депозит успел дойти к
+моменту `charge.refunded` (`processChargeRefundedEvent`,
+`services/transfers-svc/webhook.go`):
+- **`credited`** — деньги уже в ledger-балансе пользователя. Stripe их
+  забрал обратно, значит книги должны это отразить вне зависимости от
+  того, что у пользователя сейчас на балансе (он мог уже потратить эти
+  деньги другими переводами) — `ledger.ReverseDeposit` проводит без
+  проверки баланса, счёт уходит в статус `refunded`.
+- **`succeeded`** (Stripe подтвердил, но зачислить ещё не успели) —
+  реверсировать нечего, зачислять эти деньги уже нельзя: депозит
+  помечается `failed` (`refunded_before_credit`).
+- всё остальное (`pending`, уже `failed`/`refunded`) — нечего делать,
+  просто лог.
+
+**Известное ограничение MVP**: если баланс пользователя уже потрачен
+(например, переведён кому-то ещё) к моменту возврата, `ReverseDeposit`
+всё равно проводит его в минус — реальные банки в этом случае показывают
+отрицательный баланс/долг клиента, что требует полноценной обработки
+(лимиты, взыскание, блокировка), выходящей за рамки этого MVP. Здесь
+это сознательно не решается — только фиксируется как факт.
+
+**Почему ledger-вызов идёт до, а не внутри транзакции дедупликации.**
+`processStripeEvent` для всех остальных типов событий оборачивает
+`INSERT INTO processed_stripe_events` и обновление `deposits` в одну
+транзакцию (см. выше — так retry после сбоя не теряется в ветке
+«дубль»). Для `charge.refunded` это не подходит буквально: вызов
+`ReverseDeposit` — сетевой запрос к ledger-svc, а держать открытую
+Postgres-транзакцию (с локом на строку) на время сетевого вызова —
+плохая практика (задержка или авария ledger-svc превращается в
+удержанный лок в БД). Поэтому здесь порядок другой: `ReverseDeposit`
+(идемпотентен по `reference`, безопасно повторить) выполняется **до**
+любой транзакции, а дедупликация + обновление `deposits.status` — уже
+после, отдельной короткой транзакцией. `reference` для реверса —
+**не** `deposit.ID` (это коллизия с `reference` исходного зачисления в
+идемпотентность-проверке ledger-svc), а `reversalReference(deposit.ID)`
+— детерминированный UUID, выведенный из `deposit.ID` через MD5 (простой
+суффикс-строка не подходит: `entries.reference` типизирован как `uuid`).
+Повторная доставка того же `charge.refunded` безопасна вдвойне: если
+локальная запись в прошлый раз не удалась, `ReverseDeposit` просто
+вернёт ту же проводку повторно; если удалась — статус уже не `credited`,
+и повторный вызов вообще не пытается реверсировать снова (см. тест
+`TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit`).
+
+### Тесты возвратов
+
+`services/transfers-svc/webhook_test.go`:
+`TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit` (реверс через
+фейковый ledger-клиент, `reference` реверса ≠ `deposit.ID`, повторная
+доставка не реверсирует снова),
+`TestStripeWebhookHandler_ChargeRefunded_SucceededNotYetCreditedDeposit`,
+`TestStripeWebhookHandler_ChargeRefunded_PendingDepositIsIgnored`.
+`services/ledger-svc/ledger_test.go`: `TestReverseDeposit_*` (см. выше).
+
+### `POST /withdrawals` — вывод денег, ТОЛЬКО СИМУЛЯЦИЯ
+
+**Настоящий вывод денег на карту/счёт не реализован и не будет реализован
+в этом проекте.** Payout на реальную карту/счёт (Stripe Connect, ACH)
+требует лицензии money transmitter — это регуляторное требование, а не
+техническое; ни один pet-проект не может законно его получить, даже
+работая исключительно в тестовом режиме Stripe.
+
+Что `createWithdrawal` (`services/transfers-svc/withdrawal.go`) делает
+по-настоящему: списывает деньги с internal-баланса пользователя через
+обычный, уже существующий `ledger-svc.ExecuteTransfer` (`account_id` →
+genesis — та же проверка достаточности средств, что и у любого перевода,
+и та же механика, никакого нового кода в ledger-svc для этого не
+понадобилось) и создаёт строку в новой таблице `withdrawals`
+(`services/transfers-svc/migrations/000009`) со статусом
+`payout_simulated`. Ни один вызов Stripe payout API нигде не происходит.
+В отличие от `deposits`, у `withdrawals` нет статуса `pending`: вся
+операция синхронна (обычный gRPC-вызов, а не внешний API с
+асинхронным подтверждением), поэтому строка пишется сразу с финальным
+статусом — `payout_simulated` или `failed` (`insufficient_funds`).
+
+**Это должно быть явно и на фронте**, когда экран для этого появится
+(следующий шаг) — пользователю нельзя дать повод думать, что деньги
+реально ушли на карту.
+
+### Тесты `POST /withdrawals`
+
+`services/transfers-svc/withdrawal_test.go`: `TestCreateWithdrawal_Success`
+(проверяет, что `ExecuteTransfer` вызван `account_id` → genesis, статус
+`payout_simulated`), `TestCreateWithdrawal_InsufficientFunds` (статус
+`failed`, `ledger_transaction_id` не заполнен — деньги никуда не
+двинулись), `TestCreateWithdrawal_InvalidAmount`,
+`TestCreateWithdrawal_AccountNotActive`.
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/transfers-svc/... -run TestCreateWithdrawal -v
 ```
 
 ## fraud-svc: подключение к Postgres, схема

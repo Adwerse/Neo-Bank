@@ -83,11 +83,19 @@ const kafkaHealthProbeTimeout = 5 * time.Second
 const eventTypeHeader = "event_type"
 
 // The event_type values transfers-svc writes into its outbox rows, which
-// the relay copies verbatim onto the header.
+// the relay copies verbatim onto the header. DepositCredited shares this
+// same outbox table and transfer.events topic as the three transfer
+// events — deposits and transfers are both money-movement events with
+// external uncertainty that transfers-svc already has the outbox/relay
+// infrastructure for, and multiplexing one more type over the existing
+// header-discriminated topic avoids standing up a second physical outbox
+// table, Kafka topic, relay, and consumer goroutine for a single event
+// type (see transfers-svc's README for the fuller reasoning).
 const (
 	eventTypeTransferCompleted = "TransferCompleted"
 	eventTypeTransferFailed    = "TransferFailed"
 	eventTypeTransferRejected  = "TransferRejected"
+	eventTypeDepositCredited   = "DepositCredited"
 )
 
 // newProjectionReader and newNotificationReader differ in exactly one
@@ -458,6 +466,13 @@ func processTransferMessage(ctx context.Context, pool *pgxpool.Pool, smtpAddr, s
 		}
 		return event.GetEventId(), eventType, handleTransferRejected(ctx, pool, smtpAddr, smtpFrom, &event)
 
+	case eventTypeDepositCredited:
+		var event eventsv1.DepositCredited
+		if err := proto.Unmarshal(msg.Value, &event); err != nil {
+			return "", eventType, fmt.Errorf("unmarshal %s at offset %d: %w", eventType, msg.Offset, err)
+		}
+		return event.GetEventId(), eventType, handleDepositCredited(ctx, pool, smtpAddr, smtpFrom, &event)
+
 	case "":
 		// Published before the relay started stamping the header. An old
 		// message will never grow one, so this is structurally poison —
@@ -723,6 +738,43 @@ func handleTransferRejected(ctx context.Context, pool *pgxpool.Pool, smtpAddr, s
 		sent++
 	} else {
 		log.Printf("notifications-svc: event %s: no contact for sender account %s, no transfer-declined email", eventID, event.GetSenderAccountId())
+	}
+
+	return finishTransferEvent(ctx, pool, eventID, sent)
+}
+
+// handleDepositCredited mails the depositor once their Stripe-funded
+// top-up has actually landed in their ledger balance — deliberately not
+// any earlier: this event is published only when deposits.status reaches
+// 'credited' (transfers-svc/deposit_reconcile.go), not at 'succeeded'
+// (Stripe confirmed the charge, but the money isn't reflected in the
+// user's balance yet). Same single-recipient shape as
+// handleTransferFailed/handleTransferRejected — a deposit has no
+// counterparty to also notify.
+func handleDepositCredited(ctx context.Context, pool *pgxpool.Pool, smtpAddr, smtpFrom string, event *eventsv1.DepositCredited) error {
+	eventID := event.GetEventId()
+	claimed, err := claimEvent(ctx, pool, eventID)
+	if err != nil {
+		return fmt.Errorf("claim event %s: %w", eventID, err)
+	}
+	if !claimed {
+		log.Printf("notifications-svc: event %s already handled, skipping (redelivery)", eventID)
+		return nil
+	}
+
+	contact, found, err := waitForContactByAccountID(ctx, pool, event.GetAccountId())
+	if err != nil {
+		return fmt.Errorf("look up contact for event %s: %w", eventID, err)
+	}
+	sent := 0
+	if found {
+		m := buildDepositCreditedEmail(event.GetAmount(), event.GetDepositId(), eventTime(event.GetOccurredAt()))
+		if err := sendEmailWithRetry(smtpAddr, smtpFrom, contact.Email, m); err != nil {
+			return fmt.Errorf("send deposit-credited email for event %s: %w", eventID, err)
+		}
+		sent++
+	} else {
+		log.Printf("notifications-svc: event %s: no contact for account %s, no deposit-credited email", eventID, event.GetAccountId())
 	}
 
 	return finishTransferEvent(ctx, pool, eventID, sent)

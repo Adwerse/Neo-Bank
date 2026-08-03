@@ -31,8 +31,22 @@ service LedgerService {
   // counterpart of an external, Stripe-funded top-up. Unlike
   // ExecuteTransfer, there is no insufficient-funds outcome — genesis is
   // allowed to go arbitrarily negative by design, representing money
-  // entering the system from outside.
+  // entering the system from outside. Idempotent on reference: a repeat
+  // call with a reference that already has an entry returns that entry's
+  // transaction_id instead of posting a second one — unlike
+  // ExecuteTransfer, which is not idempotent, because Deposit's callers
+  // (transfers-svc's crediting worker, in particular) can genuinely be
+  // invoked more than once for the same logical deposit with no
+  // idempotency-key layer of their own above this call to catch it.
   rpc Deposit(DepositRequest) returns (DepositResponse);
+  // ReverseDeposit posts the opposite of Deposit: account_id -> genesis,
+  // for compensating a deposit that was credited and then refunded in
+  // Stripe. Also has no insufficient-funds outcome, deliberately — the
+  // refund already happened in Stripe regardless of what account_id
+  // currently holds in-ledger, so the books must reflect it even if that
+  // leaves account_id negative (a known MVP limitation, see README). Same
+  // idempotency-on-reference contract as Deposit.
+  rpc ReverseDeposit(DepositRequest) returns (DepositResponse);
 }
 
 message GetBalanceRequest {
@@ -96,12 +110,17 @@ message CreateLedgerAccountResponse {
   google.protobuf.Timestamp created_at = 2;
 }
 
+// DepositRequest is shared by Deposit and ReverseDeposit — account_id is
+// the account credited by Deposit, or debited by ReverseDeposit.
 message DepositRequest {
   string account_id = 1;
   int64 amount = 2;
-  // Same role as ExecuteTransferRequest.reference — intended to carry the
-  // future deposits.id, so a caller can later ask
-  // GetTransactionByReference whether a deposit was already posted.
+  // Unlike ExecuteTransferRequest.reference (an optional correlation id),
+  // this is also the idempotency key: see Deposit/ReverseDeposit's doc
+  // comments. Intended to carry the transfers-svc deposits.id (Deposit)
+  // or a value deterministically derived from it (ReverseDeposit, so a
+  // reversal doesn't collide with its own deposit's original credit
+  // reference).
   string reference = 3;
 }
 

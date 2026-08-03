@@ -334,10 +334,10 @@ func executeTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toA
 // existing pattern in those two files, not a new problem introduced here.
 const genesisAccountID = "00000000-0000-0000-0000-000000000001"
 
-// depositOutcome distinguishes the business-level results of deposit,
-// mirroring transferOutcome. There is deliberately no
-// depositInsufficientFunds: genesis is allowed to go arbitrarily negative
-// by design — see the doc comment on deposit.
+// depositOutcome distinguishes the business-level results of deposit and
+// reverseDeposit, mirroring transferOutcome. There is deliberately no
+// insufficient-funds outcome: postUncheckedTransfer never checks either
+// side's balance — see its doc comment.
 type depositOutcome int
 
 const (
@@ -351,29 +351,63 @@ const (
 // top-up. Money entering the system from outside is represented as
 // genesis's balance going negative by exactly amount, the standard
 // double-entry treatment of issuance (the same principle cmd/seed and
-// cmd/devtopup already apply by hand via direct SQL).
-//
-// deposit shares its locking and balanced-entries mechanics with
+// cmd/devtopup already apply by hand via direct SQL). See
+// postUncheckedTransfer for the shared mechanics and idempotency
+// contract.
+func deposit(ctx context.Context, pool *pgxpool.Pool, toAccountID string, amount int64, reference string) (transactionID string, outcome depositOutcome, err error) {
+	return postUncheckedTransfer(ctx, pool, genesisAccountID, toAccountID, amount, reference)
+}
+
+// reverseDeposit atomically debits amount from fromAccountID back to the
+// genesis account — the ledger-side counterpart of a Stripe refund on a
+// deposit that was already credited. Unlike a normal withdrawal
+// (ExecuteTransfer, which enforces the source account can't go negative),
+// this deliberately does NOT check fromAccountID's balance: Stripe has
+// already taken the money back regardless of what the user currently
+// holds in-ledger (they may have already spent it via other transfers),
+// and the books must reflect that external fact. A user account going
+// negative as a result is a known, accepted MVP limitation — see README —
+// not a bug; a real bank's equivalent is the customer owing a debt, which
+// is out of scope here. See postUncheckedTransfer for the shared
+// mechanics and idempotency contract.
+func reverseDeposit(ctx context.Context, pool *pgxpool.Pool, fromAccountID string, amount int64, reference string) (transactionID string, outcome depositOutcome, err error) {
+	return postUncheckedTransfer(ctx, pool, fromAccountID, genesisAccountID, amount, reference)
+}
+
+// postUncheckedTransfer atomically posts amount from fromAccountID to
+// toAccountID, sharing its locking and balanced-entries mechanics with
 // executeTransfer (lockLedgerAccount, applyBalanceDelta, one Postgres
 // transaction, a debit/credit pair sharing one transaction_id, the same
-// reference-nil-if-empty handling) but is a separate function rather than
-// a code path through executeTransfer, for one deliberate reason:
+// reference-nil-if-empty handling) but, unlike executeTransfer, never
+// checks either side's balance. It exists as a separate function rather
+// than a code path through executeTransfer for one deliberate reason:
 // executeTransfer unconditionally enforces "fromAccountID's balance must
-// cover amount", and genesis is specifically exempt from that rule.
-// Bolting a genesis-specific exemption onto executeTransfer would add a
-// special case to the one function every ordinary transfer depends on —
-// keeping deposit standalone leaves executeTransfer's tested behavior
-// completely unchanged.
+// cover amount", and both of this function's two callers (deposit,
+// reverseDeposit) need that check skipped for their own distinct reasons.
+// Bolting either exemption onto executeTransfer would add a special case
+// to the one function every ordinary transfer depends on — keeping this
+// standalone leaves executeTransfer's tested behavior completely
+// unchanged.
 //
-// reference is intended to carry the future deposits.id (a UUID), so a
-// caller can later ask GetTransactionByReference "did I already post this
-// deposit" — the same pattern ExecuteTransferRequest.reference already
-// supports for transfers reconciliation. Like executeTransfer, deposit is
-// not itself idempotent on reference: two calls with the same reference
-// post two separate transactions. Idempotency is the caller's
-// responsibility (check GetTransactionByReference first), exactly as it
-// already is for transfers.
-func deposit(ctx context.Context, pool *pgxpool.Pool, toAccountID string, amount int64, reference string) (transactionID string, outcome depositOutcome, err error) {
+// Idempotent on reference, unlike executeTransfer: if an entry already
+// exists for reference, that entry's transaction_id is returned instead
+// of posting a second one. This matters here in a way it doesn't for
+// executeTransfer, because both callers can genuinely be invoked more
+// than once for the same logical operation — deposit by transfers-svc's
+// crediting worker retrying a 'succeeded' deposit it hasn't yet observed
+// as 'credited' locally, reverseDeposit by a redelivered charge.refunded
+// webhook — and unlike a transfer (which has its own idempotency-key
+// table one layer up, in transfers-svc's own transfers table), a deposit
+// or reversal has no such layer above ledger-svc protecting it from a
+// duplicate post. Concurrent calls sharing the same reference are
+// serialized via a transaction-scoped advisory lock keyed on reference
+// (auto-released at commit or rollback), so the check-then-insert below
+// can't race two callers past it at once — reference has no unique
+// database constraint to fall back on, since executeTransfer already
+// legitimately writes two entries (debit and credit) sharing one
+// reference value, so a naive UNIQUE constraint on the column isn't
+// viable.
+func postUncheckedTransfer(ctx context.Context, pool *pgxpool.Pool, fromAccountID, toAccountID string, amount int64, reference string) (transactionID string, outcome depositOutcome, err error) {
 	if amount <= 0 {
 		return "", depositInvalidAmount, nil
 	}
@@ -392,13 +426,31 @@ func deposit(ctx context.Context, pool *pgxpool.Pool, toAccountID string, amount
 	}
 	defer tx.Rollback(ctx)
 
+	if reference != "" {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", reference); err != nil {
+			return "", 0, fmt.Errorf("acquire idempotency lock for reference %s: %w", reference, err)
+		}
+		var existingTransactionID string
+		err := tx.QueryRow(ctx, "SELECT transaction_id FROM entries WHERE reference = $1 LIMIT 1", reference).Scan(&existingTransactionID)
+		if err == nil {
+			// Idempotent replay: a transaction for this reference already
+			// exists (from an earlier, possibly-interrupted call), so
+			// return it as-is rather than posting a second one. tx is
+			// rolled back via defer — nothing was written this call.
+			return existingTransactionID, depositOK, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, fmt.Errorf("check existing entry for reference %s: %w", reference, err)
+		}
+	}
+
 	// Lock in the same deterministic ascending-account_id order as
-	// executeTransfer, so a deposit can never deadlock against a
-	// concurrent executeTransfer or deposit call that also touches
-	// genesis and toAccountID.
-	first, second := genesisAccountID, toAccountID
-	if strings.ToLower(toAccountID) < strings.ToLower(genesisAccountID) {
-		first, second = toAccountID, genesisAccountID
+	// executeTransfer, so this can never deadlock against a concurrent
+	// executeTransfer/deposit/reverseDeposit call that also touches these
+	// two accounts.
+	first, second := fromAccountID, toAccountID
+	if strings.ToLower(toAccountID) < strings.ToLower(fromAccountID) {
+		first, second = toAccountID, fromAccountID
 	}
 
 	locked := make(map[string]string, 2) // account_id -> ledger_accounts.id
@@ -408,35 +460,26 @@ func deposit(ctx context.Context, pool *pgxpool.Pool, toAccountID string, amount
 			return "", 0, lockErr
 		}
 		if !found {
-			if accountID == genesisAccountID {
-				// Should never happen once migration 000005 has run;
-				// handled defensively rather than assumed. This is a
-				// genuine infra failure, not a business outcome — the
-				// caller can't do anything about a missing genesis row.
-				return "", 0, fmt.Errorf("genesis ledger account (account_id=%s) not found — has migration 000005_create_genesis_ledger_account run?", genesisAccountID)
-			}
-			// toAccountID not existing is the one expected, reachable
-			// not-found case.
 			return "", depositAccountNotFound, nil
 		}
 		locked[accountID] = ledgerAccountID
 	}
-	genesisLedgerAccountID := locked[genesisAccountID]
+	fromLedgerAccountID := locked[fromAccountID]
 	toLedgerAccountID := locked[toAccountID]
 
 	// Deliberately no balance check here — the one behavioral difference
-	// from executeTransfer. Genesis is allowed to go arbitrarily negative:
-	// it represents money entering the system from outside, not a real
-	// user's funds that could ever be overdrawn.
+	// from executeTransfer. Callers (deposit, reverseDeposit) each have
+	// their own reason fromAccountID is allowed to go arbitrarily
+	// negative; see their doc comments.
 
 	err = tx.QueryRow(ctx,
 		`INSERT INTO entries (transaction_id, ledger_account_id, amount, reference)
 		 VALUES (gen_random_uuid(), $1, $2, $3)
 		 RETURNING transaction_id`,
-		genesisLedgerAccountID, -amount, referenceParam,
+		fromLedgerAccountID, -amount, referenceParam,
 	).Scan(&transactionID)
 	if err != nil {
-		return "", 0, fmt.Errorf("insert genesis debit entry: %w", err)
+		return "", 0, fmt.Errorf("insert debit entry: %w", err)
 	}
 
 	_, err = tx.Exec(ctx,
@@ -447,7 +490,7 @@ func deposit(ctx context.Context, pool *pgxpool.Pool, toAccountID string, amount
 		return "", 0, fmt.Errorf("insert credit entry: %w", err)
 	}
 
-	if err := applyBalanceDelta(ctx, tx, genesisLedgerAccountID, -amount); err != nil {
+	if err := applyBalanceDelta(ctx, tx, fromLedgerAccountID, -amount); err != nil {
 		return "", 0, err
 	}
 	if err := applyBalanceDelta(ctx, tx, toLedgerAccountID, amount); err != nil {
@@ -455,7 +498,7 @@ func deposit(ctx context.Context, pool *pgxpool.Pool, toAccountID string, amount
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return "", 0, fmt.Errorf("commit deposit: %w", err)
+		return "", 0, fmt.Errorf("commit transfer: %w", err)
 	}
 	return transactionID, depositOK, nil
 }

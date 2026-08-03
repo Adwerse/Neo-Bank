@@ -80,14 +80,16 @@ func TestEventTypeHeader_MatchesProducer(t *testing.T) {
 
 // TestEventTypeConstants_MatchOutboxEventTypes pins the routing values
 // against the event_type strings transfers-svc writes into its outbox
-// rows (services/transfers-svc/transfer.go). A drift here routes every
-// transfer event to the "unknown event_type" branch, which commits and
-// logs — i.e. emails stop with no error anywhere.
+// rows (services/transfers-svc/transfer.go, deposit.go). A drift here
+// routes every transfer or deposit event to the "unknown event_type"
+// branch, which commits and logs — i.e. emails stop with no error
+// anywhere.
 func TestEventTypeConstants_MatchOutboxEventTypes(t *testing.T) {
 	for _, tt := range []struct{ got, want string }{
 		{eventTypeTransferCompleted, "TransferCompleted"},
 		{eventTypeTransferFailed, "TransferFailed"},
 		{eventTypeTransferRejected, "TransferRejected"},
+		{eventTypeDepositCredited, "DepositCredited"},
 	} {
 		if tt.got != tt.want {
 			t.Errorf("event type constant = %q, want %q", tt.got, tt.want)

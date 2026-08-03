@@ -220,6 +220,58 @@ func createDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 	}
 }
 
+type createWithdrawalRequest struct {
+	Amount int64 `json:"amount"`
+}
+
+// createWithdrawalHandler is registered at "POST /withdrawals" — a
+// SIMULATION, not a real payout; see createWithdrawal's doc comment
+// (withdrawal.go) and README. account_id is always the authenticated
+// caller's own account, same reasoning as every other handler in this
+// file.
+func createWithdrawalHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, ledgerClient ledgerv1.LedgerServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if accountID == "" {
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		}
+
+		var req createWithdrawalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		withdrawal, outcome, err := createWithdrawal(r.Context(), pool, accountsClient, ledgerClient, accountID, req.Amount)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		switch outcome {
+		case createWithdrawalInvalidAmount:
+			writeJSONError(w, http.StatusBadRequest, "invalid amount")
+			return
+		case createWithdrawalAccountNotActive:
+			writeJSONError(w, http.StatusConflict, "account is not active")
+			return
+		}
+
+		// 201 for both payout_simulated and failed (insufficient funds) —
+		// the withdrawal attempt was recorded either way, same convention
+		// as createTransferHandler: the JSON body's status field carries
+		// the actual news, not the HTTP status code.
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(withdrawal)
+	}
+}
+
 // transferHistoryEntry enriches a raw Transfer with which side of it
 // accountID was on and the counterparty's human-readable account_number —
 // the recipient was always identified by account_number throughout this
