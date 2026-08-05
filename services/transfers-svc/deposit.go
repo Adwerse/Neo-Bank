@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stripe/stripe-go/v86"
 	"google.golang.org/protobuf/proto"
@@ -378,6 +379,37 @@ func getDepositByStripePaymentIntentID(ctx context.Context, pool *pgxpool.Pool, 
 	}
 	if err != nil {
 		return Deposit{}, false, fmt.Errorf("get deposit by stripe_payment_intent_id: %w", err)
+	}
+	return d, true, nil
+}
+
+// getDepositByID looks up a deposit by its own id — getDepositHandler's
+// lookup for GET /deposits/{id}, which the frontend polls after creating a
+// deposit to learn when Stripe confirmed it (succeeded) and, separately,
+// when the ledger actually reflects it (credited). Ownership is NOT
+// checked here (see getDepositHandler for why that check belongs at the
+// HTTP layer, alongside the other account-not-found/not-owned handling).
+//
+// A malformed id (not a UUID at all — this one, unlike every other lookup
+// in this file, takes an untrusted URL path segment) is treated as
+// not-found rather than a 500, same reasoning and same SQLSTATE
+// (invalidTextRepresentation, defined in transfer.go) as accounts-svc's
+// isNotFoundErr.
+func getDepositByID(ctx context.Context, pool *pgxpool.Pool, id string) (Deposit, bool, error) {
+	var d Deposit
+	err := scanDeposit(pool.QueryRow(ctx,
+		`SELECT `+depositColumns+` FROM deposits WHERE id = $1`,
+		id,
+	), &d)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Deposit{}, false, nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == invalidTextRepresentation {
+		return Deposit{}, false, nil
+	}
+	if err != nil {
+		return Deposit{}, false, fmt.Errorf("get deposit by id: %w", err)
 	}
 	return d, true, nil
 }

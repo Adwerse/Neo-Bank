@@ -1141,13 +1141,25 @@ func TestListTransfersHandler_BatchResolvesCounterpartiesOnce(t *testing.T) {
 	if len(resp.Transfers) != 3 {
 		t.Fatalf("len(resp.Transfers) = %d, want 3", len(resp.Transfers))
 	}
+	// historyEntry (history.go) no longer carries RecipientAccountID —
+	// only Transfer itself does — so the expected counterparty is looked
+	// up by amount instead, which is unique per transfer in this test
+	// (1000 -> accountB, 2000 -> accountC, 3000 -> accountB).
+	wantCounterpartyByAmount := map[int64]string{
+		1000: accountNumbers[accountB],
+		2000: accountNumbers[accountC],
+		3000: accountNumbers[accountB],
+	}
 	for _, entry := range resp.Transfers {
+		if entry.Type != "transfer" {
+			t.Errorf("transfer %s type = %q, want %q", entry.ID, entry.Type, "transfer")
+		}
 		if entry.Direction != "outgoing" {
 			t.Errorf("transfer %s direction = %q, want %q", entry.ID, entry.Direction, "outgoing")
 		}
-		want := accountNumbers[entry.RecipientAccountID]
+		want := wantCounterpartyByAmount[entry.Amount]
 		if entry.CounterpartyAccountNumber != want {
-			t.Errorf("transfer %s counterparty_account_number = %q, want %q", entry.ID, entry.CounterpartyAccountNumber, want)
+			t.Errorf("transfer %s (amount=%d) counterparty_account_number = %q, want %q", entry.ID, entry.Amount, entry.CounterpartyAccountNumber, want)
 		}
 	}
 }

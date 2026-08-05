@@ -220,6 +220,47 @@ func createDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 	}
 }
 
+// getDepositHandler is registered at "GET /deposits/{id}" — polled by the
+// frontend after creating a deposit to learn its status: 'succeeded' means
+// Stripe confirmed the card charge, 'credited' means the ledger balance
+// actually reflects it (see deposit_reconcile.go). A client-side
+// confirmPayment success only ever tells the frontend the former; this
+// endpoint is the only honest source for the latter.
+//
+// Returns 404 for both "no such deposit" and "this deposit belongs to a
+// different account" — same non-distinguishing treatment as everywhere
+// else in this codebase (e.g. createTransferHandler's recipient lookup)
+// so a client can never use this endpoint to probe which deposit ids
+// exist for someone else's account.
+func getDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if accountID == "" {
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		}
+
+		deposit, found, err := getDepositByID(r.Context(), pool, r.PathValue("id"))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if !found || deposit.AccountID != accountID {
+			writeJSONError(w, http.StatusNotFound, "deposit not found")
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(deposit)
+	}
+}
+
 type createWithdrawalRequest struct {
 	Amount int64 `json:"amount"`
 }
@@ -272,28 +313,23 @@ func createWithdrawalHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accou
 	}
 }
 
-// transferHistoryEntry enriches a raw Transfer with which side of it
-// accountID was on and the counterparty's human-readable account_number —
-// the recipient was always identified by account_number throughout this
-// project, so history should show that too, not a bare account_id UUID.
-type transferHistoryEntry struct {
-	Transfer
-	Direction                 string `json:"direction"` // "outgoing" | "incoming"
-	CounterpartyAccountNumber string `json:"counterparty_account_number"`
-}
-
 // listTransfersResponse is the GET /transfers envelope: a page of entries
 // plus an opaque cursor for the next page. NextCursor is omitted once
 // there's nothing more to fetch.
 type listTransfersResponse struct {
-	Transfers  []transferHistoryEntry `json:"transfers"`
-	NextCursor *string                `json:"next_cursor,omitempty"`
+	Transfers  []historyEntry `json:"transfers"`
+	NextCursor *string        `json:"next_cursor,omitempty"`
 }
 
 // listTransfersHandler is registered at "GET /" (external GET /transfers).
+// Despite the name/path, the response is the caller's UNIFIED operations
+// feed — transfers, deposits, and withdrawals interleaved by time (see
+// getOperationHistoryPage, history.go) — not transfers alone; history.go's
+// historyEntry doc comment explains why the name stayed as-is.
+//
 // Pagination is cursor-based (?cursor=, an opaque token from a prior
 // response's next_cursor) rather than offset-based: an offset shifts and
-// duplicates rows as new transfers are inserted between page requests on a
+// duplicates rows as new entries are inserted between page requests on a
 // growing history, which a keyset cursor over (created_at, id) doesn't.
 // limit is still defaulted/clamped rather than rejected — it's just a
 // page-size preference, not a security-sensitive input; a malformed
@@ -318,7 +354,7 @@ func listTransfersHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 			return
 		}
 
-		transfers, hasMore, err := getTransferHistoryPage(r.Context(), pool, accountID, limit, cursor)
+		entries, hasMore, err := getOperationHistoryPage(r.Context(), pool, accountsClient, accountID, limit, cursor)
 		if err != nil {
 			if errors.Is(err, errInvalidCursor) {
 				writeJSONError(w, http.StatusBadRequest, "invalid cursor")
@@ -328,51 +364,9 @@ func listTransfersHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 			return
 		}
 
-		// Collect every unique counterparty for this page and resolve all
-		// of them in a single batch RPC — one call per request, not one
-		// call per counterparty.
-		counterpartyIDSet := make(map[string]struct{}, len(transfers))
-		for _, t := range transfers {
-			if t.SenderAccountID == accountID {
-				counterpartyIDSet[t.RecipientAccountID] = struct{}{}
-			} else {
-				counterpartyIDSet[t.SenderAccountID] = struct{}{}
-			}
-		}
-		counterpartyIDs := make([]string, 0, len(counterpartyIDSet))
-		for id := range counterpartyIDSet {
-			counterpartyIDs = append(counterpartyIDs, id)
-		}
-
-		accountNumbers := map[string]string{}
-		if len(counterpartyIDs) > 0 {
-			resolved, err := accountsClient.ResolveAccountsByIds(r.Context(), &accountsv1.ResolveAccountsByIdsRequest{AccountIds: counterpartyIDs})
-			if err != nil {
-				writeJSONError(w, http.StatusInternalServerError, "failed to process request")
-				return
-			}
-			for _, acc := range resolved.GetAccounts() {
-				accountNumbers[acc.GetAccountId()] = acc.GetAccountNumber()
-			}
-		}
-
-		entries := make([]transferHistoryEntry, 0, len(transfers))
-		for _, t := range transfers {
-			entry := transferHistoryEntry{Transfer: t}
-			counterpartyID := t.RecipientAccountID
-			if t.SenderAccountID == accountID {
-				entry.Direction = "outgoing"
-			} else {
-				entry.Direction = "incoming"
-				counterpartyID = t.SenderAccountID
-			}
-			entry.CounterpartyAccountNumber = accountNumbers[counterpartyID]
-			entries = append(entries, entry)
-		}
-
 		resp := listTransfersResponse{Transfers: entries}
-		if hasMore && len(transfers) > 0 {
-			last := transfers[len(transfers)-1]
+		if hasMore && len(entries) > 0 {
+			last := entries[len(entries)-1]
 			next := encodeCursor(pageCursor{CreatedAt: last.CreatedAt, ID: last.ID})
 			resp.NextCursor = &next
 		}

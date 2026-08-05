@@ -191,6 +191,7 @@ func main() {
 	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, fraudClient, ledgerClient))
 	mux.HandleFunc("GET /", listTransfersHandler(pool, accountsClient))
 	mux.HandleFunc("POST /deposits", createDepositHandler(pool, accountsClient, stripeClient.V1PaymentIntents))
+	mux.HandleFunc("GET /deposits/{id}", getDepositHandler(pool, accountsClient))
 	mux.HandleFunc("POST /webhooks/stripe", stripeWebhookHandler(pool, ledgerClient, stripeWebhookSecret))
 	mux.HandleFunc("POST /withdrawals", createWithdrawalHandler(pool, accountsClient, ledgerClient))
 
