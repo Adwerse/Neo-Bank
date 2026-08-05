@@ -3,7 +3,12 @@ import type { paths } from '../../shared/api-client/schema'
 
 type CreateTransferBody = paths['/transfers']['post']['requestBody']['content']['application/json']
 type TransferResult = paths['/transfers']['post']['responses']['201']['content']['application/json']
-type TransferHistoryEntry = paths['/transfers']['get']['responses']['200']['content']['application/json'][number]
+type TransferHistoryPage = paths['/transfers']['get']['responses']['200']['content']['application/json']
+// GET /transfers is the caller's UNIFIED operations feed (transfers,
+// deposits, and withdrawals interleaved by time, each tagged with `type`)
+// despite the name — see services/transfers-svc/history.go's historyEntry
+// doc comment for why the endpoint/field name stayed as-is.
+type OperationHistoryEntry = TransferHistoryPage['transfers'][number]
 
 // The trailing slash on '/transfers/' is load-bearing: gateway/proxy.go
 // mounts this route as a subtree pattern ("/transfers/"), and every OTHER
@@ -26,12 +31,18 @@ export function createTransfer(body: CreateTransferBody, idempotencyKey: string)
   })
 }
 
-export function listTransfers(params?: { limit?: number; offset?: number }): Promise<TransferHistoryEntry[]> {
+// listTransfers unwraps the {transfers, next_cursor} envelope into a bare
+// array — no "load more" UI consumes next_cursor yet (this repo's history
+// view only ever fetches the first page), so it's dropped here rather
+// than plumbed through unused. cursor (not offset — the backend only ever
+// supported cursor-based pagination; there never was a working `offset`
+// query param) is accepted for that same future "load more" case.
+export function listTransfers(params?: { limit?: number; cursor?: string }): Promise<OperationHistoryEntry[]> {
   const query = new URLSearchParams()
   if (params?.limit) query.set('limit', String(params.limit))
-  if (params?.offset) query.set('offset', String(params.offset))
+  if (params?.cursor) query.set('cursor', params.cursor)
   const qs = query.toString()
-  return request<TransferHistoryEntry[]>(`/transfers/${qs ? `?${qs}` : ''}`)
+  return request<TransferHistoryPage>(`/transfers/${qs ? `?${qs}` : ''}`).then((page) => page.transfers)
 }
 
-export type { TransferResult, TransferHistoryEntry }
+export type { TransferResult, OperationHistoryEntry }

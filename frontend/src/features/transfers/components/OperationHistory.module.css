@@ -9,8 +9,9 @@
 
 .row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   grid-template-rows: auto auto;
+  align-items: baseline;
   gap: 0 var(--space-3);
   padding: var(--space-2) 0;
   border-bottom: 1px solid var(--color-border);
@@ -20,12 +21,22 @@
   border-bottom: none;
 }
 
-.amountSent {
+.typeBadge {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.simulationTag {
+  font-style: italic;
+}
+
+.amountOut {
   font-weight: 600;
   color: var(--color-danger);
 }
 
-.amountReceived {
+.amountIn {
   font-weight: 600;
   color: var(--color-success);
 }

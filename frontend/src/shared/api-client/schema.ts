@@ -175,6 +175,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/deposits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a Stripe-funded top-up: creates a pending deposit and a matching Stripe PaymentIntent, returning its client_secret for Stripe.js/Elements to confirm directly with Stripe. account_id is never taken from the request body — it's derived from the bearer token. A successful client-side confirmPayment does NOT mean the deposit is credited yet — see GET /deposits/{id}. */
+        post: operations["createDeposit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deposits/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Poll a deposit's status. 'succeeded' means Stripe confirmed the card charge; it does NOT mean the balance moved yet. 'credited' is the only status that means the ledger actually reflects it — the frontend must poll until 'credited' (or 'failed'), never stop at 'succeeded'. */
+        get: operations["getDeposit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -291,10 +325,72 @@ export interface components {
             /** @description Only present when the outcome is uncertain (202) — e.g. "transfer status unknown, still processing". */
             message?: string;
         };
-        TransferHistoryEntry: components["schemas"]["Transfer"] & {
+        CreateDepositRequest: {
+            /**
+             * Format: int64
+             * @description Minor units (cents). Bounded server-side to €0.50–€10,000.00 (services/transfers-svc/deposit.go's depositMinAmount/ depositMaxAmount).
+             */
+            amount: number;
+        };
+        CreateDepositResponse: {
+            /** Format: uuid */
+            deposit_id: string;
+            /** @description Stripe PaymentIntent client_secret — hand this to Stripe.js/Elements to confirm the payment directly with Stripe. Never reuse across a retry after a decline: a new attempt means a new POST /deposits call and a new client_secret. */
+            client_secret: string;
+        };
+        Deposit: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            account_id: string;
+            /** Format: int64 */
+            amount: number;
+            /** @example eur */
+            currency: string;
+            /**
+             * @description 'succeeded' means Stripe confirmed the card charge only. 'credited' means the ledger balance actually reflects it — the status pollers must wait for. 'refunded' is only reachable from 'credited' (a charge.refunded event after this service already credited it); a poller that hasn't already stopped at 'credited' should treat 'refunded' as terminal too.
+             * @enum {string}
+             */
+            status: "pending" | "succeeded" | "credited" | "failed" | "refunded";
+            stripe_payment_intent_id?: string;
+            /** Format: uuid */
+            ledger_transaction_id?: string;
+            failure_reason?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description Despite the name (kept for compatibility with the /transfers path and this field's existing key), this is the caller's UNIFIED operations feed — transfers, deposits, and withdrawals interleaved newest-first — not transfers alone. See services/transfers-svc/history.go's historyEntry doc comment. */
+        TransferHistoryPage: {
+            transfers: components["schemas"]["TransferHistoryEntry"][];
+            /** @description Pass as ?cursor= on the next request. Absent when there are no more pages. */
+            next_cursor?: string;
+        };
+        TransferHistoryEntry: {
             /** @enum {string} */
-            direction: "sent" | "received";
-            counterparty_account_number: string;
+            type: "transfer" | "deposit" | "withdrawal";
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int64
+             * @description Minor units (cents).
+             */
+            amount: number;
+            /** @description Vocabulary depends on type: transfer is one of [pending, completed, failed, rejected]; deposit is one of [pending, succeeded, credited, failed, refunded]; withdrawal is one of [payout_simulated, failed]. */
+            status: string;
+            failure_reason?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /**
+             * @description transfer only — absent for deposit/withdrawal entries.
+             * @enum {string}
+             */
+            direction?: "outgoing" | "incoming";
+            /** @description transfer only — absent for deposit/withdrawal entries. */
+            counterparty_account_number?: string;
         };
     };
     responses: {
@@ -649,7 +745,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
-                offset?: number;
+                /** @description Opaque continuation token from a previous response's next_cursor. Omit to fetch the first page. */
+                cursor?: string;
             };
             header?: never;
             path?: never;
@@ -657,13 +754,22 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Transfer history. */
+            /** @description A page of transfer history. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TransferHistoryEntry"][];
+                    "application/json": components["schemas"]["TransferHistoryPage"];
+                };
+            };
+            /** @description Malformed cursor. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -744,6 +850,84 @@ export interface operations {
             };
             /** @description Idempotency-Key was already used with different parameters. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createDeposit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDepositRequest"];
+            };
+        };
+        responses: {
+            /** @description Pending deposit created and a Stripe PaymentIntent started. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateDepositResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description The caller has no account yet. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Account is not active. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getDeposit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The deposit's current state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Deposit"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No such deposit, or it belongs to a different account — deliberately indistinguishable, so this endpoint can never be used to enumerate another account's deposit ids. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

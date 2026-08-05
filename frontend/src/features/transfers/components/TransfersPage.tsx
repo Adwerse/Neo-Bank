@@ -1,12 +1,12 @@
 import { TransferForm } from './TransferForm'
-import { TransferHistory } from './TransferHistory'
+import { OperationHistory } from './OperationHistory'
 import styles from './TransfersPage.module.css'
 
 export function TransfersPage() {
   return (
     <div className={styles.page}>
       <TransferForm />
-      <TransferHistory />
+      <OperationHistory />
     </div>
   )
 }
