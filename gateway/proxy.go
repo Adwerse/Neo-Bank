@@ -33,3 +33,16 @@ func newProxy(prefix, addr string) http.Handler {
 	target := &url.URL{Scheme: "http", Host: addr}
 	return http.StripPrefix(prefix, httputil.NewSingleHostReverseProxy(target))
 }
+
+// newNoStripProxy forwards the request path to addr completely unchanged —
+// for the handful of transfers-svc routes (POST /deposits, GET
+// /deposits/{id}, POST /webhooks/stripe) that live on transfers-svc's own
+// mux as siblings of "/", not nested under an internal "/transfers"
+// prefix the way newProxy's callers expect. Stripping a prefix like
+// "/deposits" down to "/" here would silently misroute a deposit request
+// to transfers-svc's transfer handler instead — see the callers in
+// main.go for the full reasoning.
+func newNoStripProxy(addr string) http.Handler {
+	target := &url.URL{Scheme: "http", Host: addr}
+	return httputil.NewSingleHostReverseProxy(target)
+}

@@ -5,14 +5,18 @@ info:
   description: >
     HTTP contract exposed by the Gateway (services/gateway) to browser
     clients. /auth/* proxies to auth-svc, /accounts/* proxies to
-    accounts-svc, /transfers/* proxies to transfers-svc — see
-    gateway/proxy.go for the routing table and gateway/middleware.go for
-    which paths require a bearer token.
+    accounts-svc, /transfers/* and /deposits/* proxy to transfers-svc —
+    see gateway/proxy.go and gateway/main.go's newHandler for the routing
+    table and gateway/middleware.go for which paths require a bearer
+    token.
 
     Only endpoints the frontend actually consumes are documented here, not
     every route accounts-svc happens to expose behind the Gateway (e.g.
     GET /accounts/{id} and PATCH /accounts/{id}/status are internal/ops
-    surface, not used by this client, and intentionally left out).
+    surface, not used by this client, and intentionally left out). For the
+    same reason, POST /webhooks/stripe is deliberately absent: Stripe
+    calls it, never the browser, so it isn't part of this client contract
+    — see services/transfers-svc/webhook.go for that endpoint instead.
 servers:
   - url: http://localhost:8080
     description: >
@@ -414,6 +418,89 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /deposits:
+    post:
+      operationId: createDeposit
+      summary: >
+        Start a Stripe-funded top-up: creates a pending deposit and a
+        matching Stripe PaymentIntent, returning its client_secret for
+        Stripe.js/Elements to confirm directly with Stripe. account_id is
+        never taken from the request body — it's derived from the bearer
+        token. A successful client-side confirmPayment does NOT mean the
+        deposit is credited yet — see GET /deposits/{id}.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDepositRequest'
+      responses:
+        '201':
+          description: Pending deposit created and a Stripe PaymentIntent started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateDepositResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The caller has no account yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Account is not active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /deposits/{id}:
+    get:
+      operationId: getDeposit
+      summary: >
+        Poll a deposit's status. 'succeeded' means Stripe confirmed the
+        card charge; it does NOT mean the balance moved yet. 'credited'
+        is the only status that means the ledger actually reflects it —
+        the frontend must poll until 'credited' (or 'failed'), never stop
+        at 'succeeded'.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The deposit's current state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deposit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No such deposit, or it belongs to a different account —
+            deliberately indistinguishable, so this endpoint can never be
+            used to enumerate another account's deposit ids.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -663,9 +750,90 @@ components:
                 Only present when the outcome is uncertain (202) — e.g.
                 "transfer status unknown, still processing".
 
+    CreateDepositRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          type: integer
+          format: int64
+          description: >
+            Minor units (cents). Bounded server-side to €0.50–€10,000.00
+            (services/transfers-svc/deposit.go's depositMinAmount/
+            depositMaxAmount).
+
+    CreateDepositResponse:
+      type: object
+      required: [deposit_id, client_secret]
+      properties:
+        deposit_id:
+          type: string
+          format: uuid
+        client_secret:
+          type: string
+          description: >
+            Stripe PaymentIntent client_secret — hand this to
+            Stripe.js/Elements to confirm the payment directly with
+            Stripe. Never reuse across a retry after a decline: a new
+            attempt means a new POST /deposits call and a new
+            client_secret.
+
+    Deposit:
+      type: object
+      required:
+        - id
+        - account_id
+        - amount
+        - currency
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+        currency:
+          type: string
+          example: eur
+        status:
+          type: string
+          enum: [pending, succeeded, credited, failed, refunded]
+          description: >
+            'succeeded' means Stripe confirmed the card charge only.
+            'credited' means the ledger balance actually reflects it —
+            the status pollers must wait for. 'refunded' is only reachable
+            from 'credited' (a charge.refunded event after this service
+            already credited it); a poller that hasn't already stopped at
+            'credited' should treat 'refunded' as terminal too.
+        stripe_payment_intent_id:
+          type: string
+        ledger_transaction_id:
+          type: string
+          format: uuid
+        failure_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
     TransferHistoryPage:
       type: object
       required: [transfers]
+      description: >
+        Despite the name (kept for compatibility with the /transfers path
+        and this field's existing key), this is the caller's UNIFIED
+        operations feed — transfers, deposits, and withdrawals
+        interleaved newest-first — not transfers alone. See
+        services/transfers-svc/history.go's historyEntry doc comment.
       properties:
         transfers:
           type: array
@@ -678,13 +846,38 @@ components:
             more pages.
 
     TransferHistoryEntry:
-      allOf:
-        - $ref: '#/components/schemas/Transfer'
-        - type: object
-          required: [direction, counterparty_account_number]
-          properties:
-            direction:
-              type: string
-              enum: [outgoing, incoming]
-            counterparty_account_number:
-              type: string
+      type: object
+      required: [type, id, amount, status, created_at, updated_at]
+      properties:
+        type:
+          type: string
+          enum: [transfer, deposit, withdrawal]
+        id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          description: Minor units (cents).
+        status:
+          type: string
+          description: >
+            Vocabulary depends on type: transfer is one of [pending,
+            completed, failed, rejected]; deposit is one of [pending,
+            succeeded, credited, failed, refunded]; withdrawal is one of
+            [payout_simulated, failed].
+        failure_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        direction:
+          type: string
+          enum: [outgoing, incoming]
+          description: transfer only — absent for deposit/withdrawal entries.
+        counterparty_account_number:
+          type: string
+          description: transfer only — absent for deposit/withdrawal entries.

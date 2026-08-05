@@ -18,6 +18,10 @@ var publicPaths = map[string]struct{}{
 	"/auth/refresh":             {},
 	"/auth/forgot-password":     {},
 	"/auth/reset-password":      {},
+	// Stripe has no JWT to send — its authentication IS the webhook
+	// signature (verified in transfers-svc/webhook.go), not a bearer
+	// token. This must stay a public route, never gated behind JWT.
+	"/webhooks/stripe": {},
 }
 
 type accessTokenClaims struct {
