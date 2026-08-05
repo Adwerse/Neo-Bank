@@ -1,0 +1,208 @@
+import { useState, type FormEvent } from 'react'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js'
+import type { StripeError } from '@stripe/stripe-js'
+import { Card } from '../../../shared/ui/Card'
+import { Input } from '../../../shared/ui/Input'
+import { Button } from '../../../shared/ui/Button'
+import { ErrorText } from '../../../shared/ui/ErrorText'
+import { Banner } from '../../../shared/ui/Banner'
+import { isApiError } from '../../../shared/api-client/ApiError'
+import { formatMoney } from '../../accounts/money'
+import { parseAmountToCents } from '../../transfers/money'
+import { depositSchema, type DepositFormValues } from '../schemas'
+import { createDeposit } from '../api'
+import { stripePromise } from '../stripe'
+import { useDepositStatusPolling } from '../useDepositStatusPolling'
+import styles from './DepositForm.module.css'
+
+const API_ERROR_LABELS: Record<string, string> = {
+  'invalid amount': 'Введите сумму больше нуля',
+  'account not found': 'Ваш счёт ещё создаётся — попробуйте через несколько секунд',
+  'account is not active': 'Ваш счёт временно не может принимать пополнения',
+}
+
+function apiErrorMessage(message: string): string {
+  return API_ERROR_LABELS[message] ?? message
+}
+
+// Matches Stripe's own PaymentIntent last_payment_error.code vocabulary —
+// same lookup-with-fallback convention as TransferForm.tsx's
+// FAILURE_REASON_LABELS, falling back to Stripe's own message (already in
+// Russian — see stripe.ts's locale: 'ru') rather than a raw unmapped code.
+const DECLINE_CODE_LABELS: Record<string, string> = {
+  card_declined: 'Карта отклонена банком-эмитентом.',
+  insufficient_funds: 'Недостаточно средств на карте.',
+  expired_card: 'Срок действия карты истёк.',
+  incorrect_cvc: 'Неверный код CVC.',
+  processing_error: 'Ошибка обработки платежа, попробуйте ещё раз.',
+}
+
+function declineMessage(error: StripeError): string {
+  if (error.code && DECLINE_CODE_LABELS[error.code]) return DECLINE_CODE_LABELS[error.code]
+  return error.message ?? 'Платёж отклонён, попробуйте другую карту.'
+}
+
+type Step =
+  | { kind: 'amount'; declineMessage?: string }
+  | { kind: 'payment'; depositId: string; clientSecret: string }
+  | { kind: 'processing'; depositId: string }
+
+export function DepositForm() {
+  const [step, setStep] = useState<Step>({ kind: 'amount' })
+  const [serverError, setServerError] = useState<string | null>(null)
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<DepositFormValues>({ resolver: zodResolver(depositSchema) })
+
+  async function onSubmit(values: DepositFormValues) {
+    setServerError(null)
+    const amountCents = parseAmountToCents(values.amount)
+    if (amountCents === null) {
+      setServerError('Введите корректную сумму')
+      return
+    }
+    try {
+      const result = await createDeposit(amountCents)
+      setStep({ kind: 'payment', depositId: result.deposit_id, clientSecret: result.client_secret })
+    } catch (err) {
+      setServerError(isApiError(err) ? apiErrorMessage(err.message) : 'Не удалось начать пополнение, попробуйте ещё раз')
+    }
+  }
+
+  if (step.kind === 'payment') {
+    return (
+      <Elements stripe={stripePromise} options={{ clientSecret: step.clientSecret }}>
+        <PaymentStep
+          onDeclined={(message) => setStep({ kind: 'amount', declineMessage: message })}
+          onConfirmed={() => setStep({ kind: 'processing', depositId: step.depositId })}
+          onCancel={() => setStep({ kind: 'amount' })}
+        />
+      </Elements>
+    )
+  }
+
+  if (step.kind === 'processing') {
+    return <ProcessingStep depositId={step.depositId} onStartOver={() => setStep({ kind: 'amount' })} />
+  }
+
+  return (
+    <Card>
+      <h2>Пополнение счёта</h2>
+      <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="amount">
+            Сумма пополнения
+          </label>
+          <Input id="amount" inputMode="decimal" placeholder="100.00" {...register('amount')} />
+          {errors.amount && <ErrorText>{errors.amount.message}</ErrorText>}
+        </div>
+        {serverError && <ErrorText>{serverError}</ErrorText>}
+        {step.declineMessage && <Banner variant="danger">{step.declineMessage}</Banner>}
+        <Button type="submit" disabled={isSubmitting}>
+          {isSubmitting ? 'Создание платежа...' : 'Продолжить'}
+        </Button>
+      </form>
+    </Card>
+  )
+}
+
+interface PaymentStepProps {
+  onDeclined: (message: string) => void
+  onConfirmed: () => void
+  onCancel: () => void
+}
+
+// Rendered as a child of <Elements> — useStripe/useElements only work
+// inside that provider's tree, which is why this can't just live inline
+// in DepositForm above.
+function PaymentStep({ onDeclined, onConfirmed, onCancel }: PaymentStepProps) {
+  const stripe = useStripe()
+  const elements = useElements()
+  const [isConfirming, setIsConfirming] = useState(false)
+
+  async function handleConfirm(e: FormEvent) {
+    e.preventDefault()
+    if (!stripe || !elements) return
+    setIsConfirming(true)
+
+    // redirect: 'if_required' keeps this a single-page flow for ordinary
+    // cards (including most 3D Secure challenges, handled inline by
+    // Stripe.js) — return_url is still required by the API for the rare
+    // payment method that forces a top-level redirect.
+    const { error, paymentIntent } = await stripe.confirmPayment({
+      elements,
+      confirmParams: { return_url: `${window.location.origin}/deposit` },
+      redirect: 'if_required',
+    })
+
+    setIsConfirming(false)
+
+    if (error) {
+      // A decline means this PaymentIntent is done — task requirement is
+      // explicit: a retry must be a NEW deposit (new PaymentIntent), never
+      // reusing this client_secret. Bouncing all the way back to the
+      // amount step is what makes that the only option.
+      onDeclined(declineMessage(error))
+      return
+    }
+    if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
+      // Stripe accepted the payment — NOT the same as the ledger balance
+      // having moved yet. See useDepositStatusPolling for what happens
+      // next.
+      onConfirmed()
+      return
+    }
+    onDeclined('Не удалось подтвердить платёж, попробуйте ещё раз.')
+  }
+
+  return (
+    <Card>
+      <h2>Оплата картой</h2>
+      <form className={styles.form} onSubmit={handleConfirm}>
+        <PaymentElement />
+        <div className={styles.paymentActions}>
+          <Button type="submit" disabled={!stripe || isConfirming}>
+            {isConfirming ? 'Обработка...' : 'Оплатить'}
+          </Button>
+          <Button type="button" variant="secondary" disabled={isConfirming} onClick={onCancel}>
+            Изменить сумму
+          </Button>
+        </div>
+      </form>
+    </Card>
+  )
+}
+
+function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStartOver: () => void }) {
+  const { deposit, outcome } = useDepositStatusPolling(depositId)
+
+  return (
+    <Card>
+      <h2>Пополнение счёта</h2>
+      <div className={styles.result}>
+        {outcome === 'polling' && (
+          <Banner variant="warning">Платёж принят, зачисление в течение минуты…</Banner>
+        )}
+        {outcome === 'timed_out' && (
+          <Banner variant="warning">Зачисление обрабатывается дольше обычного — проверьте баланс позже.</Banner>
+        )}
+        {outcome === 'failed' && (
+          <Banner variant="danger">Платёж не был зачислен. Попробуйте создать новое пополнение.</Banner>
+        )}
+        {outcome === 'credited' && deposit && (
+          <Banner variant="success">Баланс пополнен на {formatMoney(deposit.amount, 'EUR')}.</Banner>
+        )}
+        {(outcome === 'credited' || outcome === 'failed' || outcome === 'timed_out') && (
+          <Button variant="secondary" type="button" className={styles.newDepositButton} onClick={onStartOver}>
+            Новое пополнение
+          </Button>
+        )}
+      </div>
+    </Card>
+  )
+}

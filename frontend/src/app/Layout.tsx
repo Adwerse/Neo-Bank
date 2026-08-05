@@ -7,6 +7,7 @@ const navItems = [
   { to: '/register', label: 'Register' },
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/transfers', label: 'Transfers' },
+  { to: '/deposit', label: 'Deposit' },
 ]
 
 export function Layout() {

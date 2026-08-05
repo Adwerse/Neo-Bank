@@ -1,9 +1,11 @@
+import { Link } from 'react-router'
 import { isApiError } from '../../../shared/api-client/ApiError'
 import { getAccessTokenEmail } from '../../../shared/api-client/jwt'
 import { Card } from '../../../shared/ui/Card'
 import { Banner } from '../../../shared/ui/Banner'
 import { Button } from '../../../shared/ui/Button'
 import { Skeleton } from '../../../shared/ui/Skeleton'
+import buttonStyles from '../../../shared/ui/Button.module.css'
 import { useMe } from '../useMe'
 import { formatMoney } from '../money'
 import styles from './DashboardPage.module.css'
@@ -65,9 +67,9 @@ export function DashboardPage() {
       )}
 
       <div className={styles.balance}>{formatMoney(account.balance, account.currency)}</div>
-      {account.balance === 0 && (
-        <p className={styles.hint}>Пополнение появится позже — принимаем платежи через Stripe со спринта 9.</p>
-      )}
+      <Link to="/deposit" className={`${buttonStyles.button} ${buttonStyles.primary} ${styles.depositLink}`}>
+        Пополнить счёт
+      </Link>
 
       <dl className={styles.details}>
         <dt className={styles.label}>Номер счёта</dt>

@@ -217,10 +217,14 @@ Stripe-депозиты, целиком: `ledger-svc.Deposit`/`ReverseDeposit`,
 `POST /deposits` (Stripe `PaymentIntent`), `POST /webhooks/stripe`
 (подтверждение), фоновое зачисление succeeded → credited, сверка
 (reconciliation) для трёх видов зависших депозитов, обратные проводки на
-возврат (`charge.refunded`) и симулированный вывод денег
-(`POST /withdrawals`). Из всей саги за пределами этого шага остаётся
-только фронтенд (нужен `client_secret`) и вынос `POST /deposits`/
-`POST /withdrawals` наружу через Gateway.
+возврат (`charge.refunded`), симулированный вывод денег
+(`POST /withdrawals`), маршрутизация `/deposits`/`/webhooks/stripe` через
+Gateway (см. «Gateway: маршрутизация» ниже), фронтенд-экран `/deposit`
+(см. «Фронтенд: экран пополнения» ниже) и единая история операций (см.
+«История операций» ниже). `POST /withdrawals` наружу через Gateway
+осознанно не вынесен — у симулированного вывода нет формы создания на
+фронтенде (не часть этого шага), выносить эндпоинт без единого вызывающего
+его клиента незачем.
 
 ### Почему депозиты живут в transfers-svc, а не в новом payments-svc
 
@@ -500,8 +504,17 @@ Stripe не может достучаться до `localhost` напрямую.
 
 ```bash
 stripe login
-stripe listen --forward-to localhost:8084/webhooks/stripe
+stripe listen --forward-to localhost:8080/webhooks/stripe
 ```
+
+Порт `8080` — это Gateway, не `transfers-svc` напрямую: `/webhooks/stripe`
+теперь проксируется через Gateway (см. "Gateway" ниже), публично и без
+проверки JWT (Stripe не может прислать токен — подпись вебхука сама по
+себе и есть аутентификация), с телом запроса, доходящим до
+`transfers-svc` байт-в-байт. `localhost:8084/webhooks/stripe` (сервис
+напрямую, в обход Gateway) по-прежнему работает и удобен для
+низкоуровневой проверки самого обработчика (см. "Проверка вручную" ниже),
+но не отражает реальный путь запроса от Stripe в продакшене.
 
 `stripe listen` держит туннель открытым и печатает **локальный** webhook
 signing secret (`whsec_...`, отдельный от продового/дашбордного) — его и
@@ -803,6 +816,144 @@ genesis — та же проверка достаточности средств
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -run TestCreateWithdrawal -v
 ```
+
+### Gateway: маршрутизация `/deposits` и `/webhooks/stripe`
+
+`POST /deposits`, `GET /deposits/{id}` и `POST /webhooks/stripe` — новые
+top-level префиксы на Gateway (`gateway/main.go`, `newHandler`), а не
+вложенные под `/transfers`: `transfers-svc` сам регистрирует их как
+соседей `/` на своём собственном мультиплексоре (`POST /deposits`,
+`GET /deposits/{id}`, `POST /webhooks/stripe` — все без общего
+внутреннего префикса), так что проксирование должно пробрасывать путь
+**без изменений**, а не срезать префикс как для остальных маршрутов
+(`gateway/proxy.go`'s `newProxy`/`http.StripPrefix`) — иначе, например,
+`POST /deposits` после срезания превратился бы в пустой путь и попал бы
+на обработчик перевода, а не депозита.
+
+Нюанс с завершающим слешем (та же природа, что и у комментария в
+`frontend/src/features/transfers/api.ts` про `POST /transfers/`): Go's
+`http.ServeMux` при регистрации `"/deposits/"` (с слешем — subtree-паттерн,
+нужен, чтобы поймать и `/deposits/{id}`) автоматически 301-редиректит
+голый `/deposits` (без слеша) на `/deposits/` — а 301 на POST опасен:
+`fetch()` при повторе запроса после редиректа превращает его в GET,
+молча теряя тело. Решение — зарегистрировать `/deposits` **дважды**:
+точным паттерном (без слеша, ловит только буквально `/deposits`, без
+редиректа) и subtree-паттерном (`/deposits/`, ловит `/deposits/{id}`).
+`/webhooks/stripe` регистрируется только точным паттерном — вложенных
+путей под ним нет, и Stripe не должен ни при каких условиях столкнуться
+с редиректом на свой вебхук.
+
+`/webhooks/stripe` также добавлен в `publicPaths`
+(`gateway/middleware.go`) — точным совпадением строки, до какого-либо
+срезания префикса. JWT-мидлварь не читает и не трогает тело запроса ни
+для одного пути (только заголовки), так что сырые байты доходят до
+`stripeWebhookHandler` неизменными автоматически, без специального кода
+для этого — критично для проверки подписи (см. выше).
+
+**Тесты**: `gateway/gateway_test.go` — поднимает `newHandler` через
+`httptest.Server` и настоящий HTTP-раунд-трип (не мок): для
+`POST /deposits` без слеша проверяет отсутствие редиректа и что backend
+получил путь именно `/deposits` (не срезанный) с телом байт-в-байт; для
+`GET /deposits/{id}` — то же самое; для `/webhooks/stripe` — что запрос
+проходит **без** bearer-токена, что тело доходит неизменным даже с
+намеренно «неровным» форматированием JSON, и что клиентский
+`X-User-Id` всё равно вычищается (даже на публичном пути); плюс
+регрессионная проверка, что `/transfers/` по-прежнему срезается как
+раньше.
+```bash
+cd gateway && go test ./... -v
+```
+
+### Фронтенд: экран пополнения (`/deposit`)
+
+`frontend/src/features/deposits/` — форма суммы → `POST /deposits` →
+Stripe Elements (`PaymentElement`) → `stripe.confirmPayment` с
+`redirect: 'if_required'` (не уводит со страницы для большинства карт,
+включая большинство сценариев 3D Secure — Stripe.js обрабатывает вызов
+инлайн). Публичный ключ (`pk_test_...`) — `VITE_STRIPE_PUBLISHABLE_KEY`
+(`frontend/.env`, см. `.env.example`), `loadStripe(...)` вызывается один
+раз на уровне модуля (`features/deposits/stripe.ts`), а не при каждом
+рендере.
+
+**Честность про момент зачисления** — самая важная часть этого экрана.
+Успешный `confirmPayment` на клиенте означает только «Stripe принял
+платёж» (`deposits.status = 'succeeded'`) — баланс ещё не изменился,
+это отдельный факт, который наступает позже, когда фоновый воркер
+проведёт проводку в ledger (`status = 'credited'`, см. «Зачисление:
+succeeded → credited» выше). Поэтому экран **не показывает** «баланс
+пополнен» сразу после `confirmPayment` — только «платёж принят,
+зачисление в течение минуты», и дальше опрашивает `GET /deposits/{id}`
+(`features/deposits/useDepositStatusPolling.ts`) каждые 2 секунды, пока
+статус не станет `credited` (тогда `invalidateQueries` на
+`['accounts','me']` и `['transfers','history']` — те же ключи, что уже
+инвалидирует `TransferForm` после перевода, — и баланс на дашборде
+обновляется сам, без F5) или `failed`/`refunded`. Если за 60 секунд
+(вдвое больше `reconcileInterval` — см. `reconcile.go` — то есть с
+запасом на один пропущенный тик воркера) зачисление так и не случилось,
+спиннер останавливается и показывается «зачисление обрабатывается,
+проверьте баланс позже» — вместо бесконечной загрузки.
+
+Отказ карты (`error` от `confirmPayment`) возвращает пользователя на шаг
+ввода суммы с понятным сообщением — новая попытка обязательно означает
+новый `POST /deposits` (новый `PaymentIntent`, новый `client_secret`):
+старый `client_secret` никогда не переиспользуется, ровно как требует
+задача.
+
+### История операций: единая лента переводов, депозитов и выводов
+
+`GET /transfers` (имя осталось прежним, хотя теперь отдаёт не только
+переводы — см. `services/transfers-svc/history.go`'s `historyEntry`)
+теперь возвращает объединённую, честно cursor-пагинированную ленту
+операций: переводы, депозиты и (симулированные) выводы, отсортированные
+по времени, с полем `type` для различения. Реализовано не одним
+гетерогенным SQL UNION (пришлось бы дополнять NULL несовместимые колонки
+трёх разных таблиц), а слиянием на уровне Go: каждый источник
+(`getTransferHistoryPage` — уже существующий 2-way UNION по
+sender/recipient; новые `getDepositHistoryPage`/`getWithdrawalHistoryPage`
+— по одной колонке `account_id`) независимо запрашивается на тот же
+курсор `(created_at, id)`, результаты объединяются, пересортировываются
+и обрезаются до `limit`. Это точно, а не приближённо — тем же
+рассуждением, что и у существующего 2-way UNION для переводов
+(см. комментарий на `transferHistoryQueryFirstPage`): топ-`limit`
+слияния N независимо отсортированных источников всегда содержится в
+топ-`limit` каждого источника по отдельности.
+
+`hasMore` требует ИЛИ, а не только «превысил ли объединённый пул
+`limit`»: если один источник в одиночку уже вернул `hasMore=true` (у
+него есть ещё строки за пределами top-`limit`, которые в объединённый
+пул даже не попали), финальная страница должна сигнализировать
+`hasMore=true`, даже если сам объединённый пул после слияния оказался
+ровно `limit` строк, а не больше. (См. тест
+`TestGetOperationHistoryPage_HasMoreReflectsEachBranch`.)
+
+На фронтенде — `features/transfers/components/OperationHistory.tsx`
+(бывший `TransferHistory.tsx`): каждая строка получила бейдж типа
+(«Перевод» / «Депозит» / «Вывод») и явную пометку «· симуляция» для
+выводов (`payout_simulated` пока недостижим из UI — вывод не имеет
+формы создания, только показ, если запись когда-либо появится через
+API напрямую). Заодно исправлена расходившаяся с бэкендом константа
+`direction === 'sent'` (бэкенд всегда отдавал `'outgoing'`/`'incoming'`
+— см. `services/transfers-svc/http.go`) — раньше сравнение никогда не
+совпадало ни при каком реальном ответе.
+```bash
+DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
+  go test ./services/transfers-svc/... -run "TestGetDepositHandler|TestGetDepositHistoryPage|TestGetWithdrawalHistoryPage|TestGetOperationHistoryPage" -v
+```
+
+### Тестовые карты Stripe
+
+Проверено локально (тест-мод Stripe, через `stripe listen` — см. выше):
+
+- `4242 4242 4242 4242`, любой будущий срок действия, любой CVC, любой
+  индекс — успешная оплата (`payment_intent.succeeded`).
+- `4000 0000 0000 0002` — гарантированный отказ
+  (`payment_intent.payment_failed`, `card_declined`).
+
+Не проверялась вживую, но задокументирована как опция (в задаче
+явно сказано, что проверка 3D Secure необязательна): `4000 0025 0000
+3155` — требует прохождения 3D Secure challenge; с
+`redirect: 'if_required'` Stripe.js обрабатывает его инлайн (модальное
+окно поверх страницы), без перехода на `return_url`.
 
 ## fraud-svc: подключение к Postgres, схема
 
