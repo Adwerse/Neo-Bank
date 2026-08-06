@@ -1,15 +1,29 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"neobank/pkg/health"
 )
 
-const defaultPort = "8080"
+const (
+	defaultPort = "8080"
+
+	// shutdownTimeout bounds how long SIGTERM/SIGINT gives http.Server to
+	// stop accepting new connections. It does NOT bound open WebSocket
+	// connections — those are hijacked TCP conns that Shutdown doesn't
+	// track at all, which is why ws.go's handleWS independently watches
+	// the same shutdown context and sends its own close frame (see
+	// newHandler below).
+	shutdownTimeout = 10 * time.Second
+)
 
 func main() {
 	port := os.Getenv("PORT")
@@ -21,8 +35,23 @@ func main() {
 		log.Fatal("gateway: JWT_SECRET environment variable is required")
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	srv := &http.Server{Addr: ":" + port, Handler: newHandler(ctx, jwtSecret)}
+
+	go func() {
+		<-ctx.Done()
+		log.Printf("gateway: shutdown signal received")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("gateway: http server shutdown: %v", err)
+		}
+	}()
+
 	log.Printf("gateway listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, newHandler(jwtSecret)); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
@@ -30,8 +59,11 @@ func main() {
 // newHandler builds the full gateway handler (routing + JWT middleware),
 // separated from main() so gateway_test.go can exercise real routing
 // behavior (redirects, prefix stripping, the public webhook allowlist)
-// against an httptest.Server without a live JWT_SECRET/port bind.
-func newHandler(jwtSecret string) http.Handler {
+// against an httptest.Server without a live JWT_SECRET/port bind. ctx is
+// the process's shutdown context (canceled on SIGTERM/SIGINT) — GET /ws
+// needs it directly since http.Server.Shutdown never sees WebSocket
+// connections (see shutdownTimeout's comment).
+func newHandler(ctx context.Context, jwtSecret string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +72,9 @@ func newHandler(jwtSecret string) http.Handler {
 		json.NewEncoder(w).Encode(map[string]string{"service": "gateway"})
 	})
 	mux.HandleFunc("/healthz", health.Handler("gateway"))
+
+	ws := newWSServer(ctx, jwtSecret)
+	mux.HandleFunc("GET /ws", ws.handleWS)
 
 	for _, rt := range routes() {
 		mux.Handle(rt.prefix+"/", newProxy(rt.prefix, rt.addr))

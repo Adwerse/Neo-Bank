@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,7 +70,7 @@ func TestNewHandler_DepositsExactPath_NoRedirectAndUnstripped(t *testing.T) {
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(secret))
+	gw := httptest.NewServer(newHandler(context.Background(), secret))
 	t.Cleanup(gw.Close)
 
 	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/deposits", strings.NewReader(`{"amount":5000}`))
@@ -106,7 +107,7 @@ func TestNewHandler_DepositsWithID_NoRedirectAndUnstripped(t *testing.T) {
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(secret))
+	gw := httptest.NewServer(newHandler(context.Background(), secret))
 	t.Cleanup(gw.Close)
 
 	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/deposits/abc-123", nil)
@@ -130,7 +131,7 @@ func TestNewHandler_DepositsRequiresJWT(t *testing.T) {
 	backend, _ := newRecordingBackend(t)
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
-	gw := httptest.NewServer(newHandler("test-secret"))
+	gw := httptest.NewServer(newHandler(context.Background(), "test-secret"))
 	t.Cleanup(gw.Close)
 
 	resp, err := http.Post(gw.URL+"/deposits", "application/json", strings.NewReader(`{}`))
@@ -152,7 +153,7 @@ func TestNewHandler_WebhookStripe_PublicAndRawBodyPreserved(t *testing.T) {
 	backend, rec := newRecordingBackend(t)
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
-	gw := httptest.NewServer(newHandler("test-secret"))
+	gw := httptest.NewServer(newHandler(context.Background(), "test-secret"))
 	t.Cleanup(gw.Close)
 
 	// Deliberately odd whitespace/field order: if anything on the path
@@ -197,7 +198,7 @@ func TestNewHandler_TransfersPrefixStillStrips(t *testing.T) {
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(secret))
+	gw := httptest.NewServer(newHandler(context.Background(), secret))
 	t.Cleanup(gw.Close)
 
 	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/transfers/", strings.NewReader(`{}`))
