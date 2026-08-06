@@ -50,6 +50,15 @@ func noRedirectClient() *http.Client {
 	}
 }
 
+// newTestHandler builds a handler exactly the way main() does — a fresh
+// wsServer wired in — without pulling every test into constructing one
+// by hand. Kafka is never started here; that's main()'s job alone (see
+// startKafkaConsumers's doc comment), so this stays safe to call
+// repeatedly across the whole test binary.
+func newTestHandler(secret string) http.Handler {
+	return newHandler(secret, newWSServer(context.Background(), secret))
+}
+
 func signedTestJWT(t *testing.T, secret, userID string) string {
 	t.Helper()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, accessTokenClaims{
@@ -70,7 +79,7 @@ func TestNewHandler_DepositsExactPath_NoRedirectAndUnstripped(t *testing.T) {
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(context.Background(), secret))
+	gw := httptest.NewServer(newTestHandler(secret))
 	t.Cleanup(gw.Close)
 
 	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/deposits", strings.NewReader(`{"amount":5000}`))
@@ -107,7 +116,7 @@ func TestNewHandler_DepositsWithID_NoRedirectAndUnstripped(t *testing.T) {
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(context.Background(), secret))
+	gw := httptest.NewServer(newTestHandler(secret))
 	t.Cleanup(gw.Close)
 
 	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/deposits/abc-123", nil)
@@ -131,7 +140,7 @@ func TestNewHandler_DepositsRequiresJWT(t *testing.T) {
 	backend, _ := newRecordingBackend(t)
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
-	gw := httptest.NewServer(newHandler(context.Background(), "test-secret"))
+	gw := httptest.NewServer(newTestHandler("test-secret"))
 	t.Cleanup(gw.Close)
 
 	resp, err := http.Post(gw.URL+"/deposits", "application/json", strings.NewReader(`{}`))
@@ -153,7 +162,7 @@ func TestNewHandler_WebhookStripe_PublicAndRawBodyPreserved(t *testing.T) {
 	backend, rec := newRecordingBackend(t)
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
-	gw := httptest.NewServer(newHandler(context.Background(), "test-secret"))
+	gw := httptest.NewServer(newTestHandler("test-secret"))
 	t.Cleanup(gw.Close)
 
 	// Deliberately odd whitespace/field order: if anything on the path
@@ -198,7 +207,7 @@ func TestNewHandler_TransfersPrefixStillStrips(t *testing.T) {
 	t.Setenv("TRANSFERS_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(context.Background(), secret))
+	gw := httptest.NewServer(newTestHandler(secret))
 	t.Cleanup(gw.Close)
 
 	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/transfers/", strings.NewReader(`{}`))

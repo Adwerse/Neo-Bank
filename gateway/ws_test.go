@@ -33,7 +33,7 @@ func TestWSHandler_NoAuthMessage_ClosesAfterTimeout(t *testing.T) {
 	t.Setenv("WS_AUTH_TIMEOUT", "100ms")
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(context.Background(), secret))
+	gw := httptest.NewServer(newTestHandler(secret))
 	t.Cleanup(gw.Close)
 
 	conn := dialWS(t, gw)
@@ -57,7 +57,7 @@ func TestWSHandler_InvalidToken_ClosesImmediately(t *testing.T) {
 	t.Setenv("WS_AUTH_TIMEOUT", "2s") // long enough that only the bad token can cause the close
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(context.Background(), secret))
+	gw := httptest.NewServer(newTestHandler(secret))
 	t.Cleanup(gw.Close)
 
 	conn := dialWS(t, gw)
@@ -85,7 +85,7 @@ func TestWSHandler_ValidToken_StaysOpenAndAcks(t *testing.T) {
 	t.Setenv("WS_PING_TIMEOUT", "500ms")
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(context.Background(), secret))
+	gw := httptest.NewServer(newTestHandler(secret))
 	t.Cleanup(gw.Close)
 
 	conn := dialWS(t, gw)
@@ -136,7 +136,7 @@ func TestWSHandler_SixthConnectionRejected(t *testing.T) {
 	t.Setenv("WS_AUTH_TIMEOUT", "2s")
 
 	const secret = "test-secret"
-	gw := httptest.NewServer(newHandler(context.Background(), secret))
+	gw := httptest.NewServer(newTestHandler(secret))
 	t.Cleanup(gw.Close)
 
 	token := signedTestJWT(t, secret, "user-123")
@@ -175,5 +175,72 @@ func TestWSHandler_SixthConnectionRejected(t *testing.T) {
 	}
 	if status := websocket.CloseStatus(err); status != wsCloseTooManyConns {
 		t.Errorf("close status = %v, want %v", status, wsCloseTooManyConns)
+	}
+}
+
+// TestWSRegistry_Send_DeliversOnlyToTargetUsersLocalConnections is the
+// delivery-layer half of the Kafka fan-out's DoD ("оба получают сигналы,
+// каждый свой, ни один не получил чужих данных"): notify_test.go proves
+// the routing DECISION never addresses the wrong user, this proves the
+// TRANSPORT that decision feeds into only ever reaches that user's own
+// connections — a user with two tabs open gets it on both, an unrelated
+// user gets nothing at all, not even after waiting.
+//
+// This builds the wsServer directly (not via newTestHandler) so the test
+// can hold onto ws.registry — the same registry Kafka's consumer would
+// call send() on — and push into it exactly the way kafka.go's
+// handleTransferMessage does.
+func TestWSRegistry_Send_DeliversOnlyToTargetUsersLocalConnections(t *testing.T) {
+	const secret = "test-secret"
+	ws := newWSServer(context.Background(), secret)
+	gw := httptest.NewServer(newHandler(secret, ws))
+	t.Cleanup(gw.Close)
+
+	authenticate := func(conn *websocket.Conn, userID string) {
+		t.Helper()
+		writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		token := signedTestJWT(t, secret, userID)
+		if err := wsjson.Write(writeCtx, conn, wsAuthMessage{Type: "auth", Token: token}); err != nil {
+			t.Fatalf("write auth message: %v", err)
+		}
+		readCtx, cancel2 := context.WithTimeout(context.Background(), time.Second)
+		defer cancel2()
+		var ack wsAckMessage
+		if err := wsjson.Read(readCtx, conn, &ack); err != nil {
+			t.Fatalf("read ack: %v", err)
+		}
+	}
+
+	connA1 := dialWS(t, gw)
+	authenticate(connA1, "user-A")
+	connA2 := dialWS(t, gw) // user A's second tab
+	authenticate(connA2, "user-A")
+	connB := dialWS(t, gw)
+	authenticate(connB, "user-B")
+
+	ws.registry.send(context.Background(), "user-A", wsBalanceChangedMsg{Type: "balance.changed"})
+
+	for i, conn := range []*websocket.Conn{connA1, connA2} {
+		readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		var msg wsBalanceChangedMsg
+		err := wsjson.Read(readCtx, conn, &msg)
+		cancel()
+		if err != nil {
+			t.Fatalf("user-A connection %d: expected to receive the push, got error: %v", i, err)
+		}
+		if msg.Type != "balance.changed" {
+			t.Errorf("user-A connection %d: got type %q, want balance.changed", i, msg.Type)
+		}
+	}
+
+	// user-B must receive nothing addressed to user-A — a short timeout
+	// that is EXPECTED to expire is exactly how "nothing arrived" is
+	// observed on a still-open connection.
+	readCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	var msg wsBalanceChangedMsg
+	if err := wsjson.Read(readCtx, connB, &msg); err == nil {
+		t.Fatal("user-B's connection received a push addressed to user-A — cross-user leak")
 	}
 }

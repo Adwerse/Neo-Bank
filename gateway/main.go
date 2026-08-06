@@ -38,7 +38,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := &http.Server{Addr: ":" + port, Handler: newHandler(ctx, jwtSecret)}
+	ws := newWSServer(ctx, jwtSecret)
+
+	accountCache := newAccountCache(envDurationOr("ACCOUNT_CACHE_TTL", defaultAccountCacheTTL), envOr("ACCOUNTS_SVC_ADDR", "accounts-svc:8082"))
+	startKafkaConsumers(ctx, ws.registry, accountCache)
+
+	srv := &http.Server{Addr: ":" + port, Handler: newHandler(jwtSecret, ws)}
 
 	go func() {
 		<-ctx.Done()
@@ -59,11 +64,12 @@ func main() {
 // newHandler builds the full gateway handler (routing + JWT middleware),
 // separated from main() so gateway_test.go can exercise real routing
 // behavior (redirects, prefix stripping, the public webhook allowlist)
-// against an httptest.Server without a live JWT_SECRET/port bind. ctx is
-// the process's shutdown context (canceled on SIGTERM/SIGINT) — GET /ws
-// needs it directly since http.Server.Shutdown never sees WebSocket
-// connections (see shutdownTimeout's comment).
-func newHandler(ctx context.Context, jwtSecret string) http.Handler {
+// against an httptest.Server without a live JWT_SECRET/port bind. ws is
+// built by the caller (main(), or a test) rather than here, so that
+// caller can also hand the same ws.registry to startKafkaConsumers —
+// newHandler itself stays pure HTTP wiring with no Kafka side effect,
+// safe to call repeatedly from tests.
+func newHandler(jwtSecret string, ws *wsServer) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +79,6 @@ func newHandler(ctx context.Context, jwtSecret string) http.Handler {
 	})
 	mux.HandleFunc("/healthz", health.Handler("gateway"))
 
-	ws := newWSServer(ctx, jwtSecret)
 	mux.HandleFunc("GET /ws", ws.handleWS)
 
 	for _, rt := range routes() {

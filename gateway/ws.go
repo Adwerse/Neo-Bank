@@ -24,6 +24,11 @@ const (
 	// that isn't really a protocol violation — the client did everything
 	// right, there's just no room for another connection.
 	wsCloseTooManyConns = websocket.StatusCode(4001)
+
+	// wsSendTimeout bounds a single push write in wsRegistry.send, so one
+	// slow or half-dead client (not yet reaped by the heartbeat) can't
+	// hold up delivery to anyone else.
+	wsSendTimeout = 5 * time.Second
 )
 
 type wsAuthMessage struct {
@@ -31,12 +36,11 @@ type wsAuthMessage struct {
 	Token string `json:"token"`
 }
 
-// wsRegistry is the in-memory map of user_id -> active connections
-// (task 3). A plain mutex over a nested map, not sync.Map: add() needs an
-// atomic "check count, then insert" that sync.Map doesn't give for free.
-// This is also the shape a future Kafka consumer will read from to fan
-// events out to a user's sockets — no such fan-out method exists yet,
-// that's the next prompt's work.
+// wsRegistry is the in-memory map of user_id -> active connections. A
+// plain mutex over a nested map, not sync.Map: add() needs an atomic
+// "check count, then insert" that sync.Map doesn't give for free. This is
+// also the shape the Kafka consumer (kafka.go) reads from to fan events
+// out to a user's local sockets via send, below.
 type wsRegistry struct {
 	mu     sync.Mutex
 	byUser map[string]map[*websocket.Conn]struct{}
@@ -72,6 +76,34 @@ func (r *wsRegistry) remove(userID string, conn *websocket.Conn) {
 	delete(conns, conn)
 	if len(conns) == 0 {
 		delete(r.byUser, userID)
+	}
+}
+
+// send delivers msg to every connection currently registered for userID
+// on this instance. A user with no local connections — the common case,
+// since most events on most instances belong to a user connected
+// (if at all) to some other instance — is a silent no-op, not logged:
+// logging it would spam the log on every instance for every event that
+// isn't locally relevant. The connection snapshot is taken under the
+// lock and the actual writes happen after releasing it, so one slow
+// client's write can't block registry operations (new connections
+// registering, the heartbeat) for everyone else.
+func (r *wsRegistry) send(ctx context.Context, userID string, msg any) {
+	r.mu.Lock()
+	conns := r.byUser[userID]
+	snapshot := make([]*websocket.Conn, 0, len(conns))
+	for c := range conns {
+		snapshot = append(snapshot, c)
+	}
+	r.mu.Unlock()
+
+	for _, c := range snapshot {
+		writeCtx, cancel := context.WithTimeout(ctx, wsSendTimeout)
+		err := wsjson.Write(writeCtx, c, msg)
+		cancel()
+		if err != nil {
+			log.Printf("gateway: ws push failed user=%s: %v", userID, err)
+		}
 	}
 }
 
