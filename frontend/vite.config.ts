@@ -19,6 +19,13 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
+      // gateway/ws.go serves GET /ws with no "/api" prefix of its own —
+      // proxied as-is (no rewrite) so the frontend can dial it same-origin
+      // via shared/ws-client/wsUrl.ts, same reasoning as /api above.
+      '/ws': {
+        target: 'ws://localhost:8080',
+        ws: true,
+      },
     },
   },
 })
