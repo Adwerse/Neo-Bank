@@ -1,5 +1,6 @@
 FROM golang:1.23-alpine AS build
 WORKDIR /src
+COPY proto/gen/go ./proto/gen/go
 COPY pkg/health ./pkg/health
 COPY gateway ./gateway
 WORKDIR /src/gateway
