@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useWsConnected } from '../../shared/ws-client/WebSocketProvider'
 import { getDeposit } from './api'
 
 // A successful client-side confirmPayment only means Stripe accepted the
 // charge (deposit status 'succeeded') — the ledger balance doesn't move
 // until the background reconciliation worker credits it (status
 // 'credited'), which runs on a fixed 30s tick
-// (services/transfers-svc/reconcile.go's reconcileInterval). Polling every
-// 2s catches that transition promptly without hammering the backend;
-// giving up after 60s (2x the worst-case tick) is long enough to never
-// abandon the normal case, short enough to not spin forever if something
-// is genuinely stuck.
+// (services/transfers-svc/reconcile.go's reconcileInterval). The Gateway
+// pushes deposit.updated the moment that happens (WebSocketProvider
+// invalidates this exact query key on it), so POLL_INTERVAL_MS below is
+// only a fallback for a WS connection that never gets through at all —
+// 2s catches the reconcile-worker transition promptly without hammering
+// the backend in that mode. GIVE_UP_AFTER_MS (60s, 2x the worst-case
+// reconcile tick) bounds how long the UI shows a spinner either way,
+// independent of whether updates are arriving via WS or the fallback poll.
 const POLL_INTERVAL_MS = 2000
 const GIVE_UP_AFTER_MS = 60_000
 
@@ -35,6 +39,7 @@ export type DepositPollOutcome = 'polling' | 'credited' | 'failed' | 'timed_out'
 // DepositPage's doc comment for the full state machine this feeds into.
 export function useDepositStatusPolling(depositId: string | null) {
   const queryClient = useQueryClient()
+  const wsConnected = useWsConnected()
   const startedAtRef = useRef(Date.now())
   // Forces a re-render exactly at the give-up mark even if no poll tick
   // happens to land right then — without this, a component that isn't
@@ -56,6 +61,9 @@ export function useDepositStatusPolling(depositId: string | null) {
       const status = q.state.data?.status
       if (status === 'credited' || (status && TERMINAL_NON_CREDITED_STATUSES.has(status))) return false
       if (Date.now() - startedAtRef.current > GIVE_UP_AFTER_MS) return false
+      // WS connected: deposit.updated drives the refetch instead — polling
+      // on top of that would just be redundant traffic for the same event.
+      if (wsConnected) return false
       return POLL_INTERVAL_MS
     },
   })
