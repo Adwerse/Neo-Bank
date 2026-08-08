@@ -1125,7 +1125,11 @@ func TestListTransfersHandler_BatchResolvesCounterpartiesOnce(t *testing.T) {
 	req.Header.Set("X-User-Id", "irrelevant-userid-fake-handles-lookup")
 	rec := httptest.NewRecorder()
 
-	listTransfersHandler(pool, client)(rec, req)
+	// Same pool for both write and read here — the cursor-vs-primary split
+	// (see listTransfersHandler's doc comment) is a routing decision the
+	// handler makes, not something this test's single-Postgres setup needs
+	// to simulate two databases for.
+	listTransfersHandler(pool, pool, client)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -1179,7 +1183,7 @@ func TestListTransfersHandler_InvalidCursor(t *testing.T) {
 	req.Header.Set("X-User-Id", "irrelevant-userid-fake-handles-lookup")
 	rec := httptest.NewRecorder()
 
-	listTransfersHandler(pool, client)(rec, req)
+	listTransfersHandler(pool, pool, client)(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())

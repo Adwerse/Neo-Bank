@@ -334,7 +334,17 @@ type listTransfersResponse struct {
 // limit is still defaulted/clamped rather than rejected — it's just a
 // page-size preference, not a security-sensitive input; a malformed
 // cursor, in contrast, is rejected with 400 (see errInvalidCursor).
-func listTransfersHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient) http.HandlerFunc {
+// listTransfersHandler takes both pools and picks per-request, not per-
+// deployment: the first page (cursor == nil) is what a client reads
+// immediately after making a transfer or deposit — read-your-writes
+// matters there, so it stays on writePool (the primary). Paging further
+// back (cursor set) is by definition looking at rows the caller already
+// scrolled past once; a few seconds of replica lag on THAT page is
+// invisible to them, which is what makes it the one read in this codebase
+// actually eligible for readPool (see README's read/write split rule —
+// this is deliberately not "GET /transfers reads from the replica",
+// that's exactly the blanket rule the task warns against).
+func listTransfersHandler(writePool, readPool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -352,6 +362,11 @@ func listTransfersHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid cursor")
 			return
+		}
+
+		pool := writePool
+		if cursor != nil {
+			pool = readPool
 		}
 
 		entries, hasMore, err := getOperationHistoryPage(r.Context(), pool, accountsClient, accountID, limit, cursor)

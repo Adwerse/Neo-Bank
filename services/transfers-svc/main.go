@@ -120,6 +120,22 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Falls back to the primary when unset (local `go test`, and any
+	// deployment that hasn't stood up postgres-replica-async) rather than
+	// failing to start — reading from the primary is always correct, just
+	// not the point of having a replica. What's NOT a fallback is which
+	// queries are allowed to use this pool at all once it does point at a
+	// real replica: see listTransfersHandler's doc comment and README.
+	readReplicaURL := os.Getenv("DATABASE_URL_REPLICA")
+	if readReplicaURL == "" {
+		readReplicaURL = databaseURL
+	}
+	readPool, err := pgxpool.New(context.Background(), readReplicaURL)
+	if err != nil {
+		log.Fatalf("transfers-svc: failed to create postgres read-replica pool: %v", err)
+	}
+	defer readPool.Close()
+
 	// grpc.NewClient is lazy: it does not block on a live accounts-svc here,
 	// it dials on the first RPC and reconnects on its own — matching how
 	// accounts-svc's own ledger client tolerates a not-yet-ready dependency
@@ -189,7 +205,7 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /", createTransferHandler(pool, accountsClient, fraudClient, ledgerClient))
-	mux.HandleFunc("GET /", listTransfersHandler(pool, accountsClient))
+	mux.HandleFunc("GET /", listTransfersHandler(pool, readPool, accountsClient))
 	mux.HandleFunc("POST /deposits", createDepositHandler(pool, accountsClient, stripeClient.V1PaymentIntents))
 	mux.HandleFunc("GET /deposits/{id}", getDepositHandler(pool, accountsClient))
 	mux.HandleFunc("POST /webhooks/stripe", stripeWebhookHandler(pool, ledgerClient, stripeWebhookSecret))

@@ -78,6 +78,12 @@ services:
       - "8084:8084"
     environment:
       DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      # Same role/password — pg_basebackup copies cluster-wide catalog data
+      # (roles included), so `neobank` already exists on the replica with
+      # no separate provisioning. See README's read/write split rule for
+      # which queries this is actually allowed to serve (short version:
+      # not balance, not anything read right after a write).
+      DATABASE_URL_REPLICA: postgres://neobank:neobank_dev_password@postgres-replica-async:5432/neobank?sslmode=disable
       ACCOUNTS_GRPC_ADDR: accounts-svc:9082
       FRAUD_GRPC_ADDR: fraud-svc:9085
       LEDGER_GRPC_ADDR: ledger-svc:8083
@@ -151,21 +157,128 @@ services:
       mailpit:
         condition: service_healthy
 
+  # Primary — the only node any service writes to. See README, "Postgres:
+  # потоковая репликация" for the full topology and, more importantly, the
+  # rule for which reads are allowed to go anywhere else.
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: neobank
       POSTGRES_PASSWORD: neobank_dev_password
       POSTGRES_DB: neobank
+      # A subdirectory of the mount, not the mount point itself — the mount
+      # point can contain a lost+found directory (ext4) that makes initdb's
+      # "is this directory empty" check fail on a brand new volume.
+      PGDATA: /var/lib/postgresql/data/pgdata
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: neobank_dev_replication_password
+    # wal_level/max_wal_senders/max_replication_slots already default high
+    # enough for two replicas on modern Postgres — set explicitly anyway so
+    # the requirement is visible here instead of relying on an image
+    # default that could change. synchronous_standby_names names exactly
+    # one standby (replica_a, i.e. postgres-replica-sync): that's what
+    # makes it the SYNCHRONOUS replica — the primary blocks a commit until
+    # a standby connected under that application_name confirms it
+    # (see infra/postgres/replica-entrypoint.sh). postgres-replica-async is
+    # deliberately not listed here — an unlisted standby streams normally
+    # but nothing ever waits on it, which is exactly "asynchronous".
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - synchronous_commit=on
+      - -c
+      - synchronous_standby_names=replica_a
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Runs once against a fresh volume, like kafka-init's topic
+      # provisioning: creates the replication-only role and the
+      # pg_hba.conf line that actually allows it to stream (see the
+      # script's own comment for why "host all all ..." alone doesn't
+      # cover this).
+      - ./infra/postgres/primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U neobank -d neobank"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Replica A — SYNCHRONOUS. A commit on the primary doesn't return until
+  # this standby has confirmed it (synchronous_standby_names above), so
+  # anything read here is guaranteed to include every write the caller
+  # could already know about. That guarantee, not "closest to primary" or
+  # "fastest", is the entire reason to read from it instead of the primary
+  # itself — see README for which reads actually need it (in this app,
+  # none currently do: the primary already serves everything
+  # read-immediately-after-write; this replica exists for the failover
+  # story the next sprint builds on, and as a live demonstration of the
+  # guarantee).
+  postgres-replica-sync:
+    image: postgres:16-alpine
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      PRIMARY_HOST: postgres
+      PRIMARY_PORT: "5432"
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: neobank_dev_replication_password
+      REPLICA_SLOT_NAME: replica_a_slot
+      REPLICA_APPLICATION_NAME: replica_a
+    entrypoint: ["/bin/bash", "/scripts/replica-entrypoint.sh"]
+    volumes:
+      - postgres_replica_sync_data:/var/lib/postgresql/data
+      - ./infra/postgres/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
+    ports:
+      - "5433:5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neobank -d neobank"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Replica B — ASYNCHRONOUS. Not named in synchronous_standby_names, so
+  # the primary never waits on it — it can lag behind by however long
+  # replay takes, visible live via pg_stat_replication (see
+  # infra/postgres/check_replication_lag.sql). This is the ONLY node
+  # transfers-svc's read pool is allowed to point at (DATABASE_URL_REPLICA
+  # in this file), and only for the one query in this codebase that's
+  # actually tolerant of a stale read — see README's read/write split rule
+  # before pointing anything else at it.
+  postgres-replica-async:
+    image: postgres:16-alpine
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      PRIMARY_HOST: postgres
+      PRIMARY_PORT: "5432"
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: neobank_dev_replication_password
+      REPLICA_SLOT_NAME: replica_b_slot
+      REPLICA_APPLICATION_NAME: replica_b
+    entrypoint: ["/bin/bash", "/scripts/replica-entrypoint.sh"]
+    volumes:
+      - postgres_replica_async_data:/var/lib/postgresql/data
+      - ./infra/postgres/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
+    ports:
+      - "5434:5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neobank -d neobank"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
@@ -245,4 +358,6 @@ services:
 
 volumes:
   postgres_data:
+  postgres_replica_sync_data:
+  postgres_replica_async_data:
   kafka_data:

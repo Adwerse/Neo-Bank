@@ -6,6 +6,7 @@
 - `gateway/` — единая точка входа (API Gateway)
 - `services/` — микросервисы: `auth-svc`, `accounts-svc`, `ledger-svc`, `transfers-svc`, `fraud-svc`, `notifications-svc`
 - `proto/` — общие protobuf-контракты между сервисами
+- `infra/postgres/` — скрипты бутстрапа Postgres-репликации (primary-init, replica-entrypoint) и запрос для мониторинга лага — см. «Postgres: потоковая репликация» ниже
 - `frontend/` — SPA (Vite + React + TypeScript), см. «Фронтенд» ниже
 - `.github/workflows/` — CI-пайплайны
 
@@ -13,6 +14,63 @@
 Postgres, Redis и Kafka подняты в `docker-compose.yml`. Postgres использует каждый сервис, у которого есть своя схема (все, кроме gateway). Redis — только auth-svc (сессии/токены). Kafka — auth-svc, accounts-svc и transfers-svc как продюсеры, accounts-svc и notifications-svc как консьюмеры (см. «События (Kafka)» ниже); notifications-svc дополнительно публикует в `transfer.events.dlq` (см. «notifications-svc: устойчивость консьюмера»), так что технически он теперь и продюсер тоже, но только для собственного dead letter topic, не для доменных событий.
 
 Креды Postgres в `docker-compose.yml` — только для локальной разработки, не для продакшена.
+
+## Postgres: потоковая репликация — primary + 2 реплики
+Один инстанс Postgres — точка отказа всей системы: контейнер упал, и auth/accounts/ledger/transfers/fraud/notifications легли разом. `docker-compose.yml` поднимает три узла:
+
+- **`postgres`** — primary. Единственный узел, куда что-либо пишет любой сервис.
+- **`postgres-replica-sync`** (`application_name=replica_a`) — **синхронная** реплика. Primary держит `synchronous_standby_names=replica_a` и `synchronous_commit=on` (оба — в `command:` primary в `docker-compose.yml`): коммит на primary не возвращается вызывающему, пока `replica_a` не подтвердила приём. Цена — задержка записи на сетевой RTT до реплики; выигрыш — после успешного коммита транзакция гарантированно существует на двух узлах, а не только в памяти primary.
+- **`postgres-replica-async`** (`application_name=replica_b`) — **асинхронная** реплика. Не упомянута в `synchronous_standby_names`, поэтому primary её не ждёт: `replica_b` может отставать на произвольное время под нагрузкой или после сетевого сбоя.
+
+### Как поднимаются реплики
+`infra/postgres/primary-init.sh` выполняется один раз при первой инициализации primary (`docker-entrypoint-initdb.d`, как и `kafka-init` для топиков): создаёт роль `replicator` с правом `REPLICATION` (не суперпользователь — скомпрометированное реплика-соединение может только стримить WAL, не трогать данные) и дописывает в `pg_hba.conf` строку `host replication replicator all scram-sha-256` — без неё аутентификация реплики отклоняется на уровне протокола, а не WAL, что путает при первой отладке.
+
+`infra/postgres/replica-entrypoint.sh` (общий для обеих реплик, вся разница — в переменных окружения) при пустом `$PGDATA`: ждёт готовности primary, снимает `pg_basebackup` с флагами `-C -S <slot>` (атомарно создаёт replication slot на primary как часть бэкапа — нет окна, где реплика могла бы стартовать без слота и словить обрезанный WAL), затем сам прописывает `primary_conninfo`/`primary_slot_name` в `postgresql.auto.conf` и создаёт `standby.signal`. `primary_conninfo` пишется вручную, а не через `pg_basebackup -R`: `-R` не даёт указать `application_name`, а именно по нему primary сопоставляет `synchronous_standby_names=replica_a` — реплика, подключившаяся под любым другим именем, для этого правила невидима, и синхронность молча превращается в асинхронность.
+
+### Replication slots — зачем
+Слоты (`replica_a_slot`, `replica_b_slot`) не дают primary удалить WAL-сегменты, которые реплика ещё не забрала — без слота отставшая или временно отключённая реплика может упереться в уже удалённый на primary сегмент и потребовать полного re-basebackup вместо докатки. Обратная сторона: слот удерживает WAL, даже если реплика отключена и не планирует возвращаться — если `postgres-replica-async` выведена из эксплуатации насовсем, соответствующий слот на primary нужно дропнуть вручную (`SELECT pg_drop_replication_slot('replica_b_slot');`), иначе WAL на primary будет расти неограниченно.
+
+### WAL-архивирование: сознательно не делаем
+`archive_mode`/`archive_command` в отдельное хранилище (S3/файловая система) здесь не настроены. Слоты уже решают задержку удержания WAL для *подключённых* реплик — архивирование нужно было бы для point-in-time recovery «с нуля» или для реплики, отставшей дольше, чем есть места на диске primary под удержанный WAL. Ни того, ни другого этот спринт не требует; добавить архивирование, если понадобится PITR — отдельная, не бесплатная инфраструктурная задача (нужен внешний storage), а не переключатель.
+
+### Проверка вручную
+```
+docker compose up -d postgres postgres-replica-sync postgres-replica-async
+
+# обе реплики "streaming", replica_a — sync_state=sync, replica_b — sync_state=async
+docker compose exec -T postgres psql -U neobank -d neobank -c \
+  "SELECT application_name, state, sync_state FROM pg_stat_replication;"
+#  application_name |   state   | sync_state
+# -------------------+-----------+------------
+#  replica_a         | streaming | sync
+#  replica_b         | streaming | async
+
+# лаг в байтах и в секундах для каждой реплики — infra/postgres/check_replication_lag.sql
+docker compose exec -T postgres psql -U neobank -d neobank < infra/postgres/check_replication_lag.sql
+
+# запись видна на синхронной реплике немедленно (в рамках того же коммита)
+docker compose exec -T postgres psql -U neobank -d neobank -c "CREATE TABLE IF NOT EXISTS repl_probe(v int); INSERT INTO repl_probe VALUES (1);"
+docker compose exec -T postgres-replica-sync psql -U neobank -d neobank -c "SELECT * FROM repl_probe;"
+#  v
+# ---
+#  1
+
+# реплики — read-only: primary отвечает на запись, реплика — отказом
+docker compose exec -T postgres-replica-async psql -U neobank -d neobank -c "INSERT INTO repl_probe VALUES (2);"
+# ERROR:  cannot execute INSERT in a read-only transaction
+```
+
+Ручное переключение (какая реплика становится primary при падении текущего primary) в этом спринте не автоматизировано — планового failover/Patroni нет, это следующий шаг.
+
+### Разделение чтений: почему НЕ «все SELECT на реплику»
+Соблазнительный, но неверный для финансового приложения дефолт. Сценарий поломки: пользователь делает перевод (пишет на primary) → тут же открывает экран баланса → баланс читается с отстающей асинхронной реплики → видит старое значение → решает, что перевод не прошёл, и повторяет его. Это классическое нарушение read-your-writes, и решает его не «реплика подешевле», а явное per-query правило:
+
+- **Только primary (или синхронная реплика)** — всё, что читается сразу после записи того же (или связанного) действия: баланс (`GET /accounts/me`), статус перевода/депозита сразу после его создания, первая страница ленты операций (`GET /transfers` без курсора — это ровно то, что открывается сразу после перевода/пополнения).
+- **Можно на асинхронную реплику** — данные, устаревание которых на секунды не меняет решение пользователя: страницы истории операций дальше первой. `GET /transfers?cursor=...` (курсор непустой ⇒ пользователь уже пролистал мимо этих строк один раз) — единственный запрос в этом кодбейсе, который сегодня реально соответствует этому критерию; выбор сделан явно в `listTransfersHandler` (`services/transfers-svc/http.go`), а не через глобальный «читать всегда с реплики» переключатель.
+
+Механизм — два раздельных пула соединений в `transfers-svc/main.go`: `pool` (запись + всё read-your-writes-чувствительное, `DATABASE_URL` → primary) и `readPool` (`DATABASE_URL_REPLICA` → `postgres-replica-async`, с фоллбэком на primary, если переменная не задана — так `go test` и любое окружение без поднятой реплики работают без реплики, просто без выигрыша от неё). `listTransfersHandler` выбирает пул по наличию курсора в запросе — решение видно прямо в хендлере, не спрятано в общем data-access слое.
+
+Других сервисов это пока не касается: `accounts-svc` отдаёт баланс, `transfers-svc`'s `GET /deposits/{id}` — статус депозита сразу после оплаты, оба read-your-writes-чувствительны по определению и остаются на primary. Заводить им читающий пул, которым нечего читать, было бы мёртвым кодом, а не соблюдением правила.
 
 ## События (Kafka)
 `auth-svc` публикует `UserActivated` в топик `user.events`, `accounts-svc` — `AccountCreated` в `account.events`, `transfers-svc` — `TransferCompleted`/`TransferFailed`/`TransferRejected` в `transfer.events`. Контракты — `proto/events/v1/{user,account,transfer}_events.proto`, сериализация бинарным protobuf. Ключ сообщения — `user_id` для `UserActivated`/`AccountCreated`, `sender_account_id` для Transfer*-событий: гарантирует, что все события одного пользователя/счёта попадают в одну партицию и обрабатываются по порядку. `event_id` — случайный UUIDv4 (`outbox.GenerateEventID`, см. ниже), используется консьюмерами (accounts-svc, notifications-svc) для дедупликации при повторной доставке (см. «Идемпотентность» ниже и «notifications-svc» дальше).
