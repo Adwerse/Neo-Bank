@@ -1,5 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router'
 import { useAuth } from '../features/auth/AuthContext'
+import { ConnectionStatus } from '../shared/ws-client/ConnectionStatus'
+import { IncomingTransferWatcher } from '../features/transfers/IncomingTransferWatcher'
 import styles from './Layout.module.css'
 
 const navItems = [
@@ -40,6 +42,12 @@ export function Layout() {
           )}
         </nav>
       </header>
+      {status === 'authenticated' && (
+        <>
+          <ConnectionStatus />
+          <IncomingTransferWatcher />
+        </>
+      )}
       <main className={styles.main}>
         <Outlet />
       </main>

@@ -9,8 +9,10 @@ import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Banner } from '../../../shared/ui/Banner'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { useMe } from '../../accounts/useMe'
 import { formatMoney } from '../../accounts/money'
 import { parseAmountToCents } from '../../transfers/money'
+import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
 import { depositSchema, type DepositFormValues } from '../schemas'
 import { createDeposit } from '../api'
 import { stripePromise } from '../stripe'
@@ -180,6 +182,13 @@ function PaymentStep({ onDeclined, onConfirmed, onCancel }: PaymentStepProps) {
 
 function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStartOver: () => void }) {
   const { deposit, outcome } = useDepositStatusPolling(depositId)
+  // The credited branch below wants the account's current total balance,
+  // not just the deposited amount — deposit.updated already invalidates
+  // this same ['accounts','me'] query (see WebSocketProvider), so by the
+  // time outcome flips to 'credited' this is the fresh number, no extra
+  // fetch triggered here.
+  const { data: account } = useMe()
+  const balanceFlash = useFlashOnChange(account?.balance)
 
   return (
     <Card>
@@ -195,7 +204,20 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
           <Banner variant="danger">Платёж не был зачислен. Попробуйте создать новое пополнение.</Banner>
         )}
         {outcome === 'credited' && deposit && (
-          <Banner variant="success">Баланс пополнен на {formatMoney(deposit.amount, 'EUR')}.</Banner>
+          <>
+            <Banner variant="success">Баланс пополнен на {formatMoney(deposit.amount, 'EUR')}.</Banner>
+            {account && (
+              <div className={styles.currentBalance}>
+                Текущий баланс:{' '}
+                <span className={[styles.currentBalanceValue, balanceFlash && styles.balanceChanged]
+                  .filter(Boolean)
+                  .join(' ')}
+                >
+                  {formatMoney(account.balance, account.currency)}
+                </span>
+              </div>
+            )}
+          </>
         )}
         {(outcome === 'credited' || outcome === 'failed' || outcome === 'timed_out') && (
           <Button variant="secondary" type="button" className={styles.newDepositButton} onClick={onStartOver}>

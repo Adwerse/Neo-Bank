@@ -21,6 +21,28 @@
   border-bottom: none;
 }
 
+/* Same reasoning as DashboardPage's balance-flash: a row that just changed
+   via a push-driven refetch (new entry, or pending -> completed) needs a
+   visible "this just happened", not a silent reflow. */
+@keyframes row-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.rowChanged {
+  animation: row-flash 1.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rowChanged {
+    animation: none;
+  }
+}
+
 .typeBadge {
   font-size: 0.75rem;
   color: var(--color-text-muted);

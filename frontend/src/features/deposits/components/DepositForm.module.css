@@ -31,3 +31,34 @@
 .newDepositButton {
   align-self: flex-start;
 }
+
+.currentBalance {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.currentBalanceValue {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+/* Same pulse as DashboardPage's balance-flash — kept as a separate
+   declaration since CSS Modules scope class names per file. */
+@keyframes deposit-balance-flash {
+  0% {
+    color: var(--color-accent);
+  }
+  100% {
+    color: var(--color-text);
+  }
+}
+
+.balanceChanged {
+  animation: deposit-balance-flash 1.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .balanceChanged {
+    animation: none;
+  }
+}

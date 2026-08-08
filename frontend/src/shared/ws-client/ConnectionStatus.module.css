@@ -1,0 +1,26 @@
+.reconnectingBar {
+  width: 100%;
+  padding: var(--space-1) var(--space-4);
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* Deliberately not full-bleed/no-radius: overriding Banner's own
+   border-radius from here would depend on which CSS module's rules end up
+   later in the bundle, which Vite doesn't guarantee — margin instead of
+   fighting that cascade. */
+.staleBanner {
+  margin: var(--space-3) var(--space-8) 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+.refreshButton {
+  flex-shrink: 0;
+}

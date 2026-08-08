@@ -5,6 +5,7 @@ import { Card } from '../../../shared/ui/Card'
 import { Banner } from '../../../shared/ui/Banner'
 import { Button } from '../../../shared/ui/Button'
 import { Skeleton } from '../../../shared/ui/Skeleton'
+import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
 import buttonStyles from '../../../shared/ui/Button.module.css'
 import { useMe } from '../useMe'
 import { formatMoney } from '../money'
@@ -19,6 +20,10 @@ const STATUS_LABELS: Record<string, string> = {
 export function DashboardPage() {
   const { data, isLoading, isError, error, refetch } = useMe()
   const email = getAccessTokenEmail()
+  // Called unconditionally (before the loading/error early returns below)
+  // per the rules of hooks — data?.balance is undefined until the first
+  // load resolves, which is fine, that's not a "change" either.
+  const balanceFlash = useFlashOnChange(data?.balance)
 
   if (isLoading) {
     return (
@@ -66,7 +71,9 @@ export function DashboardPage() {
         </Banner>
       )}
 
-      <div className={styles.balance}>{formatMoney(account.balance, account.currency)}</div>
+      <div className={[styles.balance, balanceFlash && styles.balanceChanged].filter(Boolean).join(' ')}>
+        {formatMoney(account.balance, account.currency)}
+      </div>
       <Link to="/deposit" className={`${buttonStyles.button} ${buttonStyles.primary} ${styles.depositLink}`}>
         Пополнить счёт
       </Link>

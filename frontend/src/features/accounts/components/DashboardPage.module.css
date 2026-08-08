@@ -4,6 +4,28 @@
   margin: var(--space-2) 0;
 }
 
+/* A push-driven balance update changes a big number with no visible cause
+   otherwise — the pulse is what tells the user "this just moved", not a
+   silent jump. Color only, no layout shift. */
+@keyframes balance-flash {
+  0% {
+    color: var(--color-accent);
+  }
+  100% {
+    color: var(--color-text);
+  }
+}
+
+.balanceChanged {
+  animation: balance-flash 1.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .balanceChanged {
+    animation: none;
+  }
+}
+
 .depositLink {
   margin: 0 0 var(--space-4);
   text-decoration: none;

@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { isApiError } from '../../../shared/api-client/ApiError'
 import { Card } from '../../../shared/ui/Card'
 import { Banner } from '../../../shared/ui/Banner'
@@ -7,6 +8,52 @@ import { formatMoney } from '../../accounts/money'
 import { useOperationHistory } from '../useOperationHistory'
 import type { OperationHistoryEntry } from '../api'
 import styles from './OperationHistory.module.css'
+
+const HIGHLIGHT_MS = 1500
+
+function rowKey(entry: OperationHistoryEntry): string {
+  return `${entry.type}-${entry.id}`
+}
+
+// Diffs each refetch's entries against the previous render's by
+// updated_at, so a row that just transitioned (pending -> completed via
+// the reconciliation worker, say) — or one that's brand new — flashes,
+// while an untouched row sitting further down the list doesn't. React
+// Query's default structural sharing means `entries` only gets a new
+// array reference when something in it actually changed, so a fallback
+// poll tick that returns identical data never trips this.
+function useChangedRowKeys(entries: OperationHistoryEntry[] | undefined): Set<string> {
+  const prevRef = useRef<Map<string, string> | null>(null)
+  const [changed, setChanged] = useState<Set<string>>(new Set())
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    if (!entries) return
+    const prev = prevRef.current
+    const next = new Map(entries.map((entry) => [rowKey(entry), entry.updated_at]))
+    if (prev) {
+      const changedKeys = new Set<string>()
+      for (const [key, updatedAt] of next) {
+        if (prev.get(key) !== updatedAt) changedKeys.add(key)
+      }
+      if (changedKeys.size > 0) {
+        setChanged(changedKeys)
+        if (timerRef.current) clearTimeout(timerRef.current)
+        timerRef.current = setTimeout(() => setChanged(new Set()), HIGHLIGHT_MS)
+      }
+    }
+    prevRef.current = next
+  }, [entries])
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+    },
+    [],
+  )
+
+  return changed
+}
 
 const TYPE_LABELS: Record<string, string> = {
   transfer: 'Перевод',
@@ -40,6 +87,9 @@ function isOutgoing(entry: OperationHistoryEntry): boolean {
 
 export function OperationHistory() {
   const { data, isLoading, isError, error, refetch } = useOperationHistory()
+  // Called unconditionally (before the loading/error early returns below)
+  // per the rules of hooks.
+  const changedKeys = useChangedRowKeys(data)
 
   if (isLoading) {
     return (
@@ -77,8 +127,12 @@ export function OperationHistory() {
         <ul className={styles.list}>
           {entries.map((entry) => {
             const outgoing = isOutgoing(entry)
+            const key = rowKey(entry)
             return (
-              <li key={`${entry.type}-${entry.id}`} className={styles.row}>
+              <li
+                key={key}
+                className={[styles.row, changedKeys.has(key) && styles.rowChanged].filter(Boolean).join(' ')}
+              >
                 <span className={styles.typeBadge}>
                   {TYPE_LABELS[entry.type] ?? entry.type}
                   {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · симуляция</span>}
