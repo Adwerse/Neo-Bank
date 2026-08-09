@@ -11,12 +11,21 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"neobank/pkg/pgha"
+	"neobank/pkg/tracing"
 	eventsv1 "neobank/proto/gen/go/events/v1"
 )
+
+// tracerScope names this service's instrumentation scope for the spans it
+// creates by hand (the automatic HTTP/gRPC/pgx instrumentation supplies
+// its own).
+const tracerScope = "neobank/services/notifications-svc"
 
 const notificationsConsumerGroup = "notifications-svc"
 
@@ -283,24 +292,41 @@ func runUserActivatedConsumer(fetchCtx context.Context, reader *kafka.Reader, po
 			time.Sleep(fetchErrorBackoff)
 			continue
 		}
-		ctx := context.Background()
+		// Join the delivery trace the relay started, so this projection
+		// write appears under the same trace as the publish that caused
+		// it rather than as an orphan.
+		ctx, span := otel.Tracer(tracerScope).Start(
+			traceContextFromMessage(context.Background(), msg),
+			"notifications handle "+topic,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("messaging.source.name", topic),
+				attribute.Int64("messaging.kafka.offset", msg.Offset),
+			),
+		)
 
 		var event eventsv1.UserActivated
 		if err := proto.Unmarshal(msg.Value, &event); err != nil {
 			log.Printf("notifications-svc: %s: failed to unmarshal UserActivated at offset %d: %v", topic, msg.Offset, err)
+			tracing.Fail(ctx, "unmarshal_failed", err)
 			// No amount of redelivery makes an unparseable payload
 			// parseable — commit it so a poison message doesn't block
 			// the partition forever.
 			commitMessage(ctx, reader, msg, topic)
+			span.End()
 			continue
 		}
 
 		if err := handleUserActivated(ctx, pool, &event); err != nil {
 			log.Printf("notifications-svc: failed to handle UserActivated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
+			tracing.Fail(ctx, "useractivated_handling_failed", err)
+			span.End()
 			continue // do not commit — message will be redelivered
 		}
 
 		commitMessage(ctx, reader, msg, topic)
+		span.End()
 	}
 }
 
@@ -317,21 +343,38 @@ func runAccountCreatedConsumer(fetchCtx context.Context, reader *kafka.Reader, p
 			time.Sleep(fetchErrorBackoff)
 			continue
 		}
-		ctx := context.Background()
+		// Join the delivery trace the relay started, so this projection
+		// write appears under the same trace as the publish that caused
+		// it rather than as an orphan.
+		ctx, span := otel.Tracer(tracerScope).Start(
+			traceContextFromMessage(context.Background(), msg),
+			"notifications handle "+topic,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("messaging.source.name", topic),
+				attribute.Int64("messaging.kafka.offset", msg.Offset),
+			),
+		)
 
 		var event eventsv1.AccountCreated
 		if err := proto.Unmarshal(msg.Value, &event); err != nil {
 			log.Printf("notifications-svc: %s: failed to unmarshal AccountCreated at offset %d: %v", topic, msg.Offset, err)
+			tracing.Fail(ctx, "unmarshal_failed", err)
 			commitMessage(ctx, reader, msg, topic)
+			span.End()
 			continue
 		}
 
 		if err := handleAccountCreated(ctx, pool, &event); err != nil {
 			log.Printf("notifications-svc: failed to handle AccountCreated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
+			tracing.Fail(ctx, "accountcreated_handling_failed", err)
+			span.End()
 			continue
 		}
 
 		commitMessage(ctx, reader, msg, topic)
+		span.End()
 	}
 }
 
@@ -450,8 +493,31 @@ func runTransferEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, p
 			continue
 		}
 
-		handleTransferMessageWithRetry(context.Background(), reader, msg, pool, smtpAddr, smtpFrom, dlqWriter, dlqTopic)
+		// context.Background() and not fetchCtx, for the reason this
+		// function's doc comment gives — then the delivery trace is
+		// grafted onto it from the message headers, so this consumer's
+		// spans join the trace the relay started when it published,
+		// rather than rooting a new one per message.
+		handleTransferMessageWithRetry(traceContextFromMessage(context.Background(), msg), reader, msg, pool, smtpAddr, smtpFrom, dlqWriter, dlqTopic)
 	}
+}
+
+// traceContextFromMessage grafts the trace context the outbox relay
+// injected into the message's headers onto ctx.
+//
+// Duplicated in gateway and accounts-svc rather than shared, matching how
+// this repo already duplicates newKafkaWriter and the event_type header
+// constant across service modules: the shared thing is the wire format,
+// not the code.
+func traceContextFromMessage(ctx context.Context, msg kafka.Message) context.Context {
+	if len(msg.Headers) == 0 {
+		return ctx
+	}
+	carrier := make(map[string]string, len(msg.Headers))
+	for _, h := range msg.Headers {
+		carrier[h.Key] = string(h.Value)
+	}
+	return tracing.ExtractMap(ctx, carrier)
 }
 
 // processTransferMessage unmarshals msg according to its event_type
@@ -593,11 +659,43 @@ func handleTransferMessageWithRetry(ctx context.Context, reader *kafka.Reader, m
 	var eventID, eventType string
 	var err error
 
+	// One span for the whole handling of this message — every attempt,
+	// the DLQ decision, and the commit — as a child of the delivery trace
+	// the relay started. Its duration is the honest "how long did this
+	// notification take to deliver", retries included.
+	ctx, span := otel.Tracer(tracerScope).Start(ctx, "notifications handle "+topic,
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.source.name", topic),
+			attribute.Int("messaging.kafka.partition", msg.Partition),
+			attribute.Int64("messaging.kafka.offset", msg.Offset),
+		),
+	)
+	defer span.End()
+
 	unavailableDeadline := time.Now().Add(transferUnavailableBudget)
+	attempts := 0
 
 	for attempt := 1; attempt <= transferMaxAttempts; {
-		eventID, eventType, err = processTransferMessage(ctx, pool, smtpAddr, smtpFrom, msg)
+		attempts++
+		// A span per attempt, so a message that was retried three times
+		// and then dead-lettered reads as exactly that in Jaeger: three
+		// sibling spans with rising attempt numbers, then a DLQ span.
+		attemptCtx, attemptSpan := otel.Tracer(tracerScope).Start(ctx, "attempt",
+			trace.WithAttributes(attribute.Int("neobank.retry.attempt", attempt)))
+
+		eventID, eventType, err = processTransferMessage(attemptCtx, pool, smtpAddr, smtpFrom, msg)
+		if err != nil {
+			tracing.Fail(attemptCtx, "transfer_notification_attempt_failed", err)
+		}
+		attemptSpan.End()
+
 		if err == nil {
+			span.SetAttributes(
+				attribute.Int("neobank.retry.attempts_used", attempts),
+				attribute.String("neobank.event.type", eventType),
+			)
 			commitMessage(ctx, reader, msg, topic)
 			return
 		}
@@ -631,7 +729,27 @@ func handleTransferMessageWithRetry(ctx context.Context, reader *kafka.Reader, m
 	}
 
 	log.Printf("notifications-svc: %s: giving up on %s at offset %d, sending to %s: %v", topic, eventType, msg.Offset, dlqTopic, err)
-	sendToDLQ(ctx, dlqWriter, dlqTopic, msg, eventType, err)
+
+	// Reaching the dead letter topic IS a failure of delivery, so unlike
+	// a fraud rejection this does mark the span as an error — "show me
+	// every notification that ended up in the DLQ" is exactly the query
+	// this needs to answer.
+	span.SetAttributes(
+		attribute.Int("neobank.retry.attempts_used", attempts),
+		attribute.Bool("neobank.dlq.sent", true),
+		attribute.String("neobank.event.type", eventType),
+	)
+	tracing.Fail(ctx, "transfer_notification_dead_lettered", err)
+
+	dlqCtx, dlqSpan := otel.Tracer(tracerScope).Start(ctx, "dlq publish",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.destination.name", dlqTopic),
+		),
+	)
+	sendToDLQ(dlqCtx, dlqWriter, dlqTopic, msg, eventType, err)
+	dlqSpan.End()
 
 	if eventID != "" {
 		if err := finishEvent(ctx, pool, eventID, eventStatusSkipped); err != nil {

@@ -9,11 +9,36 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
+	"neobank/pkg/tracing"
 	eventsv1 "neobank/proto/gen/go/events/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
+
+// tracerScope names this service's instrumentation scope for hand-written
+// spans.
+const tracerScope = "neobank/services/accounts-svc"
+
+// traceContextFromMessage grafts the trace context the outbox relay put in
+// the message headers onto ctx. Creating an account and its ledger account
+// is the most causally interesting consumer work in the system, and
+// without this it would appear in Jaeger with no connection to the
+// registration that caused it. Duplicated per service module, same as the
+// event_type header constant.
+func traceContextFromMessage(ctx context.Context, msg kafka.Message) context.Context {
+	if len(msg.Headers) == 0 {
+		return ctx
+	}
+	carrier := make(map[string]string, len(msg.Headers))
+	for _, h := range msg.Headers {
+		carrier[h.Key] = string(h.Value)
+	}
+	return tracing.ExtractMap(ctx, carrier)
+}
 
 // fetchErrorBackoff keeps a failing FetchMessage from becoming a hot
 // spin. Same value and same reasoning as notifications-svc's constant of
@@ -80,26 +105,42 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 			continue
 		}
 
+		msgCtx, span := otel.Tracer(tracerScope).Start(
+			traceContextFromMessage(ctx, msg),
+			"accounts handle user.events",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("messaging.source.name", "user.events"),
+				attribute.Int64("messaging.kafka.offset", msg.Offset),
+			),
+		)
+
 		var event eventsv1.UserActivated
 		if err := proto.Unmarshal(msg.Value, &event); err != nil {
 			log.Printf("accounts-svc: failed to unmarshal UserActivated at offset %d: %v", msg.Offset, err)
+			tracing.Fail(msgCtx, "unmarshal_failed", err)
 			// No amount of redelivery makes an unparseable payload
 			// parseable — commit it so a poison message doesn't block
 			// the partition forever.
 			if cerr := reader.CommitMessages(ctx, msg); cerr != nil {
 				log.Printf("accounts-svc: failed to commit offset for unparseable message: %v", cerr)
 			}
+			span.End()
 			continue
 		}
 
-		if err := handleUserActivated(ctx, pool, ledgerClient, &event); err != nil {
+		if err := handleUserActivated(msgCtx, pool, ledgerClient, &event); err != nil {
 			log.Printf("accounts-svc: failed to handle UserActivated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
+			tracing.Fail(msgCtx, "user_activated_handling_failed", err)
+			span.End()
 			continue // do not commit — message will be redelivered
 		}
 
 		if err := reader.CommitMessages(ctx, msg); err != nil {
 			log.Printf("accounts-svc: failed to commit offset for user %s: %v", event.GetUserId(), err)
 		}
+		span.End()
 	}
 }
 

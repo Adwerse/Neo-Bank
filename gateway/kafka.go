@@ -11,10 +11,34 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
+	"neobank/pkg/tracing"
 	eventsv1 "neobank/proto/gen/go/events/v1"
 )
+
+// tracerScope names the gateway's instrumentation scope for hand-written
+// spans.
+const tracerScope = "neobank/gateway"
+
+// traceContextFromMessage grafts the trace context the outbox relay
+// injected into the message headers onto ctx, so a WebSocket push shows
+// up inside the delivery trace of the event that triggered it instead of
+// as an orphan. Duplicated in notifications-svc and accounts-svc rather
+// than shared — the common thing here is the wire format, not the code.
+func traceContextFromMessage(ctx context.Context, msg kafka.Message) context.Context {
+	if len(msg.Headers) == 0 {
+		return ctx
+	}
+	carrier := make(map[string]string, len(msg.Headers))
+	for _, h := range msg.Headers {
+		carrier[h.Key] = string(h.Value)
+	}
+	return tracing.ExtractMap(ctx, carrier)
+}
 
 const (
 	defaultKafkaBrokers        = "kafka:9092"
@@ -116,7 +140,16 @@ func runAccountEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, ca
 			time.Sleep(fetchErrorBackoff)
 			continue
 		}
-		ctx := context.Background()
+		ctx, span := otel.Tracer(tracerScope).Start(
+			traceContextFromMessage(context.Background(), msg),
+			"gateway handle "+topic,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("messaging.source.name", topic),
+				attribute.Int64("messaging.kafka.offset", msg.Offset),
+			),
+		)
 
 		if eventTypeOf(msg) != eventTypeAccountCreated {
 			// account.events carries only AccountCreated today, but
@@ -125,6 +158,7 @@ func runAccountEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, ca
 			if err := reader.CommitMessages(ctx, msg); err != nil {
 				log.Printf("gateway: %s: failed to commit offset at partition %d offset %d: %v", topic, msg.Partition, msg.Offset, err)
 			}
+			span.End()
 			continue
 		}
 
@@ -134,6 +168,7 @@ func runAccountEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, ca
 			if err := reader.CommitMessages(ctx, msg); err != nil {
 				log.Printf("gateway: %s: failed to commit offset at partition %d offset %d: %v", topic, msg.Partition, msg.Offset, err)
 			}
+			span.End()
 			continue
 		}
 
@@ -142,6 +177,7 @@ func runAccountEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, ca
 		if err := reader.CommitMessages(ctx, msg); err != nil {
 			log.Printf("gateway: %s: failed to commit offset at partition %d offset %d: %v", topic, msg.Partition, msg.Offset, err)
 		}
+		span.End()
 	}
 }
 
@@ -164,13 +200,26 @@ func runTransferEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, c
 			time.Sleep(fetchErrorBackoff)
 			continue
 		}
-		ctx := context.Background()
+		// The span that closes the loop the DoD is about: a transfer's
+		// delivery trace now runs relay -> Kafka -> gateway -> the
+		// WebSocket frame that lands in the browser.
+		ctx, span := otel.Tracer(tracerScope).Start(
+			traceContextFromMessage(context.Background(), msg),
+			"gateway handle "+topic,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("messaging.source.name", topic),
+				attribute.Int64("messaging.kafka.offset", msg.Offset),
+			),
+		)
 
 		handleTransferMessage(ctx, msg, cache, registry)
 
 		if err := reader.CommitMessages(ctx, msg); err != nil {
 			log.Printf("gateway: %s: failed to commit offset at partition %d offset %d: %v", topic, msg.Partition, msg.Offset, err)
 		}
+		span.End()
 	}
 }
 

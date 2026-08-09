@@ -6,9 +6,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
 
+	"neobank/pkg/tracing"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
+
+// tracerScope names this service's instrumentation scope for the spans
+// it creates by hand.
+const tracerScope = "neobank/services/transfers-svc"
 
 // reconcileInterval is how often the worker looks for stale pending
 // transfers. Fixed rather than configurable (unlike staleAfter, below) —
@@ -81,6 +87,27 @@ func reconcileOnce(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv
 // result must win, not be silently overwritten by this worker's slightly
 // stale view.
 func reconcileTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, transfer Transfer) {
+	// The demonstration this sprint is built around. This worker woke on a
+	// timer; nothing called it, so its span has no parent by construction.
+	// Linking it to the trace stored when the transfer row was created
+	// makes the whole story of a stuck transfer navigable in Jaeger: the
+	// original request, the point where it stopped short of a terminal
+	// state, and — minutes later, in a separate trace — the worker that
+	// finished it.
+	//
+	// A link, not a parent, for the reason spelled out in
+	// tracing.StartLinkedRoot: the request span ended minutes ago, and
+	// nesting this inside it would claim a 50ms operation contains a child
+	// that started long after it returned.
+	ctx, span := tracing.StartLinkedRoot(ctx, tracerScope, "reconcile transfer",
+		originTraceContext(ctx, pool, "transfers", transfer.ID),
+		tracing.TransferID(transfer.ID),
+		tracing.AmountMinor(transfer.Amount),
+		attribute.String("neobank.reconcile.trigger", "stale_pending"),
+		attribute.Float64("neobank.reconcile.stale_for_seconds", time.Since(transfer.UpdatedAt).Seconds()),
+	)
+	defer span.End()
+
 	resp, err := ledgerClient.GetTransactionByReference(ctx, &ledgerv1.GetTransactionByReferenceRequest{Reference: transfer.ID})
 	if err != nil {
 		log.Printf("transfers-svc: reconcile: transfer %s: GetTransactionByReference: %v (will retry next tick)", transfer.ID, err)
@@ -95,6 +122,11 @@ func reconcileTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient led
 		}
 		if resolved {
 			log.Printf("transfers-svc: reconcile: transfer %s resolved to completed (ledger_transaction_id=%s) — ledger-svc had already executed it, the original response was never received", transfer.ID, resp.GetTransactionId())
+			tracing.SetAttributes(ctx,
+				tracing.TransferStatus("completed"),
+				tracing.LedgerTransactionID(resp.GetTransactionId()),
+				attribute.String("neobank.reconcile.resolution", "completed"),
+			)
 		}
 		return
 	}
@@ -106,5 +138,9 @@ func reconcileTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient led
 	}
 	if resolved {
 		log.Printf("transfers-svc: reconcile: transfer %s resolved to failed (reason=%s) — ledger-svc never executed it, no money moved", transfer.ID, failureReasonTimeoutUnresolved)
+		tracing.SetAttributes(ctx,
+			tracing.TransferStatus("failed"),
+			attribute.String("neobank.reconcile.resolution", "failed"),
+		)
 	}
 }

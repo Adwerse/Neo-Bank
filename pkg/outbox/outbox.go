@@ -19,9 +19,16 @@
 //	    partition_key TEXT NOT NULL,
 //	    payload BYTEA NOT NULL,
 //	    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-//	    published_at TIMESTAMPTZ
+//	    published_at TIMESTAMPTZ,
+//	    trace_context JSONB
 //	);
 //	CREATE INDEX ON <table> (published_at, id) WHERE published_at IS NULL;
+//
+// trace_context is REQUIRED (nullable, but the column must exist):
+// InsertEvent writes it and RelayBatch reads it, so a table missing it
+// fails every insert. It carries the trace of the request that produced
+// the event across the gap to the relay — see pkg/tracing/carrier.go for
+// why nothing else can.
 package outbox
 
 import (
@@ -30,6 +37,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"neobank/pkg/tracing"
 )
 
 // GenerateEventID returns a random UUIDv4 (RFC 4122), hand-rolled from
@@ -61,10 +70,26 @@ func GenerateEventID() (string, error) {
 // parameter. Every call site in this repo passes a hardcoded literal
 // ("outbox", "auth_outbox", ...), never a value derived from external
 // input.
+// The trace context of the caller is captured here and stored alongside
+// the event, in the same transaction, for the reason spelled out in
+// pkg/tracing/carrier.go: by the time RunRelay publishes this row there
+// is no live span left to inject into a Kafka header, so the only thing
+// that can carry the trace across the gap is the row itself. Storing it
+// in the same transaction means the context is exactly as durable as the
+// event — an event can never exist without knowing where it came from.
+//
+// A NULL trace_context is a normal outcome (tracing disabled, or a
+// caller with no active span), not a failure: SerializeContext returns
+// "" and the column stays NULL.
 func InsertEvent(ctx context.Context, tx pgx.Tx, table, eventID, eventType, partitionKey string, payload []byte) error {
+	var traceContext *string
+	if serialized := tracing.SerializeContext(ctx); serialized != "" {
+		traceContext = &serialized
+	}
+
 	_, err := tx.Exec(ctx,
-		fmt.Sprintf(`INSERT INTO %s (event_id, event_type, partition_key, payload) VALUES ($1, $2, $3, $4)`, table),
-		eventID, eventType, partitionKey, payload,
+		fmt.Sprintf(`INSERT INTO %s (event_id, event_type, partition_key, payload, trace_context) VALUES ($1, $2, $3, $4, $5)`, table),
+		eventID, eventType, partitionKey, payload, traceContext,
 	)
 	return err
 }

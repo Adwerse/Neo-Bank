@@ -7,7 +7,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stripe/stripe-go/v86"
+	"go.opentelemetry.io/otel/attribute"
 
+	"neobank/pkg/tracing"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
 
@@ -79,8 +81,27 @@ func creditSucceededDeposits(ctx context.Context, pool *pgxpool.Pool, ledgerClie
 // about how long the invariant was violated, not about whether this
 // particular attempt happened to fix it.
 func creditDeposit(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, d Deposit, divergenceAfter time.Duration) {
+	// Linked to the request that created the deposit, same reasoning as
+	// reconcileTransfer: this worker has no caller, and the link is what
+	// connects "user paid" to "balance finally reflected it", however many
+	// minutes apart those were.
+	ctx, span := tracing.StartLinkedRoot(ctx, tracerScope, "reconcile deposit",
+		originTraceContext(ctx, pool, "deposits", d.ID),
+		tracing.DepositID(d.ID),
+		tracing.AccountID(d.AccountID),
+		tracing.AmountMinor(d.Amount),
+		attribute.String("neobank.reconcile.trigger", "succeeded_uncredited"),
+		attribute.Float64("neobank.reconcile.stale_for_seconds", time.Since(d.UpdatedAt).Seconds()),
+	)
+	defer span.End()
+
 	if time.Since(d.UpdatedAt) > divergenceAfter {
 		log.Printf("%s: deposit %s has been 'succeeded' (Stripe confirmed the charge) for over %s without becoming 'credited' — money was taken but not yet reflected in the user's balance; check ledger-svc connectivity", depositDivergenceLogPrefix, d.ID, divergenceAfter)
+		// The one condition in this service that would page a human in a
+		// real bank: Stripe took the money and the ledger has not
+		// reflected it. Marked as a span error so it is findable in Jaeger
+		// as well as greppable in the log.
+		tracing.Fail(ctx, "deposit_credit_divergence", nil)
 	}
 
 	// reference = d.ID: idempotent on ledger-svc's side (see
@@ -101,6 +122,10 @@ func creditDeposit(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv
 	}
 	if credited {
 		log.Printf("transfers-svc: reconcile deposits: deposit %s credited (ledger_transaction_id=%s)", d.ID, resp.GetTransactionId())
+		tracing.SetAttributes(ctx,
+			tracing.LedgerTransactionID(resp.GetTransactionId()),
+			attribute.String("neobank.reconcile.resolution", "credited"),
+		)
 	}
 	// !credited means a concurrent caller (another replica's tick) already
 	// credited this deposit between getSucceededDeposits reading it and

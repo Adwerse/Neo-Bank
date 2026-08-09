@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"neobank/pkg/outbox"
+	"neobank/pkg/tracing"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	eventsv1 "neobank/proto/gen/go/events/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
@@ -185,10 +186,10 @@ func createTransfer(ctx context.Context, pool *pgxpool.Pool, accountsClient acco
 
 	var t Transfer
 	err = pool.QueryRow(ctx,
-		`INSERT INTO transfers (idempotency_key, sender_account_id, recipient_account_id, amount)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO transfers (idempotency_key, sender_account_id, recipient_account_id, amount, trace_context)
+		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, idempotency_key, sender_account_id, recipient_account_id, amount, status, failure_reason, ledger_transaction_id, created_at, updated_at`,
-		idempotencyKey, senderAccountID, recipient.GetAccountId(), amount,
+		idempotencyKey, senderAccountID, recipient.GetAccountId(), amount, nullableTraceContext(ctx),
 	).Scan(&t.ID, &t.IdempotencyKey, &t.SenderAccountID, &t.RecipientAccountID, &t.Amount, &t.Status, &t.FailureReason, &t.LedgerTransactionID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -738,6 +739,46 @@ func checkTransferFraud(ctx context.Context, pool *pgxpool.Pool, fraudClient fra
 		log.Printf("transfers-svc: checkTransferFraud: unexpected decision %q for transfer %s", resp.GetDecision(), transfer.ID)
 		return transfer, fraudCheckUncertain, nil
 	}
+}
+
+// nullableTraceContext renders the caller's trace for storage on a
+// resource row, or NULL when there is no trace to record.
+//
+// Written at creation because that is the only moment the originating
+// request's context exists. The reconciliation workers that read it back
+// run minutes later on a timer, with no parent span of their own — see
+// originTraceContext.
+func nullableTraceContext(ctx context.Context) *string {
+	if serialized := tracing.SerializeContext(ctx); serialized != "" {
+		return &serialized
+	}
+	return nil
+}
+
+// originTraceContext reads back the trace recorded when a row was
+// created, so a background worker can link its work to the request that
+// caused it.
+//
+// A separate one-row query rather than an extra column on every Transfer
+// and Deposit scan in this service: only the reconciliation paths ever
+// need it, they handle a handful of rows per tick, and threading a
+// field through a dozen unrelated SELECTs to serve two call sites would
+// cost more clarity than the query costs time.
+//
+// table is a hardcoded literal at both call sites ("transfers",
+// "deposits"), never anything derived from input — same rule as
+// pkg/outbox's table parameter.
+func originTraceContext(ctx context.Context, pool *pgxpool.Pool, table, id string) string {
+	var serialized string
+	err := pool.QueryRow(ctx,
+		fmt.Sprintf("SELECT COALESCE(trace_context::text, '') FROM %s WHERE id = $1", table), id,
+	).Scan(&serialized)
+	if err != nil {
+		// Not worth failing reconciliation over: the work still gets
+		// done, the span just roots its own trace with no link back.
+		return ""
+	}
+	return serialized
 }
 
 func markTransferRejected(ctx context.Context, pool *pgxpool.Pool, id, triggeredRule string) (Transfer, error) {

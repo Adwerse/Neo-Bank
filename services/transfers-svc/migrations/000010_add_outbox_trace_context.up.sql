@@ -1,0 +1,18 @@
+-- The column that carries a trace across the outbox gap.
+--
+-- Automatic instrumentation cannot bridge this: the publishing goroutine
+-- (the relay) runs seconds later, in a different goroutine, with no
+-- knowledge of the request that produced the row. There is no live span
+-- for a Kafka wrapper to inject from at publish time, so the context has
+-- to be written down here, inside the same transaction as the event, and
+-- read back by the relay.
+--
+-- JSONB rather than TEXT so it is inspectable from psql without any code:
+--   SELECT event_type, trace_context->>'traceparent' FROM outbox
+--    WHERE published_at IS NULL;
+-- which answers "what trace does this stuck event belong to" directly.
+--
+-- Nullable on purpose, and it must stay that way: rows written before this
+-- column existed, and rows written while tracing is disabled, legitimately
+-- have no context. A missing trace is a missing trace, never an error.
+ALTER TABLE outbox ADD COLUMN trace_context JSONB;

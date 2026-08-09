@@ -113,6 +113,11 @@ services:
       LEDGER_GRPC_ADDR: ledger-svc:8083
       KAFKA_BROKERS: kafka:9092
       KAFKA_TRANSFER_EVENTS_TOPIC: transfer.events
+      # Left empty by default, in which case the service uses its own
+      # 2-minute default. Overridable from .env purely so the
+      # reconciliation trace can be demonstrated without waiting two
+      # minutes per attempt — see README, "Reconciliation в трейсе".
+      RECONCILE_STALE_AFTER: ${RECONCILE_STALE_AFTER:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
     depends_on:

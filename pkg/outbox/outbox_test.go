@@ -53,7 +53,8 @@ func newTestOutboxTable(t *testing.T, ctx context.Context, pool *pgxpool.Pool) s
 			partition_key TEXT NOT NULL,
 			payload BYTEA NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			published_at TIMESTAMPTZ
+			published_at TIMESTAMPTZ,
+			trace_context JSONB
 		)`, table))
 	if err != nil {
 		t.Fatalf("create test outbox table: %v", err)

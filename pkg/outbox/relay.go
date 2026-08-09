@@ -8,6 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel/attribute"
+
+	"neobank/pkg/tracing"
 )
 
 // DefaultBatchSize is how many unpublished rows RelayBatch claims per
@@ -48,12 +51,26 @@ type KafkaMessageWriter interface {
 	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
 }
 
+// tracerScope names the instrumentation scope for spans this package
+// creates. Distinct from the service name (which lives in the resource),
+// so Jaeger can tell "a span from the outbox relay" apart from "a span
+// transfers-svc wrote by hand".
+const tracerScope = "neobank/pkg/outbox"
+
 type relayRow struct {
 	ID           int64
 	EventID      string
 	EventType    string
 	PartitionKey string
 	Payload      []byte
+	// TraceContext is the serialized trace of the request that produced
+	// this event, written by InsertEvent in the same transaction. Empty
+	// for rows written before the column existed or while tracing was
+	// off — both normal.
+	TraceContext string
+	// CreatedAt is when the event was written, used to report how long it
+	// waited for the relay as a span attribute.
+	CreatedAt time.Time
 }
 
 // RunRelay is the process that closes the dual-write gap InsertEvent's
@@ -105,7 +122,7 @@ func RelayBatch(ctx context.Context, pool *pgxpool.Pool, table string, writer Ka
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx,
-		fmt.Sprintf(`SELECT id, event_id, event_type, partition_key, payload
+		fmt.Sprintf(`SELECT id, event_id, event_type, partition_key, payload, COALESCE(trace_context::text, ''), created_at
 		 FROM %s
 		 WHERE published_at IS NULL
 		 ORDER BY id
@@ -120,7 +137,7 @@ func RelayBatch(ctx context.Context, pool *pgxpool.Pool, table string, writer Ka
 	var batch []relayRow
 	for rows.Next() {
 		var r relayRow
-		if err := rows.Scan(&r.ID, &r.EventID, &r.EventType, &r.PartitionKey, &r.Payload); err != nil {
+		if err := rows.Scan(&r.ID, &r.EventID, &r.EventType, &r.PartitionKey, &r.Payload, &r.TraceContext, &r.CreatedAt); err != nil {
 			rows.Close()
 			log.Printf("%s: outbox relay: scan claimed row: %v", logPrefix, err)
 			return
@@ -141,22 +158,64 @@ func RelayBatch(ctx context.Context, pool *pgxpool.Pool, table string, writer Ka
 	// below: the break only stops the batch from progressing further, it
 	// doesn't undo work this call already completed.
 	for _, r := range batch {
-		writeCtx, cancel := context.WithTimeout(ctx, DefaultPublishTimeout)
+		// Each event gets its own span, and that span STARTS A NEW TRACE
+		// linked back to the request that produced the event, rather than
+		// continuing that request's trace as a child.
+		//
+		// The alternative — parenting this to the originating span — is
+		// available (the context is right there in r.TraceContext) and is
+		// the wrong choice. That HTTP request finished in tens of
+		// milliseconds; this publish happens up to a second later, and
+		// after a Kafka outage, minutes later. A parent span's duration is
+		// supposed to contain its children, so parenting would draw a 50ms
+		// bar with a child beginning three seconds after the bar ended,
+		// and would corrupt every duration statistic computed over the
+		// request span. A link states the true relationship — separate
+		// work, caused by that trace — and Jaeger makes it navigable from
+		// both ends. See README, "Связь спанов".
+		publishCtx, span := tracing.StartLinkedRoot(ctx, tracerScope, "outbox publish "+r.EventType, r.TraceContext,
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.operation", "publish"),
+			attribute.String("neobank.outbox.table", table),
+			attribute.String("neobank.event.id", r.EventID),
+			attribute.String("neobank.event.type", r.EventType),
+			// How long the event sat unpublished. This is the number the
+			// outbox pattern trades for durability, and having it on the
+			// span makes relay lag answerable without a query.
+			attribute.Int64("neobank.outbox.lag_ms", time.Since(r.CreatedAt).Milliseconds()),
+		)
+
+		// Headers carry the DELIVERY trace (this span), not the original
+		// request's. Consumers therefore continue this trace as ordinary
+		// children — which is correct, because they really are caused by
+		// this publish and follow it closely — while the link keeps the
+		// path back to the originating request one click away.
+		headers := []kafka.Header{{Key: HeaderEventType, Value: []byte(r.EventType)}}
+		for k, v := range tracing.InjectMap(publishCtx) {
+			headers = append(headers, kafka.Header{Key: k, Value: []byte(v)})
+		}
+
+		writeCtx, cancel := context.WithTimeout(publishCtx, DefaultPublishTimeout)
 		err := writer.WriteMessages(writeCtx, kafka.Message{
 			Key:     []byte(r.PartitionKey),
 			Value:   r.Payload,
-			Headers: []kafka.Header{{Key: HeaderEventType, Value: []byte(r.EventType)}},
+			Headers: headers,
 		})
 		cancel()
 		if err != nil {
 			log.Printf("%s: outbox relay: publish event_id=%s type=%s: %v (will retry next tick)", logPrefix, r.EventID, r.EventType, err)
+			tracing.Fail(publishCtx, "outbox_publish_failed", err)
+			span.End()
 			break
 		}
 
-		if _, err := tx.Exec(ctx, fmt.Sprintf("UPDATE %s SET published_at = now() WHERE id = $1", table), r.ID); err != nil {
+		if _, err := tx.Exec(publishCtx, fmt.Sprintf("UPDATE %s SET published_at = now() WHERE id = $1", table), r.ID); err != nil {
 			log.Printf("%s: outbox relay: mark published event_id=%s: %v", logPrefix, r.EventID, err)
+			tracing.Fail(publishCtx, "outbox_mark_published_failed", err)
+			span.End()
 			break
 		}
+		span.End()
 	}
 
 	if err := tx.Commit(ctx); err != nil {

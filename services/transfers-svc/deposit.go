@@ -115,8 +115,8 @@ func createDeposit(ctx context.Context, pool *pgxpool.Pool, accountsClient accou
 
 	var d Deposit
 	err = scanDeposit(pool.QueryRow(ctx,
-		`INSERT INTO deposits (account_id, amount) VALUES ($1, $2) RETURNING `+depositColumns,
-		accountID, amount,
+		`INSERT INTO deposits (account_id, amount, trace_context) VALUES ($1, $2, $3) RETURNING `+depositColumns,
+		accountID, amount, nullableTraceContext(ctx),
 	), &d)
 	if err != nil {
 		return Deposit{}, "", 0, fmt.Errorf("insert pending deposit: %w", err)
