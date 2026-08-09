@@ -8,12 +8,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stripe/stripe-go/v86"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"neobank/pkg/outbox"
+	"neobank/pkg/pgha"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
@@ -110,27 +110,55 @@ func main() {
 
 	databaseURL := os.Getenv("DATABASE_URL")
 
-	if err := runMigrations(databaseURL); err != nil {
-		log.Fatalf("transfers-svc: failed to run migrations: %v", err)
-	}
-
-	pool, err := pgxpool.New(context.Background(), databaseURL)
+	// Pool first, migrations second — the reverse of the original order,
+	// and the swap is load-bearing now that DATABASE_URL resolves to
+	// whichever node currently holds the leader role rather than to a
+	// fixed container. The pool is what can ask "is there a leader yet?",
+	// and pgha.WaitForWritable blocks until the answer is yes, so a
+	// service that happens to start during a failover waits it out
+	// instead of dying on a migration attempt against a node that is
+	// still a standby. Nothing is paid for the reordering: pgha.NewPool
+	// dials nothing, exactly like the pgxpool.New it replaces.
+	pool, err := pgha.NewPool(context.Background(), databaseURL)
 	if err != nil {
 		log.Fatalf("transfers-svc: failed to create postgres pool: %v", err)
 	}
 	defer pool.Close()
 
-	// Falls back to the primary when unset (local `go test`, and any
-	// deployment that hasn't stood up postgres-replica-async) rather than
-	// failing to start — reading from the primary is always correct, just
-	// not the point of having a replica. What's NOT a fallback is which
-	// queries are allowed to use this pool at all once it does point at a
-	// real replica: see listTransfersHandler's doc comment and README.
+	if err := pgha.WaitForWritable(context.Background(), pool, log.Printf); err != nil {
+		log.Fatalf("transfers-svc: no writable postgres leader: %v", err)
+	}
+
+	// Retried rather than fatal on the first error: a failover landing
+	// between the check above and this call is a few seconds, not a
+	// reason to crash and leave the restart policy to sort it out.
+	// pgha.Retry still surfaces a genuine migration failure — bad SQL, a
+	// missing table, wrong credentials — immediately, so this does not
+	// turn a real breakage into a two-minute silence.
+	if err := pgha.Retry(context.Background(), "run migrations", log.Printf, func(context.Context) error {
+		return runMigrations(databaseURL)
+	}); err != nil {
+		log.Fatalf("transfers-svc: failed to run migrations: %v", err)
+	}
+
+	// Falls back to the leader when unset (local `go test`, and any
+	// deployment without a standby to read from) rather than failing to
+	// start — reading from the leader is always correct, just not the
+	// point of having standbys. What's NOT a fallback is which queries
+	// are allowed to use this pool at all once it does point at a real
+	// standby: see listTransfersHandler's doc comment and README.
+	//
+	// Deliberately NOT wrapped in WaitForWritable, unlike the pool above:
+	// this one is supposed to land on a node in recovery, so "is it
+	// writable yet" is the wrong question to block startup on. If no
+	// standby is available the pool simply fails its queries and
+	// listTransfersHandler returns an error for a history page — a
+	// degraded read, not a service that refuses to boot.
 	readReplicaURL := os.Getenv("DATABASE_URL_REPLICA")
 	if readReplicaURL == "" {
 		readReplicaURL = databaseURL
 	}
-	readPool, err := pgxpool.New(context.Background(), readReplicaURL)
+	readPool, err := pgha.NewPool(context.Background(), readReplicaURL)
 	if err != nil {
 		log.Fatalf("transfers-svc: failed to create postgres read-replica pool: %v", err)
 	}

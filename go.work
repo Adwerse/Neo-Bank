@@ -2,8 +2,10 @@ go 1.25.0
 
 use (
 	./gateway
+	./infra/failover
 	./pkg/health
 	./pkg/outbox
+	./pkg/pgha
 	./proto/gen/go
 	./services/accounts-svc
 	./services/auth-svc

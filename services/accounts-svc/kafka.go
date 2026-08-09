@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
@@ -13,6 +14,12 @@ import (
 	eventsv1 "neobank/proto/gen/go/events/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
+
+// fetchErrorBackoff keeps a failing FetchMessage from becoming a hot
+// spin. Same value and same reasoning as notifications-svc's constant of
+// the same name; duplicated rather than shared, per this repo's
+// per-service-module convention.
+const fetchErrorBackoff = time.Second
 
 // newKafkaReader constructs accounts-svc's consumer for the user.events
 // topic. GroupID is set so that if this service is ever scaled to multiple
@@ -56,7 +63,20 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 	for {
 		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Printf("accounts-svc: user.events: shutting down")
+				return
+			}
 			log.Printf("accounts-svc: failed to fetch message: %v", err)
+			// The bare `continue` this replaces spun as fast as the
+			// broker could refuse, burning CPU and drowning the log —
+			// notifications-svc's readers have had this backoff since
+			// they were written and this one was simply missed. It
+			// matters more now: a failover is a stretch of seconds where
+			// handleUserActivated below fails every time, and a hot loop
+			// through that window buries the one log line that says what
+			// actually happened.
+			time.Sleep(fetchErrorBackoff)
 			continue
 		}
 

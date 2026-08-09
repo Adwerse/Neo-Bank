@@ -1,5 +1,19 @@
 # Shell scripts run inside Linux containers (bind-mounted by docker-compose,
-# e.g. infra/postgres/*.sh) — a CRLF shebang line fails to exec there. Force
+# e.g. infra/patroni/*.sh) — a CRLF shebang line fails to exec there. Force
 # LF regardless of a contributor's core.autocrlf, which otherwise converts
 # to CRLF on checkout on Windows.
 *.sh text eol=lf
+
+# Config files read by Linux processes: infra/haproxy/haproxy.cfg is
+# bind-mounted into the haproxy container, infra/patroni/patroni.yml is
+# COPY'd into the Patroni image.
+#
+# Unlike the shebang case above, this is consistency rather than a known
+# break — haproxy 3.0 was observed parsing a CRLF config without
+# complaint, and PyYAML tolerates CRLF by design. But neither of those is
+# a guarantee worth depending on across versions, and a file whose only
+# job is to be read by a Linux process has no reason to carry Windows
+# line endings in the first place.
+*.cfg text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

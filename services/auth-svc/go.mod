@@ -30,9 +30,12 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	neobank/pkg/pgha v0.0.0
 	neobank/proto/gen/go v0.0.0
 )
 
 replace neobank/proto/gen/go => ../../proto/gen/go
 
 replace neobank/pkg/outbox => ../../pkg/outbox
+
+replace neobank/pkg/pgha => ../../pkg/pgha

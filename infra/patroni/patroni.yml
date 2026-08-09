@@ -1,0 +1,183 @@
+# One config file, used unchanged by all three nodes — the same pattern
+# the hand-rolled replica-entrypoint.sh used before Patroni replaced it:
+# everything that differs between nodes is env-driven, nothing is
+# written twice. Patroni reads PATRONI_NAME,
+# PATRONI_RESTAPI_CONNECT_ADDRESS and PATRONI_POSTGRESQL_CONNECT_ADDRESS
+# from the environment and they override the values below, so
+# docker-compose.yml sets exactly those three per node and nothing else.
+scope: neobank
+namespace: /service/
+
+restapi:
+  # 0.0.0.0 so HAProxy (a different container) can reach it; the
+  # advertised address comes from PATRONI_RESTAPI_CONNECT_ADDRESS.
+  #
+  # This API is the whole reason the routing story works: /primary
+  # answers 200 on exactly one node at a time and 503 everywhere else,
+  # and that answer comes from Patroni's own view of the etcd leader
+  # key, not from asking Postgres whether it happens to be writable.
+  listen: 0.0.0.0:8008
+
+etcd3:
+  hosts: etcd:2379
+
+bootstrap:
+  # `dcs:` is written into etcd once, at cluster bootstrap, and from then
+  # on it is the CLUSTER'S config, not this file's — every node reads it
+  # from etcd. Editing it here after the first bootstrap changes nothing;
+  # use `patronictl edit-config` (see README) instead. That indirection
+  # is the point: failover parameters have to be something all nodes
+  # agree on, and a file baked into three images can drift.
+  dcs:
+    # The failover budget, and the only numbers here worth tuning.
+    #
+    #   loop_wait     — how often each node runs its HA cycle
+    #   retry_timeout — how long a node retries a failing DCS/Postgres
+    #                   call before treating it as a real failure
+    #   ttl           — how long the leader key survives in etcd without
+    #                   being refreshed
+    #
+    # Patroni requires ttl >= loop_wait + 2*retry_timeout (20 >= 3 + 10),
+    # because a leader that is merely slow must still be able to refresh
+    # its key before it expires — otherwise a GC pause or a slow disk
+    # would demote a perfectly healthy leader.
+    #
+    # Detection therefore costs up to `ttl` seconds: nothing can promote
+    # until the dead leader's key actually expires, and shortening that
+    # is the single biggest lever on failover time. Patroni's defaults
+    # (ttl 30 / loop_wait 10 / retry_timeout 10) mean a ~30s outage,
+    # which is fine in production where a false positive is expensive.
+    #
+    # 20 is not a free choice — it is Patroni's own hard floor. Anything
+    # lower is silently clamped, with only a log line to say so:
+    #
+    #   WARNING: ttl=15 can't be smaller than 20, adjusting...
+    #
+    # so a config claiming a 15-second failover budget would be fiction.
+    # loop_wait and retry_timeout are still tightened from their defaults,
+    # which is what shortens the time between the key expiring and the new
+    # leader actually serving. Do not tighten these further for production
+    # without measuring your own leader's worst-case pause: every second
+    # cut here is a second closer to demoting a healthy leader that was
+    # merely busy.
+    ttl: 20
+    loop_wait: 3
+    retry_timeout: 5
+
+    # A candidate more than 1MB of WAL behind is not promoted. Belt and
+    # braces next to synchronous_mode below — with a sync standby this
+    # bound should never be the deciding factor, but it is what stops a
+    # badly lagging async node from winning if synchronous_mode is ever
+    # turned off.
+    maximum_lag_on_failover: 1048576
+
+    # This is the setting that makes failover safe for a ledger, and it
+    # is worth being precise about what it buys.
+    #
+    # WITHOUT synchronous_mode, Patroni promotes whichever healthy
+    # candidate has the highest LSN. That node may still be missing
+    # transactions the old leader had already acknowledged to a client —
+    # the client was told "committed", the money moved, and the new
+    # leader has never heard of it. For a double-entry ledger that is not
+    # "some lag", it is a torn transaction: SUM(entries) can end up
+    # non-zero.
+    #
+    # WITH synchronous_mode, Patroni maintains the sync standby set in
+    # both postgresql.conf (synchronous_standby_names) AND the etcd
+    # /sync key, and refuses to promote any node that is not in that
+    # key. Since the primary cannot acknowledge a commit until a sync
+    # standby has flushed it, every acknowledged transaction is on the
+    # only node eligible to be promoted. That is the entire chain of
+    # reasoning behind "no acknowledged transaction is lost", and the
+    # thing infra/failover/failover_test.go actually asserts.
+    #
+    # synchronous_node_count: 1 reproduces the previous topology exactly
+    # — of the two standbys, one is synchronous and the other is
+    # asynchronous. Which one is which is now Patroni's decision rather
+    # than a hardcoded application_name, and it changes over time; that
+    # is the part of the old setup Patroni necessarily takes over.
+    synchronous_mode: true
+    synchronous_node_count: 1
+
+    # NOT set: synchronous_mode_strict. Non-strict means that if the
+    # LAST sync standby disappears, the leader drops to asynchronous
+    # commit and keeps accepting writes; strict means it blocks writes
+    # instead, preserving the two-node durability guarantee absolutely
+    # at the cost of availability. For a three-node cluster where the
+    # exercise is "kill one node", non-strict never engages — losing one
+    # of two standbys still leaves a sync partner. A real bank plausibly
+    # wants strict, and should say so deliberately rather than inherit
+    # this default; see README.
+    postgresql:
+      # pg_rewind is what lets a returning old leader rejoin as a replica
+      # by replaying only the diverged WAL, instead of re-cloning the
+      # whole data directory. It requires wal_log_hints (below), which
+      # cannot be turned on without a restart — hence set at bootstrap.
+      use_pg_rewind: true
+      # Replication slots, same reasoning as the hand-rolled setup they
+      # replace: the leader retains WAL a standby has not consumed yet.
+      # The difference is that Patroni creates, renames and drops them as
+      # roles change, so a promoted node ends up with slots for its new
+      # followers without anyone running pg_drop_replication_slot by hand.
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_log_hints: "on"
+        synchronous_commit: "on"
+        max_connections: 200
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+  # Patroni writes pg_hba.conf itself, so the line the old
+  # primary-init.sh appended by hand lives here now. The replication
+  # entry is still separate from the `all` entry for the same reason it
+  # always was: "all" in pg_hba.conf does not cover the `replication`
+  # pseudo-database, and without its own line the standbys fail
+  # authentication in a place that looks nothing like a replication
+  # problem.
+  pg_hba:
+    - local all all trust
+    - host all all 127.0.0.1/32 trust
+    - host all all 0.0.0.0/0 scram-sha-256
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+
+  post_init: /etc/patroni/post-init.sh
+
+postgresql:
+  listen: 0.0.0.0:5432
+  data_dir: /var/lib/postgresql/data/pgdata
+  bin_dir: /usr/lib/postgresql/16/bin
+  pgpass: /run/patroni/pgpass
+  authentication:
+    superuser:
+      username: neobank
+      password: neobank_dev_password
+    replication:
+      username: replicator
+      password: neobank_dev_replication_password
+    # pg_rewind runs as a database user and needs to read
+    # pg_ls_dir/pg_read_binary_file; reusing the superuser is the
+    # simplest thing that works for a dev cluster. Production would
+    # create a dedicated role with just those EXECUTE grants.
+    rewind:
+      username: neobank
+      password: neobank_dev_password
+  parameters:
+    password_encryption: scram-sha-256
+
+# All three nodes are equal candidates: none is pinned as leader, none
+# is excluded from failover, and none is excluded from the sync set.
+# Stated explicitly because these tags are exactly where you would
+# express "this node is a reporting replica that must never be
+# promoted", and their absence should read as a decision rather than an
+# oversight.
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

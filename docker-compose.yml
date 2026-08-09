@@ -21,7 +21,7 @@ services:
     ports:
       - "8081:8081"
     environment:
-      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       SMTP_ADDR: mailpit:1025
       SMTP_FROM: noreply@neobank.local
       REDIS_ADDR: redis:6379
@@ -29,7 +29,7 @@ services:
       KAFKA_TOPIC: user.events
       JWT_SECRET: neobank_dev_jwt_secret_change_me
     depends_on:
-      postgres:
+      pg-haproxy:
         condition: service_healthy
       mailpit:
         condition: service_healthy
@@ -44,14 +44,14 @@ services:
       - "8082:8082"
       - "9082:9082"
     environment:
-      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: user.events
       KAFKA_ACCOUNT_EVENTS_TOPIC: account.events
       LEDGER_GRPC_ADDR: ledger-svc:8083
       GRPC_PORT: "9082"
     depends_on:
-      postgres:
+      pg-haproxy:
         condition: service_healthy
       ledger-svc:
         condition: service_started
@@ -65,9 +65,9 @@ services:
     ports:
       - "8083:8083"
     environment:
-      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
     depends_on:
-      postgres:
+      pg-haproxy:
         condition: service_healthy
 
   transfers-svc:
@@ -77,13 +77,21 @@ services:
     ports:
       - "8084:8084"
     environment:
-      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
-      # Same role/password — pg_basebackup copies cluster-wide catalog data
-      # (roles included), so `neobank` already exists on the replica with
-      # no separate provisioning. See README's read/write split rule for
-      # which queries this is actually allowed to serve (short version:
-      # not balance, not anything read right after a write).
-      DATABASE_URL_REPLICA: postgres://neobank:neobank_dev_password@postgres-replica-async:5432/neobank?sslmode=disable
+      DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
+      # Same role/password — a standby is a physical copy of the leader,
+      # cluster-wide catalog data (roles included) and all, so `neobank`
+      # already exists there with no separate provisioning. See README's
+      # read/write split rule for which queries this is actually allowed
+      # to serve (short version: not balance, not anything read right
+      # after a write).
+      #
+      # Port 5433 on pg-haproxy is "whichever nodes are standbys right
+      # now", not a named container: after a failover the node that used
+      # to serve these reads is the leader and a different node (or the
+      # returned old leader) serves them instead. Pointing at a hostname
+      # here — which is what this line used to do — would mean reads
+      # follow a container rather than a role.
+      DATABASE_URL_REPLICA: postgres://neobank:neobank_dev_password@pg-haproxy:5433/neobank?sslmode=disable
       ACCOUNTS_GRPC_ADDR: accounts-svc:9082
       FRAUD_GRPC_ADDR: fraud-svc:9085
       LEDGER_GRPC_ADDR: ledger-svc:8083
@@ -92,7 +100,7 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
     depends_on:
-      postgres:
+      pg-haproxy:
         condition: service_healthy
       accounts-svc:
         condition: service_started
@@ -111,10 +119,10 @@ services:
       - "8085:8085"
       - "9085:9085"
     environment:
-      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       GRPC_PORT: "9085"
     depends_on:
-      postgres:
+      pg-haproxy:
         condition: service_healthy
 
   notifications-svc:
@@ -137,7 +145,7 @@ services:
     # gracefully instead of falling back to that path every time.
     stop_grace_period: 60s
     environment:
-      DATABASE_URL: postgres://neobank:neobank_dev_password@postgres:5432/neobank?sslmode=disable
+      DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_USER_EVENTS_TOPIC: user.events
       KAFKA_ACCOUNT_EVENTS_TOPIC: account.events
@@ -150,135 +158,165 @@ services:
       SMTP_ADDR: mailpit:1025
       SMTP_FROM: noreply@neobank.local
     depends_on:
-      postgres:
+      pg-haproxy:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
       mailpit:
         condition: service_healthy
 
-  # Primary — the only node any service writes to. See README, "Postgres:
-  # потоковая репликация" for the full topology and, more importantly, the
-  # rule for which reads are allowed to go anywhere else.
-  postgres:
-    image: postgres:16-alpine
+  # etcd — the DCS (Distributed Configuration Store). This is where the
+  # three Patroni nodes keep the leader key, the sync-standby key and the
+  # cluster config, and it is the reason they can agree on a single
+  # leader instead of each deciding for itself.
+  #
+  # Without a DCS with real consensus, automatic failover is a split-brain
+  # generator: a node that loses contact with the leader cannot tell "the
+  # leader is dead" from "I am the one who is partitioned", and if it
+  # promotes itself on that guess you get two nodes accepting writes.
+  # Two histories that both look valid, diverging entry by entry — for a
+  # double-entry ledger that is unrecoverable by anything short of a human
+  # reading both WALs. etcd removes the guess: promotion requires taking a
+  # key that only one node can hold, and a partitioned minority cannot
+  # take it because it cannot reach a quorum.
+  #
+  # ONE NODE IS A DEV-ONLY SHORTCUT. A single-node etcd has no quorum to
+  # lose, so it is itself a single point of failure — exactly the thing
+  # this sprint set out to remove, moved one layer down. If it dies the
+  # cluster does not split-brain (Patroni demotes the leader when it
+  # cannot reach the DCS, which is the safe direction) but it does stop
+  # accepting writes until etcd is back. Production needs 3 or 5 etcd
+  # nodes on separate failure domains. See README.
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
     environment:
-      POSTGRES_USER: neobank
-      POSTGRES_PASSWORD: neobank_dev_password
-      POSTGRES_DB: neobank
-      # A subdirectory of the mount, not the mount point itself — the mount
-      # point can contain a lost+found directory (ext4) that makes initdb's
-      # "is this directory empty" check fail on a brand new volume.
-      PGDATA: /var/lib/postgresql/data/pgdata
-      REPLICATION_USER: replicator
-      REPLICATION_PASSWORD: neobank_dev_replication_password
-    # wal_level/max_wal_senders/max_replication_slots already default high
-    # enough for two replicas on modern Postgres — set explicitly anyway so
-    # the requirement is visible here instead of relying on an image
-    # default that could change. synchronous_standby_names names exactly
-    # one standby (replica_a, i.e. postgres-replica-sync): that's what
-    # makes it the SYNCHRONOUS replica — the primary blocks a commit until
-    # a standby connected under that application_name confirms it
-    # (see infra/postgres/replica-entrypoint.sh). postgres-replica-async is
-    # deliberately not listed here — an unlisted standby streams normally
-    # but nothing ever waits on it, which is exactly "asynchronous".
-    command:
-      - postgres
-      - -c
-      - wal_level=replica
-      - -c
-      - max_wal_senders=10
-      - -c
-      - max_replication_slots=10
-      - -c
-      - synchronous_commit=on
-      - -c
-      - synchronous_standby_names=replica_a
+      ETCD_NAME: etcd0
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd:2380
+      ETCD_INITIAL_CLUSTER: etcd0=http://etcd:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: neobank-etcd
+      # Patroni's etcd3 client uses the gRPC v3 API; this only affects
+      # etcdctl, which the healthcheck below shells out to.
+      ETCDCTL_API: "3"
+    volumes:
+      - etcd_data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # The three Postgres nodes. They are deliberately identical — no
+  # "primary" service and no "replica" services, because after the first
+  # failover those names would be lies. Which node is leader, which is
+  # the synchronous standby and which is asynchronous is Patroni's
+  # decision, held in etcd, and it changes at runtime.
+  #
+  # Everything that differs between the three is the three PATRONI_* env
+  # vars below; the config they share is infra/patroni/patroni.yml, baked
+  # into the image. Same "one script, env-driven differences" shape the
+  # replica-entrypoint.sh they replace had.
+  #
+  # No host port mappings on the nodes themselves: reaching a specific
+  # node by a fixed address is precisely the habit this sprint removes.
+  # Everything goes through pg-haproxy. (`docker compose exec pg-node1
+  # psql ...` still works for inspection, and the README uses it.)
+  pg-node1: &pg-node
+    build:
+      context: .
+      dockerfile: infra/patroni/Dockerfile
+    environment: &pg-node-env
+      PATRONI_NAME: pg-node1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-node1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-node1:5432
+    volumes:
+      - pg_node1_data:/var/lib/postgresql/data
+    depends_on:
+      etcd:
+        condition: service_healthy
+    # Asks Patroni, not Postgres: /health is 200 whenever this node's
+    # postgres is running in whatever role Patroni intends for it. A node
+    # that is up but which Patroni has fenced is not healthy.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8008/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  pg-node2:
+    <<: *pg-node
+    environment:
+      <<: *pg-node-env
+      PATRONI_NAME: pg-node2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-node2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-node2:5432
+    volumes:
+      - pg_node2_data:/var/lib/postgresql/data
+
+  pg-node3:
+    <<: *pg-node
+    environment:
+      <<: *pg-node-env
+      PATRONI_NAME: pg-node3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-node3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-node3:5432
+    volumes:
+      - pg_node3_data:/var/lib/postgresql/data
+
+  # The application's entry point to the cluster, and the answer to "the
+  # leader's address changes after a failover, so what do services
+  # connect to?". Full routing rationale — including why the health
+  # checks target Patroni's REST API rather than Postgres itself — is in
+  # infra/haproxy/haproxy.cfg. The choice of HAProxy over the
+  # target_session_attrs=read-write alternative is argued in the README.
+  #
+  #   5432 — the current leader (writes + read-your-writes reads)
+  #   5433 — any current standby (DATABASE_URL_REPLICA)
+  #   5434 — the current synchronous standby (inspection/tests only)
+  #   7000 — stats, and the source of this container's own healthcheck
+  #
+  # Host ports are unchanged from the pre-Patroni topology on purpose:
+  # every `psql -h localhost -p 5432`, every DATABASE_URL in the README's
+  # test invocations, and cmd/seed and cmd/devtopup all keep working
+  # without edits — they now just reach whoever is leader instead of a
+  # fixed container.
+  pg-haproxy:
+    image: haproxy:3.0-alpine
+    volumes:
+      - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
       - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      # Runs once against a fresh volume, like kafka-init's topic
-      # provisioning: creates the replication-only role and the
-      # pg_hba.conf line that actually allows it to stream (see the
-      # script's own comment for why "host all all ..." alone doesn't
-      # cover this).
-      - ./infra/postgres/primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U neobank -d neobank"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # Replica A — SYNCHRONOUS. A commit on the primary doesn't return until
-  # this standby has confirmed it (synchronous_standby_names above), so
-  # anything read here is guaranteed to include every write the caller
-  # could already know about. That guarantee, not "closest to primary" or
-  # "fastest", is the entire reason to read from it instead of the primary
-  # itself — see README for which reads actually need it (in this app,
-  # none currently do: the primary already serves everything
-  # read-immediately-after-write; this replica exists for the failover
-  # story the next sprint builds on, and as a live demonstration of the
-  # guarantee).
-  postgres-replica-sync:
-    image: postgres:16-alpine
-    environment:
-      PGDATA: /var/lib/postgresql/data/pgdata
-      PRIMARY_HOST: postgres
-      PRIMARY_PORT: "5432"
-      REPLICATION_USER: replicator
-      REPLICATION_PASSWORD: neobank_dev_replication_password
-      REPLICA_SLOT_NAME: replica_a_slot
-      REPLICA_APPLICATION_NAME: replica_a
-    entrypoint: ["/bin/bash", "/scripts/replica-entrypoint.sh"]
-    volumes:
-      - postgres_replica_sync_data:/var/lib/postgresql/data
-      - ./infra/postgres/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
-    ports:
-      - "5433:5432"
+      - "5433:5433"
+      - "5434:5434"
+      - "7000:7000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      pg-node1:
+        condition: service_started
+      pg-node2:
+        condition: service_started
+      pg-node3:
+        condition: service_started
+    # "A leader exists and is routable", not "haproxy started" — which is
+    # what every service's `depends_on: pg-haproxy: service_healthy`
+    # actually needs, since they all run migrations against the leader
+    # and log.Fatalf if that fails. Reads HAProxy's own stats CSV and
+    # requires at least one server in the `primary` backend to be UP
+    # (field 18 is status).
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U neobank -d neobank"]
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -O - 'http://127.0.0.1:7000/;csv'
+          | awk -F, '$$1=="primary" && $$2 ~ /^pg-node/ && $$18=="UP" { found=1 } END { exit !found }'
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 30s
-
-  # Replica B — ASYNCHRONOUS. Not named in synchronous_standby_names, so
-  # the primary never waits on it — it can lag behind by however long
-  # replay takes, visible live via pg_stat_replication (see
-  # infra/postgres/check_replication_lag.sql). This is the ONLY node
-  # transfers-svc's read pool is allowed to point at (DATABASE_URL_REPLICA
-  # in this file), and only for the one query in this codebase that's
-  # actually tolerant of a stale read — see README's read/write split rule
-  # before pointing anything else at it.
-  postgres-replica-async:
-    image: postgres:16-alpine
-    environment:
-      PGDATA: /var/lib/postgresql/data/pgdata
-      PRIMARY_HOST: postgres
-      PRIMARY_PORT: "5432"
-      REPLICATION_USER: replicator
-      REPLICATION_PASSWORD: neobank_dev_replication_password
-      REPLICA_SLOT_NAME: replica_b_slot
-      REPLICA_APPLICATION_NAME: replica_b
-    entrypoint: ["/bin/bash", "/scripts/replica-entrypoint.sh"]
-    volumes:
-      - postgres_replica_async_data:/var/lib/postgresql/data
-      - ./infra/postgres/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
-    ports:
-      - "5434:5432"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U neobank -d neobank"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 24
+      start_period: 40s
 
   redis:
     image: redis:7-alpine
@@ -357,7 +395,14 @@ services:
       - "8025:8025"
 
 volumes:
-  postgres_data:
-  postgres_replica_sync_data:
-  postgres_replica_async_data:
+  # One volume per Patroni node. They are NOT interchangeable and must not
+  # be pre-seeded from each other: Patroni bootstraps the first node with
+  # initdb and clones the other two from it via pg_basebackup, so an
+  # already-populated volume on a node that was meant to clone makes it
+  # try to rejoin a cluster it was never part of. `docker compose down -v`
+  # is the reset button.
+  pg_node1_data:
+  pg_node2_data:
+  pg_node3_data:
+  etcd_data:
   kafka_data:

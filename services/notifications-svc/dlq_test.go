@@ -7,6 +7,10 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"google.golang.org/protobuf/proto"
+
+	"neobank/pkg/pgha"
+	eventsv1 "neobank/proto/gen/go/events/v1"
 )
 
 // fakeDLQWriter is a kafkaMessageWriter that records what it was asked to
@@ -165,5 +169,96 @@ func TestProcessTransferMessage_UnmarshalFailure(t *testing.T) {
 	}
 	if eventType != eventTypeTransferCompleted {
 		t.Errorf("eventType = %q, want %q — the header is read before the failed unmarshal", eventType, eventTypeTransferCompleted)
+	}
+}
+
+// TestProcessTransferMessage_PoisonErrorsAreNotUnavailable pins the
+// boundary that decides between "retry this for up to five minutes" and
+// "this is poison, dead-letter it".
+//
+// handleTransferMessageWithRetry asks pgha.IsUnavailable about every
+// failure. A poison error wrongly classified as unavailable would stall
+// the whole partition for transferUnavailableBudget before reaching the
+// DLQ it was always going to reach — turning a fast, correct outcome into
+// a five-minute pause per bad message. These are exactly the three
+// failures processTransferMessage can produce without touching Postgres,
+// so none of them may ever look like a database outage.
+func TestProcessTransferMessage_PoisonErrorsAreNotUnavailable(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  kafka.Message
+	}{
+		{
+			name: "no event_type header",
+			msg:  kafka.Message{Partition: 1, Offset: 7},
+		},
+		{
+			name: "unknown event_type",
+			msg: kafka.Message{
+				Headers: []kafka.Header{{Key: eventTypeHeader, Value: []byte("TransferReversed")}},
+			},
+		},
+		{
+			name: "corrupt payload",
+			msg: kafka.Message{
+				Headers: []kafka.Header{{Key: eventTypeHeader, Value: []byte(eventTypeTransferCompleted)}},
+				Value:   []byte{0xff, 0xff, 0xff},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := processTransferMessage(context.Background(), nil, "", "", tt.msg)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if pgha.IsUnavailable(err) {
+				t.Errorf("pgha.IsUnavailable(%v) = true, want false — a poison message must reach the DLQ promptly, not sit out the unavailable budget first", err)
+			}
+		})
+	}
+}
+
+// TestProcessTransferMessage_UnreachableDatabaseIsUnavailable is the other
+// half of that boundary, and the one a failover actually exercises: when
+// the failure IS Postgres being unreachable, it must classify as
+// unavailable so the retry comes out of transferUnavailableBudget rather
+// than the five-attempt poison ladder.
+//
+// Before this classification existed, a failover — which lasts longer
+// than the ladder's ~7.5s — exhausted all five attempts and dead-lettered
+// a burst of perfectly good transfer notifications.
+//
+// The pool points at a port nothing listens on, which is the same class
+// of error (a failed connect) the real thing produces when the leader is
+// gone.
+func TestProcessTransferMessage_UnreachableDatabaseIsUnavailable(t *testing.T) {
+	pool, err := pgha.NewPool(context.Background(), "postgres://neobank:pw@127.0.0.1:1/neobank?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatalf("build pool: %v", err)
+	}
+	defer pool.Close()
+
+	// A well-formed TransferCompleted: everything before the first
+	// database access must succeed, so that the error under test is the
+	// database one and not a parsing failure.
+	payload, err := proto.Marshal(&eventsv1.TransferCompleted{
+		EventId:         "6f1b7b3c-6b1a-4a5e-9a3d-2f4c8e0d1a2b",
+		SenderAccountId: "9a1c2d3e-4f50-4a6b-8c7d-0e1f2a3b4c5d",
+	})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+
+	_, _, err = processTransferMessage(context.Background(), pool, "127.0.0.1:1", "noreply@neobank.local", kafka.Message{
+		Headers: []kafka.Header{{Key: eventTypeHeader, Value: []byte(eventTypeTransferCompleted)}},
+		Value:   payload,
+	})
+	if err == nil {
+		t.Fatal("expected an error with no database reachable")
+	}
+	if !pgha.IsUnavailable(err) {
+		t.Errorf("pgha.IsUnavailable(%v) = false, want true — a failover would burn the poison-retry budget and dead-letter good notifications", err)
 	}
 }

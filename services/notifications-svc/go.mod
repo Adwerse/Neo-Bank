@@ -7,7 +7,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/segmentio/kafka-go v0.4.51
 	google.golang.org/protobuf v1.36.11
-	neobank/pkg/health v0.0.0
+	neobank/pkg/pgha v0.0.0
 	neobank/proto/gen/go v0.0.0
 )
 
@@ -21,10 +21,12 @@ require (
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/pierrec/lz4/v4 v4.1.16 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
-	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 )
 
 replace neobank/pkg/health => ../../pkg/health
 
 replace neobank/proto/gen/go => ../../proto/gen/go
+
+replace neobank/pkg/pgha => ../../pkg/pgha

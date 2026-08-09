@@ -2,6 +2,7 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY proto/gen/go ./proto/gen/go
 COPY pkg/outbox ./pkg/outbox
+COPY pkg/pgha ./pkg/pgha
 COPY services/auth-svc ./services/auth-svc
 WORKDIR /src/services/auth-svc
 RUN go build -o /out/server .

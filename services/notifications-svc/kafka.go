@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"neobank/pkg/pgha"
 	eventsv1 "neobank/proto/gen/go/events/v1"
 )
 
@@ -51,6 +52,39 @@ const transferMaxAttempts = 5
 // bounded time.
 const transferRetryBaseDelay = 500 * time.Millisecond
 const transferRetryMaxDelay = 8 * time.Second
+
+// transferUnavailableBudget is how long handleTransferMessageWithRetry
+// will keep retrying a message whose ONLY problem is that Postgres is
+// currently unreachable, without spending any of its transferMaxAttempts
+// poison budget.
+//
+// This exists because automatic failover broke an assumption the retry
+// ladder above was built on. Five attempts at 0.5/1/2/4s cover about
+// 7.5 seconds — which was a reasonable definition of "transient" when
+// the only transient failure was a blip talking to Mailpit. A Patroni
+// failover takes longer than that (detection alone is bounded by the
+// cluster's ttl — see infra/patroni/patroni.yml), so without this the
+// first failover would exhaust the ladder on every in-flight transfer
+// notification and route a burst of perfectly good messages to the dead
+// letter topic. Nothing would be lost — that is what the DLQ is for —
+// but "every transfer during a failover needs a manual replay" is a bad
+// enough outcome to design against, and it would look like a poison-
+// message incident rather than the routine infrastructure event it is.
+//
+// Bounded rather than infinite so a Postgres that is down for good still
+// ends up somewhere visible instead of wedging the partition silently
+// forever. Five minutes is roughly twenty times the worst realistic
+// failover and short enough that a genuine outage surfaces while someone
+// is still looking at it.
+const transferUnavailableBudget = 5 * time.Minute
+
+// transferUnavailableRetryDelay is the flat poll interval while waiting
+// out an unavailable database. Flat, not exponential: there is no
+// thundering-herd concern (one goroutine, one message) and a fixed
+// interval means the message resumes promptly whenever the new leader
+// appears, rather than sitting out a backoff that grew while nobody was
+// watching.
+const transferUnavailableRetryDelay = 2 * time.Second
 
 // consumerLagLogInterval is how often monitorConsumers reports each
 // reader's lag.
@@ -546,24 +580,57 @@ func transferRetryDelay(attempt int) time.Duration {
 // deliberate — a contact that never appears means the projection itself
 // is inconsistent, not that this message is malformed, and a DLQ built
 // for "an operator can fix and replay this" is the wrong place for it.
+//
+// Neither does a database that is merely unreachable. Since the cluster
+// gained automatic failover, "Postgres refused this write" no longer
+// implies anything about the message: it usually means Patroni is
+// electing a leader. Those attempts are retried on their own budget
+// (transferUnavailableBudget) and do not count toward transferMaxAttempts
+// — see pgha.IsUnavailable for exactly which errors qualify, and why
+// separating the two matters more here than anywhere else in the repo.
 func handleTransferMessageWithRetry(ctx context.Context, reader *kafka.Reader, msg kafka.Message, pool *pgxpool.Pool, smtpAddr, smtpFrom string, dlqWriter kafkaMessageWriter, dlqTopic string) {
 	const topic = "transfer.events"
 	var eventID, eventType string
 	var err error
 
-	for attempt := 1; attempt <= transferMaxAttempts; attempt++ {
+	unavailableDeadline := time.Now().Add(transferUnavailableBudget)
+
+	for attempt := 1; attempt <= transferMaxAttempts; {
 		eventID, eventType, err = processTransferMessage(ctx, pool, smtpAddr, smtpFrom, msg)
 		if err == nil {
 			commitMessage(ctx, reader, msg, topic)
 			return
 		}
+
+		// The database being unavailable says nothing about this
+		// message, so it must not spend an attempt — otherwise a
+		// failover looks identical to poison. `attempt` is deliberately
+		// not incremented on this path, which is also why the loop's
+		// post statement is empty and the increment lives below.
+		if pgha.IsUnavailable(err) {
+			if remaining := time.Until(unavailableDeadline); remaining > 0 {
+				log.Printf("notifications-svc: %s: postgres unavailable while handling %s at offset %d, retrying in %s (%s of budget left, attempt %d/%d unspent): %v",
+					topic, eventType, msg.Offset, transferUnavailableRetryDelay, remaining.Truncate(time.Second), attempt, transferMaxAttempts, err)
+				time.Sleep(transferUnavailableRetryDelay)
+				continue
+			}
+			// Budget exhausted: this is no longer "a failover is in
+			// progress", it is an outage. Fall through to the DLQ so the
+			// partition can move on, with a log line that says which of
+			// the two it was.
+			log.Printf("notifications-svc: %s: postgres still unavailable after %s for %s at offset %d — treating as an outage, not a transient failover",
+				topic, transferUnavailableBudget, eventType, msg.Offset)
+			break
+		}
+
 		log.Printf("notifications-svc: %s: attempt %d/%d failed for %s at offset %d: %v", topic, attempt, transferMaxAttempts, eventType, msg.Offset, err)
 		if attempt < transferMaxAttempts {
 			time.Sleep(transferRetryDelay(attempt))
 		}
+		attempt++
 	}
 
-	log.Printf("notifications-svc: %s: giving up on %s at offset %d after %d attempts, sending to %s: %v", topic, eventType, msg.Offset, transferMaxAttempts, dlqTopic, err)
+	log.Printf("notifications-svc: %s: giving up on %s at offset %d, sending to %s: %v", topic, eventType, msg.Offset, dlqTopic, err)
 	sendToDLQ(ctx, dlqWriter, dlqTopic, msg, eventType, err)
 
 	if eventID != "" {

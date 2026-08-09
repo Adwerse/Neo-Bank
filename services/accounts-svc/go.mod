@@ -12,6 +12,7 @@ require (
 require (
 	google.golang.org/grpc v1.75.0
 	neobank/pkg/outbox v0.0.0
+	neobank/pkg/pgha v0.0.0
 	neobank/proto/gen/go v0.0.0
 )
 
@@ -35,3 +36,5 @@ require (
 replace neobank/proto/gen/go => ../../proto/gen/go
 
 replace neobank/pkg/outbox => ../../pkg/outbox
+
+replace neobank/pkg/pgha => ../../pkg/pgha
