@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"neobank/pkg/pgha"
+	"neobank/pkg/tracing"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 
 	"google.golang.org/grpc"
@@ -22,6 +23,21 @@ func main() {
 	if port == "" {
 		port = defaultPort
 	}
+	// Tracing is set up before anything that could produce a span. A
+	// failure is logged rather than fatal: observability going down must
+	// not take the service with it — the global provider simply stays the
+	// API's no-op and everything else behaves identically.
+	shutdownTracing, err := tracing.Init(context.Background(), "ledger-svc")
+	if err != nil {
+		log.Printf("ledger-svc: tracing disabled: %v", err)
+		shutdownTracing = func(context.Context) error { return nil }
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			log.Printf("ledger-svc: tracing shutdown: %v", err)
+		}
+	}()
+
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	// Pool first, migrations second — the reverse of the original order,
@@ -60,7 +76,11 @@ func main() {
 		log.Fatalf("ledger-svc: failed to listen on :%s: %v", port, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	// StatsHandler makes every inbound RPC a server span that continues
+	// the caller's trace (the context travels in gRPC metadata), which is
+	// what puts this service under transfers-svc in the same trace rather
+	// than in a trace of its own.
+	grpcServer := grpc.NewServer(tracing.GRPCServerOption())
 	ledgerv1.RegisterLedgerServiceServer(grpcServer, &ledgerServer{pool: pool})
 
 	healthServer := health.NewServer()

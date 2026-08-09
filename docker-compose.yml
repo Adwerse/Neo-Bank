@@ -1,3 +1,14 @@
+# Shared by every Go service (gateway included): where to ship spans, and
+# the service-name/sampling knobs pkg/tracing reads. Defined once as a
+# merge anchor rather than repeated seven times — the endpoint is the kind
+# of value that drifts when it lives in seven places.
+#
+# service.name is NOT set here: each service passes its own real name to
+# tracing.Init, because a Jaeger dependency diagram where four services
+# all call themselves "app" is worse than no diagram.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+
 services:
   gateway:
     build:
@@ -6,6 +17,7 @@ services:
     ports:
       - "8080:8080"
     environment:
+      <<: *otel-env
       JWT_SECRET: neobank_dev_jwt_secret_change_me
       KAFKA_BROKERS: kafka:9092
     depends_on:
@@ -21,6 +33,7 @@ services:
     ports:
       - "8081:8081"
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       SMTP_ADDR: mailpit:1025
       SMTP_FROM: noreply@neobank.local
@@ -44,6 +57,7 @@ services:
       - "8082:8082"
       - "9082:9082"
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: user.events
@@ -65,6 +79,7 @@ services:
     ports:
       - "8083:8083"
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
     depends_on:
       pg-haproxy:
@@ -77,6 +92,7 @@ services:
     ports:
       - "8084:8084"
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       # Same role/password — a standby is a physical copy of the leader,
       # cluster-wide catalog data (roles included) and all, so `neobank`
@@ -119,6 +135,7 @@ services:
       - "8085:8085"
       - "9085:9085"
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       GRPC_PORT: "9085"
     depends_on:
@@ -145,6 +162,7 @@ services:
     # gracefully instead of falling back to that path every time.
     stop_grace_period: 60s
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://neobank:neobank_dev_password@pg-haproxy:5432/neobank?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       KAFKA_USER_EVENTS_TOPIC: user.events
@@ -393,6 +411,38 @@ services:
     ports:
       - "1025:1025"
       - "8025:8025"
+
+  # Distributed tracing backend. all-in-one bundles the collector, the
+  # storage and the UI in one container with an in-memory store — which
+  # is the right shape for local development and explicitly not for
+  # anything else: every trace is lost on restart, and memory grows with
+  # traffic until it is.
+  #
+  # No service `depends_on` this. Tracing is diagnostics, and a
+  # diagnostics backend that can stop the bank from starting is worse than
+  # no diagnostics: the OTLP exporter connects lazily and retries, so a
+  # Jaeger that is down or absent costs nothing but the traces themselves
+  # (see pkg/tracing.Init).
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      # OTLP receivers are on by default in recent versions; set
+      # explicitly so the contract is visible here rather than inherited
+      # from an image default that has changed before.
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      # 16686 — the UI. This is the one to open.
+      - "16686:16686"
+      # 4317 OTLP/gRPC, 4318 OTLP/HTTP. Services use gRPC (4317); 4318 is
+      # published only so a curl or a browser-side exporter can reach it
+      # during debugging.
+      - "4317:4317"
+      - "4318:4318"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:14269/ | grep -q '\"status\":\"Server available\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   # One volume per Patroni node. They are NOT interchangeable and must not

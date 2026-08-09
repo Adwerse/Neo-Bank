@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"neobank/pkg/health"
+	"neobank/pkg/tracing"
 )
 
 const (
@@ -37,6 +38,27 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// The gateway is the root of every trace: it is the only service the
+	// browser talks to, so the span it creates per request is the one every
+	// downstream span in transfers-svc, fraud-svc and ledger-svc descends
+	// from.
+	//
+	// A failure here is logged, not fatal. Tracing is diagnostics — a bank
+	// that refuses to serve requests because its observability backend is
+	// unreachable has traded a real outage for an imaginary one. On error,
+	// the global provider stays the API's no-op and everything else works
+	// exactly as before, just without traces.
+	shutdownTracing, err := tracing.Init(ctx, "gateway")
+	if err != nil {
+		log.Printf("gateway: tracing disabled: %v", err)
+		shutdownTracing = func(context.Context) error { return nil }
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			log.Printf("gateway: tracing shutdown: %v", err)
+		}
+	}()
 
 	ws := newWSServer(ctx, jwtSecret)
 
@@ -112,5 +134,10 @@ func newHandler(jwtSecret string, ws *wsServer) http.Handler {
 	mux.Handle("/deposits/", noStripProxy)
 	mux.Handle("/webhooks/stripe", noStripProxy)
 
-	return jwtMiddleware(mux, jwtSecret)
+	// Tracing wraps the JWT middleware rather than sitting inside it, so
+	// the span covers authentication too: a request rejected with 401
+	// still produces a trace showing where it died. The reverse order
+	// would make every rejected request invisible, which is exactly the
+	// kind of request someone goes looking for.
+	return tracing.Handler(jwtMiddleware(mux, jwtSecret), "gateway")
 }

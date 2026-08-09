@@ -6,6 +6,7 @@ use (
 	./pkg/health
 	./pkg/outbox
 	./pkg/pgha
+	./pkg/tracing
 	./proto/gen/go
 	./services/accounts-svc
 	./services/auth-svc

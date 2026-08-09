@@ -3,6 +3,7 @@ WORKDIR /src
 COPY pkg/health ./pkg/health
 COPY proto/gen/go ./proto/gen/go
 COPY pkg/pgha ./pkg/pgha
+COPY pkg/tracing ./pkg/tracing
 COPY services/notifications-svc ./services/notifications-svc
 WORKDIR /src/services/notifications-svc
 RUN go build -o /out/server .

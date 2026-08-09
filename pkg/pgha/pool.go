@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -100,6 +101,32 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	// attempts and log noise for no benefit — there is no work waiting on
 	// those connections, and the pool opens what it needs on demand
 	// anyway.
+
+	// Every query through every pool in every service becomes a span, so
+	// a trace shows which statement took how long instead of an opaque
+	// gap inside a handler. Wired here rather than in each service's
+	// main() precisely because it is the one place all seven pools are
+	// built — an instrumentation that has to be remembered in seven
+	// places is one that will be missing from at least one of them.
+	//
+	// Until Init in pkg/tracing has run, the global TracerProvider is a
+	// no-op and these are non-recording spans, so tests and any service
+	// started with OTEL_SDK_DISABLED pay effectively nothing.
+	//
+	// WithIncludeQueryParameters is deliberately NOT set. It attaches
+	// every bind argument to the span, and this codebase's arguments
+	// include password hashes (auth-svc's users insert), email addresses
+	// (the user_contacts projection), and session tokens. Turning it on
+	// would ship all of that into an unauthenticated Jaeger through a
+	// single boolean, without any call site appearing to have leaked
+	// anything — see pkg/tracing's attribute policy.
+	//
+	// WithTrimSQLInSpanName keeps the span name to the first line of the
+	// statement rather than the whole multi-line query, so Jaeger's
+	// operation list stays readable.
+	config.ConnConfig.Tracer = otelpgx.NewTracer(
+		otelpgx.WithTrimSQLInSpanName(),
+	)
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

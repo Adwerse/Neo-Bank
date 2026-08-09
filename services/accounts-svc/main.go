@@ -17,6 +17,7 @@ import (
 
 	"neobank/pkg/outbox"
 	"neobank/pkg/pgha"
+	"neobank/pkg/tracing"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
@@ -62,6 +63,21 @@ func main() {
 		}
 		outboxRetention = d
 	}
+	// Tracing is set up before anything that could produce a span. A
+	// failure is logged rather than fatal: observability going down must
+	// not take the service with it — the global provider simply stays the
+	// API's no-op and everything else behaves identically.
+	shutdownTracing, err := tracing.Init(context.Background(), "accounts-svc")
+	if err != nil {
+		log.Printf("accounts-svc: tracing disabled: %v", err)
+		shutdownTracing = func(context.Context) error { return nil }
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			log.Printf("accounts-svc: tracing shutdown: %v", err)
+		}
+	}()
+
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	// Pool first, migrations second — the reverse of the original order,
@@ -100,7 +116,7 @@ func main() {
 	// Postgres and Kafka clients above tolerate a not-yet-ready dependency at
 	// startup. ledger-svc speaks plaintext gRPC inside the cluster (no TLS),
 	// same as its own server setup.
-	ledgerConn, err := grpc.NewClient(ledgerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	ledgerConn, err := grpc.NewClient(ledgerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), tracing.GRPCClientOption())
 	if err != nil {
 		log.Fatalf("accounts-svc: failed to create ledger gRPC client for %s: %v", ledgerAddr, err)
 	}
@@ -125,7 +141,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("accounts-svc: failed to listen on :%s (gRPC): %v", grpcPort, err)
 	}
-	grpcServer := grpc.NewServer()
+	// StatsHandler makes every inbound RPC a server span that continues
+	// the caller's trace (the context travels in gRPC metadata), which is
+	// what puts this service under transfers-svc in the same trace rather
+	// than in a trace of its own.
+	grpcServer := grpc.NewServer(tracing.GRPCServerOption())
 	accountsv1.RegisterAccountsServiceServer(grpcServer, &accountsServer{pool: pool})
 
 	grpcHealthServer := health.NewServer()
@@ -175,7 +195,10 @@ func main() {
 	http.HandleFunc("PATCH /{id}/status", updateAccountStatusHandler(pool))
 
 	log.Printf("accounts-svc listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	// http.DefaultServeMux named explicitly rather than passing nil:
+	// the handler has to be wrapped, and there is nothing to wrap when
+	// the argument is nil.
+	if err := http.ListenAndServe(":"+port, tracing.Handler(http.DefaultServeMux, "accounts-svc")); err != nil {
 		log.Fatal(err)
 	}
 }

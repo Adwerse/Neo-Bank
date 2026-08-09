@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"neobank/pkg/tracing"
 )
 
 // accountLookupTimeout bounds the fallback HTTP call to accounts-svc on a
@@ -41,7 +43,18 @@ func newAccountCache(ttl time.Duration, accountsAddr string) *accountCache {
 		entries:      make(map[string]accountCacheEntry),
 		ttl:          ttl,
 		accountsAddr: accountsAddr,
-		httpClient:   &http.Client{Timeout: accountLookupTimeout},
+		// Traced transport so a cache-miss lookup shows up as a child
+		// span of whatever triggered it, rather than as unexplained
+		// latency inside a Kafka consumer. Note this call originates from
+		// a consumer goroutine, not an inbound HTTP request, so today it
+		// usually has no parent span to attach to — the async side is the
+		// next sprint's problem. Instrumenting it now costs nothing and
+		// means it joins the trace automatically once the consumer
+		// propagates context.
+		httpClient: &http.Client{
+			Timeout:   accountLookupTimeout,
+			Transport: tracing.Transport(nil),
+		},
 	}
 }
 

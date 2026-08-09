@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"neobank/pkg/pgha"
+	"neobank/pkg/tracing"
 )
 
 const (
@@ -67,6 +68,21 @@ func main() {
 	if smtpFrom == "" {
 		smtpFrom = defaultSMTPFrom
 	}
+	// Tracing is set up before anything that could produce a span. A
+	// failure is logged rather than fatal: observability going down must
+	// not take the service with it — the global provider simply stays the
+	// API's no-op and everything else behaves identically.
+	shutdownTracing, err := tracing.Init(context.Background(), "notifications-svc")
+	if err != nil {
+		log.Printf("notifications-svc: tracing disabled: %v", err)
+		shutdownTracing = func(context.Context) error { return nil }
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			log.Printf("notifications-svc: tracing shutdown: %v", err)
+		}
+	}()
+
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	// Pool first, migrations second — the reverse of the original order,
@@ -195,7 +211,7 @@ func main() {
 		json.NewEncoder(w).Encode(body)
 	})
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	srv := &http.Server{Addr: ":" + port, Handler: tracing.Handler(mux, "notifications-svc")}
 	go func() {
 		<-ctx.Done()
 		log.Printf("notifications-svc: shutdown signal received, draining in-flight work")

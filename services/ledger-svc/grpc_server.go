@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 
+	"neobank/pkg/tracing"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,13 +38,29 @@ func (s *ledgerServer) GetBalance(ctx context.Context, req *ledgerv1.GetBalanceR
 }
 
 func (s *ledgerServer) ExecuteTransfer(ctx context.Context, req *ledgerv1.ExecuteTransferRequest) (*ledgerv1.ExecuteTransferResponse, error) {
+	tracing.SetAttributes(ctx, tracing.AmountMinor(req.GetAmount()))
+
 	transactionID, outcome, err := executeTransfer(ctx, s.pool, req.GetFromAccountId(), req.GetToAccountId(), req.GetAmount(), req.GetReference())
 	if err != nil {
 		log.Printf("ledger-svc: ExecuteTransfer: %v", err)
+		tracing.Fail(ctx, "ledger_execute_failed", err)
 		return nil, status.Error(codes.Internal, "internal error")
 	}
+
+	tracing.SetAttributes(ctx, tracing.LedgerOutcome(outcome.String()))
+	// insufficient_funds and the not-found outcomes are NOT marked as span
+	// errors: they are the ledger correctly refusing to post, which is the
+	// system working. Only the err path above — where the ledger could not
+	// determine an answer at all — is a failure. Keeping that line where
+	// it is means Jaeger's error filter surfaces broken ledgers rather
+	// than users with empty accounts.
 	switch outcome {
 	case transferOK:
+		// The id both entries of the double-entry pair share. It is
+		// deliberately distinct from the transfer id transfers-svc knows,
+		// and having both on one trace is what lets someone follow a
+		// single movement of money across the two services' tables.
+		tracing.SetAttributes(ctx, tracing.LedgerTransactionID(transactionID))
 		return &ledgerv1.ExecuteTransferResponse{TransactionId: transactionID}, nil
 	case transferInvalidAmount:
 		return nil, status.Error(codes.InvalidArgument, "amount must be positive")

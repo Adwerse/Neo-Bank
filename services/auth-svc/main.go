@@ -12,6 +12,7 @@ import (
 
 	"neobank/pkg/outbox"
 	"neobank/pkg/pgha"
+	"neobank/pkg/tracing"
 )
 
 const (
@@ -62,6 +63,21 @@ func main() {
 		}
 		outboxRetention = d
 	}
+	// Tracing is set up before anything that could produce a span. A
+	// failure is logged rather than fatal: observability going down must
+	// not take the service with it — the global provider simply stays the
+	// API's no-op and everything else behaves identically.
+	shutdownTracing, err := tracing.Init(context.Background(), "auth-svc")
+	if err != nil {
+		log.Printf("auth-svc: tracing disabled: %v", err)
+		shutdownTracing = func(context.Context) error { return nil }
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			log.Printf("auth-svc: tracing shutdown: %v", err)
+		}
+	}()
+
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	// Pool first, migrations second — the reverse of the original order,
@@ -135,7 +151,10 @@ func main() {
 	http.HandleFunc("/reset-password", resetPasswordHandler(pool, rdb))
 
 	log.Printf("auth-svc listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	// http.DefaultServeMux named explicitly rather than passing nil:
+	// the handler has to be wrapped, and there is nothing to wrap when
+	// the argument is nil.
+	if err := http.ListenAndServe(":"+port, tracing.Handler(http.DefaultServeMux, "auth-svc")); err != nil {
 		log.Fatal(err)
 	}
 }

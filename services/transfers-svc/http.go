@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"neobank/pkg/tracing"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
@@ -81,11 +82,27 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			return
 		}
 
-		transfer, outcome, err := createTransfer(r.Context(), pool, accountsClient, idempotencyKey, senderAccountID, req.RecipientAccountNumber, req.Amount)
+		ctx := r.Context()
+		// The amount is on the span deliberately — see pkg/tracing's
+		// attribute policy for why money is included and account numbers
+		// are not. Note req.RecipientAccountNumber is NOT recorded: it is
+		// the human-facing identifier, and the resolved internal ids below
+		// serve every debugging purpose it would.
+		tracing.SetAttributes(ctx,
+			tracing.AccountID(senderAccountID),
+			tracing.AmountMinor(req.Amount),
+		)
+
+		transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderAccountID, req.RecipientAccountNumber, req.Amount)
 		if err != nil {
+			tracing.Fail(ctx, "create_transfer_failed", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
 		}
+		tracing.SetAttributes(ctx,
+			tracing.TransferID(transfer.ID),
+			tracing.TransferOutcome(outcome.String()),
+		)
 		switch outcome {
 		case createTransferInvalidAmount:
 			writeJSONError(w, http.StatusBadRequest, "invalid amount")
@@ -119,13 +136,31 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		// second fraud check, both to avoid re-charging an external check
 		// and because a repeat call would itself feed fraud-svc's own
 		// velocity counters.
-		transfer, fraudOutcome, err := checkTransferFraud(r.Context(), pool, fraudClient, transfer)
+		transfer, fraudOutcome, err := checkTransferFraud(ctx, pool, fraudClient, transfer)
 		if err != nil {
+			tracing.Fail(ctx, "fraud_check_failed", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
 		}
+		tracing.SetAttributes(ctx, tracing.FraudDecision(fraudOutcome.String()))
 		switch fraudOutcome {
 		case fraudCheckRejected:
+			// This is the branch the tracing sprint exists to make legible:
+			// a rejected transfer's trace ends here, with no ledger-svc
+			// span below it, and the rule that stopped it named on the
+			// span. failure_reason holds fraud-svc's triggered rule (see
+			// markTransferRejected) — recording it here is what turns "show
+			// me everything the velocity rule blocked" into a Jaeger query
+			// against transfers-svc, without having to join to fraud-svc's
+			// own spans.
+			//
+			// Not marked as a span error, for the same reason fraud-svc
+			// does not mark it: the system worked correctly. The status and
+			// rule attributes carry the news.
+			tracing.SetAttributes(ctx, tracing.TransferStatus(transfer.Status))
+			if transfer.FailureReason != nil && *transfer.FailureReason != "" {
+				tracing.SetAttributes(ctx, tracing.FraudTriggeredRule(*transfer.FailureReason))
+			}
 			// Matches "failed" also returning 201 below: the transfer
 			// resource was created either way, the JSON body's status
 			// field carries the actual news.
@@ -133,6 +168,12 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			json.NewEncoder(w).Encode(createTransferResponse{Transfer: transfer})
 			return
 		case fraudCheckUncertain:
+			// A real degradation, unlike a rejection: fraud-svc could not
+			// be reached or gave an answer we don't understand, and the
+			// transfer is parked in pending as a result. Marked as an error
+			// so it shows up when filtering for problems.
+			tracing.Fail(ctx, "fraud_check_unavailable", nil)
+			tracing.SetAttributes(ctx, tracing.TransferStatus(transfer.Status))
 			w.WriteHeader(http.StatusAccepted)
 			json.NewEncoder(w).Encode(createTransferResponse{
 				Transfer: transfer,
@@ -141,12 +182,21 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			return
 		}
 
-		settled, settleOutcome, err := settleTransfer(r.Context(), pool, ledgerClient, transfer)
+		settled, settleOutcome, err := settleTransfer(ctx, pool, ledgerClient, transfer)
 		if err != nil {
+			tracing.Fail(ctx, "settlement_failed", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
 		}
+		tracing.SetAttributes(ctx, tracing.TransferStatus(settled.Status))
+		if settled.LedgerTransactionID != nil && *settled.LedgerTransactionID != "" {
+			tracing.SetAttributes(ctx, tracing.LedgerTransactionID(*settled.LedgerTransactionID))
+		}
 		if settleOutcome == settlementUncertain {
+			// The transfer may or may not have posted — the one outcome
+			// worth being able to find every instance of, since it is what
+			// the reconciliation worker later has to resolve.
+			tracing.Fail(ctx, "settlement_uncertain", nil)
 			w.WriteHeader(http.StatusAccepted)
 			json.NewEncoder(w).Encode(createTransferResponse{
 				Transfer: settled,
@@ -201,11 +251,22 @@ func createDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 			return
 		}
 
+		tracing.SetAttributes(r.Context(),
+			tracing.AccountID(accountID),
+			tracing.AmountMinor(req.Amount),
+		)
+
 		deposit, clientSecret, outcome, err := createDeposit(r.Context(), pool, accountsClient, paymentIntents, accountID, req.Amount)
 		if err != nil {
+			tracing.Fail(r.Context(), "create_deposit_failed", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
 		}
+		// deposit.ID only. clientSecret is deliberately absent from the
+		// span despite being right here in scope: it authorises confirming
+		// the payment with Stripe, which makes it a credential, and
+		// pkg/tracing's policy keeps credentials out of traces.
+		tracing.SetAttributes(r.Context(), tracing.DepositID(deposit.ID))
 		switch outcome {
 		case createDepositInvalidAmount:
 			writeJSONError(w, http.StatusBadRequest, "invalid amount")

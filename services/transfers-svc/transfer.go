@@ -100,6 +100,35 @@ const (
 	createTransferKeyReused // idempotency key reused with different parameters — client bug
 )
 
+// String renders the outcome for span attributes (and anything else that
+// wants it readable). Explicit strings rather than the iota's number: a
+// trace attribute reading "recipient_not_found" is self-describing, while
+// "2" requires the reader to have this file open — and the numbers shift
+// the moment a constant is inserted anywhere but the end, silently
+// re-labelling historical traces.
+func (o createTransferOutcome) String() string {
+	switch o {
+	case createTransferOK:
+		return "ok"
+	case createTransferInvalidAmount:
+		return "invalid_amount"
+	case createTransferRecipientNotFound:
+		return "recipient_not_found"
+	case createTransferSelfTransfer:
+		return "self_transfer"
+	case createTransferRecipientClosed:
+		return "recipient_closed"
+	case createTransferSenderNotActive:
+		return "sender_not_active"
+	case createTransferReplayed:
+		return "replayed"
+	case createTransferKeyReused:
+		return "idempotency_key_reused"
+	default:
+		return "unknown"
+	}
+}
+
 // createTransfer validates a transfer request and, on success, inserts a
 // pending transfers row. It never moves any money: ledger-svc's atomic
 // ExecuteTransfer (called separately, after this returns) is the only place
@@ -645,6 +674,20 @@ const (
 	fraudCheckRejected
 	fraudCheckUncertain
 )
+
+// String — same reasoning as createTransferOutcome.String.
+func (o fraudCheckOutcome) String() string {
+	switch o {
+	case fraudCheckApproved:
+		return "approved"
+	case fraudCheckRejected:
+		return "rejected"
+	case fraudCheckUncertain:
+		return "uncertain"
+	default:
+		return "unknown"
+	}
+}
 
 // checkTransferFraud calls fraud-svc for an already-created pending transfer
 // and, on a definite reject, writes the terminal 'rejected' status itself —

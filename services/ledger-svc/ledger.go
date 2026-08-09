@@ -203,6 +203,27 @@ const (
 	transferInsufficientFunds
 )
 
+// String renders the outcome for span attributes. Explicit strings rather
+// than the iota's number, so a trace reads "insufficient_funds" instead of
+// "4" — and so inserting a constant anywhere but the end cannot silently
+// re-label traces already stored in Jaeger.
+func (o transferOutcome) String() string {
+	switch o {
+	case transferOK:
+		return "posted"
+	case transferInvalidAmount:
+		return "invalid_amount"
+	case transferFromAccountNotFound:
+		return "from_account_not_found"
+	case transferToAccountNotFound:
+		return "to_account_not_found"
+	case transferInsufficientFunds:
+		return "insufficient_funds"
+	default:
+		return "unknown"
+	}
+}
+
 // lockLedgerAccount looks up and FOR-UPDATE-locks the ledger_accounts row
 // for accountID within tx. Callers transferring funds between two accounts
 // must lock both sides in ascending account_id order (see executeTransfer)

@@ -14,6 +14,7 @@ import (
 
 	"neobank/pkg/outbox"
 	"neobank/pkg/pgha"
+	"neobank/pkg/tracing"
 	accountsv1 "neobank/proto/gen/go/accounts/v1"
 	fraudv1 "neobank/proto/gen/go/fraud/v1"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
@@ -108,6 +109,21 @@ func main() {
 		log.Fatal("transfers-svc: STRIPE_WEBHOOK_SECRET environment variable is required")
 	}
 
+	// Tracing is set up before anything that could produce a span. A
+	// failure is logged rather than fatal: observability going down must
+	// not take the service with it — the global provider simply stays the
+	// API's no-op and everything else behaves identically.
+	shutdownTracing, err := tracing.Init(context.Background(), "transfers-svc")
+	if err != nil {
+		log.Printf("transfers-svc: tracing disabled: %v", err)
+		shutdownTracing = func(context.Context) error { return nil }
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			log.Printf("transfers-svc: tracing shutdown: %v", err)
+		}
+	}()
+
 	databaseURL := os.Getenv("DATABASE_URL")
 
 	// Pool first, migrations second — the reverse of the original order,
@@ -169,7 +185,7 @@ func main() {
 	// accounts-svc's own ledger client tolerates a not-yet-ready dependency
 	// at startup. accounts-svc speaks plaintext gRPC inside the cluster (no
 	// TLS), same as its own server setup.
-	accountsConn, err := grpc.NewClient(accountsAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	accountsConn, err := grpc.NewClient(accountsAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), tracing.GRPCClientOption())
 	if err != nil {
 		log.Fatalf("transfers-svc: failed to create accounts gRPC client for %s: %v", accountsAddr, err)
 	}
@@ -177,7 +193,7 @@ func main() {
 	accountsClient := accountsv1.NewAccountsServiceClient(accountsConn)
 
 	// Same lazy-dial reasoning as accountsConn above.
-	fraudConn, err := grpc.NewClient(fraudAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	fraudConn, err := grpc.NewClient(fraudAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), tracing.GRPCClientOption())
 	if err != nil {
 		log.Fatalf("transfers-svc: failed to create fraud gRPC client for %s: %v", fraudAddr, err)
 	}
@@ -185,7 +201,7 @@ func main() {
 	fraudClient := fraudv1.NewFraudServiceClient(fraudConn)
 
 	// Same lazy-dial reasoning as accountsConn above.
-	ledgerConn, err := grpc.NewClient(ledgerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	ledgerConn, err := grpc.NewClient(ledgerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), tracing.GRPCClientOption())
 	if err != nil {
 		log.Fatalf("transfers-svc: failed to create ledger gRPC client for %s: %v", ledgerAddr, err)
 	}
@@ -240,7 +256,7 @@ func main() {
 	mux.HandleFunc("POST /withdrawals", createWithdrawalHandler(pool, accountsClient, ledgerClient))
 
 	log.Printf("transfers-svc listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, tracing.Handler(mux, "transfers-svc")); err != nil {
 		log.Fatal(err)
 	}
 }

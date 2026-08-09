@@ -2,6 +2,7 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY proto/gen/go ./proto/gen/go
 COPY pkg/pgha ./pkg/pgha
+COPY pkg/tracing ./pkg/tracing
 COPY services/fraud-svc ./services/fraud-svc
 WORKDIR /src/services/fraud-svc
 RUN go build -o /out/server .

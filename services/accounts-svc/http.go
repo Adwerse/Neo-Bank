@@ -24,7 +24,7 @@ const defaultCurrency = "EUR"
 // service (ledger-svc), not the accounts row.
 type meResponse struct {
 	Account
-	Balance  int64  `json:"balance"`  // minor units (cents)
+	Balance  int64  `json:"balance"` // minor units (cents)
 	Currency string `json:"currency"`
 }
 
