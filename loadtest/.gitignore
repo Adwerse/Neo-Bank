@@ -1,0 +1,10 @@
+# Generated per run, never committed.
+#
+# fixtures/ holds live access tokens for the throwaway @loadtest.local
+# users plus the fraud-rule restore point; results/ holds whatever the
+# last run produced. Both are reproducible from `lt setup` and a k6 run,
+# and the numbers that are worth keeping live in the README instead —
+# committing a results directory would mean the repository slowly filling
+# with the output of every experiment anyone ever ran.
+fixtures/
+results/
