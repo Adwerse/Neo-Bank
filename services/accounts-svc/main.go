@@ -32,6 +32,13 @@ const (
 	defaultLedgerAddr         = "ledger-svc:8083"
 	defaultOutboxRetention    = 7 * 24 * time.Hour
 	outboxRelayInterval       = 1 * time.Second
+
+	// defaultBankCode is a deliberately fictitious 4-letter institution
+	// code — not a near-miss of any real registered Irish bank (AIBK,
+	// BOFI, ULSB, PTSB, KBIE, NIRE, ...). See README's "Честные
+	// ограничения" for why generated IBANs must not point at a real
+	// organization.
+	defaultBankCode = "ZZZZ"
 )
 
 func main() {
@@ -54,6 +61,10 @@ func main() {
 	ledgerAddr := os.Getenv("LEDGER_GRPC_ADDR")
 	if ledgerAddr == "" {
 		ledgerAddr = defaultLedgerAddr
+	}
+	bankCode := os.Getenv("BANK_CODE")
+	if bankCode == "" {
+		bankCode = defaultBankCode
 	}
 	outboxRetention := defaultOutboxRetention
 	if v := os.Getenv("OUTBOX_RETENTION"); v != "" {
@@ -111,6 +122,16 @@ func main() {
 		log.Fatalf("accounts-svc: failed to run migrations: %v", err)
 	}
 
+	// Backfill runs synchronously, before any listener starts accepting
+	// requests: every accounts row must have a non-NULL iban by the time
+	// getAccountByUserID/etc. can possibly be called, since their Scan
+	// targets a plain string field, not a nullable one.
+	if err := pgha.Retry(context.Background(), "backfill ibans", log.Printf, func(context.Context) error {
+		return backfillIBANs(context.Background(), pool, bankCode)
+	}); err != nil {
+		log.Fatalf("accounts-svc: failed to backfill ibans: %v", err)
+	}
+
 	// grpc.NewClient is lazy: it does not block on a live ledger-svc here, it
 	// dials on the first RPC and reconnects on its own — matching how the
 	// Postgres and Kafka clients above tolerate a not-yet-ready dependency at
@@ -129,7 +150,7 @@ func main() {
 	kafkaWriter := newKafkaWriter(kafkaBrokers, accountEventsTopic)
 	defer kafkaWriter.Close()
 
-	go runUserActivatedConsumer(context.Background(), kafkaReader, pool, ledgerClient)
+	go runUserActivatedConsumer(context.Background(), kafkaReader, pool, ledgerClient, bankCode)
 	go outbox.RunRelay(context.Background(), pool, accountsOutboxTable, kafkaWriter, outboxRelayInterval, outbox.DefaultBatchSize, "accounts-svc")
 	go outbox.RunCleanupWorker(context.Background(), pool, accountsOutboxTable, outboxRetention, outbox.DefaultCleanupInterval, "accounts-svc")
 

@@ -11,6 +11,7 @@ require (
 
 require (
 	google.golang.org/grpc v1.83.0
+	neobank/pkg/iban v0.0.0
 	neobank/pkg/outbox v0.0.0
 	neobank/pkg/pgha v0.0.0
 	neobank/pkg/tracing v0.0.0
@@ -54,6 +55,8 @@ require (
 )
 
 replace neobank/proto/gen/go => ../../proto/gen/go
+
+replace neobank/pkg/iban => ../../pkg/iban
 
 replace neobank/pkg/outbox => ../../pkg/outbox
 

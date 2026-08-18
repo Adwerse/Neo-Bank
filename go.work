@@ -5,6 +5,7 @@ use (
 	./infra/failover
 	./loadtest
 	./pkg/health
+	./pkg/iban
 	./pkg/outbox
 	./pkg/pgha
 	./pkg/tracing

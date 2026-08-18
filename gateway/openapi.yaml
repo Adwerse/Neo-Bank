@@ -645,6 +645,7 @@ components:
         - id
         - user_id
         - account_number
+        - iban
         - status
         - created_at
         - updated_at
@@ -659,6 +660,13 @@ components:
           format: uuid
         account_number:
           type: string
+        iban:
+          type: string
+          description: >
+            A checksum-valid IE IBAN, deterministically derived from
+            account_number. The bank code is a fictitious institution —
+            see README, "Честные ограничения".
+          example: IE34ZZZZ00004234567890
         status:
           type: string
           enum: [active, frozen, closed]
