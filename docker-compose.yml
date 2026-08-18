@@ -64,6 +64,9 @@ services:
       KAFKA_ACCOUNT_EVENTS_TOPIC: account.events
       LEDGER_GRPC_ADDR: ledger-svc:8083
       GRPC_PORT: "9082"
+      # A fictitious 4-letter institution code, not a real registered
+      # Irish bank — see README, "Честные ограничения".
+      BANK_CODE: "ZZZZ"
     depends_on:
       pg-haproxy:
         condition: service_healthy

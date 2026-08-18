@@ -84,7 +84,7 @@ func newKafkaWriter(brokers, topic string) *kafka.Writer {
 // at-least-once processing. handleUserActivated is idempotent (two layers,
 // see its doc comment), so a redelivery is a safe, logged no-op rather than
 // a stuck or duplicate-creating consumer.
-func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient) {
+func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, bankCode string) {
 	for {
 		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
@@ -130,7 +130,7 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 			continue
 		}
 
-		if err := handleUserActivated(msgCtx, pool, ledgerClient, &event); err != nil {
+		if err := handleUserActivated(msgCtx, pool, ledgerClient, &event, bankCode); err != nil {
 			log.Printf("accounts-svc: failed to handle UserActivated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
 			tracing.Fail(msgCtx, "user_activated_handling_failed", err)
 			span.End()
@@ -190,7 +190,7 @@ func runUserActivatedConsumer(ctx context.Context, reader *kafka.Reader, pool *p
 // message at a time, no concurrent handleUserActivated calls within the
 // process), and the idempotency at each layer already absorbs every gap this
 // step ordering could otherwise leave.
-func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, event *eventsv1.UserActivated) error {
+func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, event *eventsv1.UserActivated, bankCode string) error {
 	eventID := event.GetEventId()
 	userID := event.GetUserId()
 
@@ -202,7 +202,7 @@ func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, ledgerClient l
 		// with 22P02 on every redelivery — a new poison-message class).
 		// Falls back to the per-layer idempotency alone for this one message.
 		log.Printf("accounts-svc: UserActivated for user %s has no event_id, skipping processed_events bookkeeping", userID)
-		_, accountID, err := createAccountForUser(ctx, pool, userID)
+		_, accountID, err := createAccountForUser(ctx, pool, userID, bankCode)
 		if err != nil {
 			return err
 		}
@@ -218,7 +218,7 @@ func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, ledgerClient l
 		return nil
 	}
 
-	outcome, accountID, err := createAccountForUser(ctx, pool, userID)
+	outcome, accountID, err := createAccountForUser(ctx, pool, userID, bankCode)
 	if err != nil {
 		return fmt.Errorf("create account for user %s: %w", userID, err)
 	}

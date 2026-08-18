@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"neobank/pkg/iban"
 	"neobank/pkg/outbox"
 	eventsv1 "neobank/proto/gen/go/events/v1"
 )
@@ -41,6 +42,7 @@ type Account struct {
 	ID            string    `json:"id"`
 	UserID        string    `json:"user_id"`
 	AccountNumber string    `json:"account_number"`
+	IBAN          string    `json:"iban"`
 	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -104,14 +106,20 @@ func isNotFoundErr(err error) bool {
 // Postgres aborts an entire transaction on any statement error (including
 // this expected, retried collision) and re-generating inside a still-open,
 // already-errored transaction isn't an option without SAVEPOINTs.
-func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (accountCreateOutcome, string, error) {
+func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID, bankCode string) (accountCreateOutcome, string, error) {
 	for attempt := 0; attempt < maxAccountNumberAttempts; attempt++ {
 		accountNumber, err := generateAccountNumber()
 		if err != nil {
 			return 0, "", fmt.Errorf("generate account number: %w", err)
 		}
 
-		outcome, accountID, err := tryCreateAccount(ctx, pool, userID, accountNumber)
+		sortCode, bbanAcctNum := ibanPartsFromAccountNumber(accountNumber)
+		ibanValue, err := iban.Generate(bankCode, sortCode, bbanAcctNum)
+		if err != nil {
+			return 0, "", fmt.Errorf("generate iban: %w", err)
+		}
+
+		outcome, accountID, err := tryCreateAccount(ctx, pool, userID, accountNumber, ibanValue)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation &&
@@ -131,7 +139,7 @@ func createAccountForUser(ctx context.Context, pool *pgxpool.Pool, userID string
 // freshly created. A redelivery that finds the account already there
 // (accountAlreadyExists) must not re-publish the event a second time:
 // AccountCreated already went out the first time this account was made.
-func tryCreateAccount(ctx context.Context, pool *pgxpool.Pool, userID, accountNumber string) (accountCreateOutcome, string, error) {
+func tryCreateAccount(ctx context.Context, pool *pgxpool.Pool, userID, accountNumber, ibanValue string) (accountCreateOutcome, string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return 0, "", err
@@ -140,8 +148,8 @@ func tryCreateAccount(ctx context.Context, pool *pgxpool.Pool, userID, accountNu
 
 	var accountID string
 	err = tx.QueryRow(ctx,
-		"INSERT INTO accounts (user_id, account_number) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING RETURNING id",
-		userID, accountNumber,
+		"INSERT INTO accounts (user_id, account_number, iban) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING RETURNING id",
+		userID, accountNumber, ibanValue,
 	).Scan(&accountID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// user_id conflict: the account already exists. Fetch its id — no
@@ -190,12 +198,27 @@ func generateAccountNumber() (string, error) {
 	return fmt.Sprintf("%s%0*d", accountNumberPrefix, accountNumberDigits, n.Int64()), nil
 }
 
+// ibanPartsFromAccountNumber deterministically and injectively derives the
+// BBAN sort-code and account-number fields from accountNumber's
+// accountNumberDigits digits (after the "NB" prefix): the first 2 become
+// the sort code's low digits, the remaining 8 become the BBAN
+// account-number field verbatim. Injective because it uses every digit
+// exactly once with no hashing — so two distinct account numbers can never
+// derive the same IBAN, meaning accounts.iban's uniqueness follows
+// automatically from accounts.account_number's uniqueness (itself already
+// enforced, see createAccountForUser), with no additional collision-retry
+// loop needed for the IBAN specifically.
+func ibanPartsFromAccountNumber(accountNumber string) (sortCode, bbanAccountNumber string) {
+	digits := accountNumber[len(accountNumberPrefix):]
+	return "0000" + digits[0:2], digits[2:10]
+}
+
 func getAccountByUserID(ctx context.Context, pool *pgxpool.Pool, userID string) (Account, bool, error) {
 	var acc Account
 	err := pool.QueryRow(ctx,
-		"SELECT id, user_id, account_number, status, created_at, updated_at FROM accounts WHERE user_id = $1",
+		"SELECT id, user_id, account_number, iban, status, created_at, updated_at FROM accounts WHERE user_id = $1",
 		userID,
-	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
+	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.IBAN, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
 	if isNotFoundErr(err) {
 		return Account{}, false, nil
 	}
@@ -208,9 +231,9 @@ func getAccountByUserID(ctx context.Context, pool *pgxpool.Pool, userID string) 
 func getAccountByID(ctx context.Context, pool *pgxpool.Pool, id string) (Account, bool, error) {
 	var acc Account
 	err := pool.QueryRow(ctx,
-		"SELECT id, user_id, account_number, status, created_at, updated_at FROM accounts WHERE id = $1",
+		"SELECT id, user_id, account_number, iban, status, created_at, updated_at FROM accounts WHERE id = $1",
 		id,
-	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
+	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.IBAN, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
 	if isNotFoundErr(err) {
 		return Account{}, false, nil
 	}
@@ -230,7 +253,7 @@ func getAccountsByIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 		return nil, nil
 	}
 	rows, err := pool.Query(ctx,
-		"SELECT id, user_id, account_number, status, created_at, updated_at FROM accounts WHERE id = ANY($1::uuid[])",
+		"SELECT id, user_id, account_number, iban, status, created_at, updated_at FROM accounts WHERE id = ANY($1::uuid[])",
 		ids,
 	)
 	if err != nil {
@@ -241,7 +264,7 @@ func getAccountsByIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 	var accounts []Account
 	for rows.Next() {
 		var acc Account
-		if err := rows.Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt); err != nil {
+		if err := rows.Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.IBAN, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, acc)
@@ -252,9 +275,9 @@ func getAccountsByIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 func getAccountByAccountNumber(ctx context.Context, pool *pgxpool.Pool, accountNumber string) (Account, bool, error) {
 	var acc Account
 	err := pool.QueryRow(ctx,
-		"SELECT id, user_id, account_number, status, created_at, updated_at FROM accounts WHERE account_number = $1",
+		"SELECT id, user_id, account_number, iban, status, created_at, updated_at FROM accounts WHERE account_number = $1",
 		accountNumber,
-	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
+	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.IBAN, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
 	if isNotFoundErr(err) {
 		return Account{}, false, nil
 	}
@@ -291,9 +314,9 @@ func updateAccountStatus(ctx context.Context, pool *pgxpool.Pool, id, newStatus 
 	var acc Account
 	err = tx.QueryRow(ctx,
 		`UPDATE accounts SET status = $1, updated_at = now() WHERE id = $2
-		 RETURNING id, user_id, account_number, status, created_at, updated_at`,
+		 RETURNING id, user_id, account_number, iban, status, created_at, updated_at`,
 		newStatus, id,
-	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
+	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.IBAN, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
 	if err != nil {
 		return Account{}, 0, err
 	}
