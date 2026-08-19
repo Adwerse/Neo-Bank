@@ -19,8 +19,8 @@ import (
 )
 
 type createTransferRequest struct {
-	RecipientAccountNumber string `json:"recipient_account_number"`
-	Amount                 int64  `json:"amount"`
+	RecipientIban string `json:"recipient_iban"`
+	Amount        int64  `json:"amount"`
 }
 
 // createTransferResponse embeds Transfer directly (so its fields flatten
@@ -66,7 +66,8 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			return
 		}
 
-		senderAccountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
+		userID := r.Header.Get("X-User-Id")
+		senderAccountID, err := resolveSenderAccountID(r.Context(), accountsClient, userID)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
 			return
@@ -85,15 +86,15 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		ctx := r.Context()
 		// The amount is on the span deliberately — see pkg/tracing's
 		// attribute policy for why money is included and account numbers
-		// are not. Note req.RecipientAccountNumber is NOT recorded: it is
-		// the human-facing identifier, and the resolved internal ids below
+		// are not. Note req.RecipientIban is NOT recorded: it is the
+		// human-facing identifier, and the resolved internal ids below
 		// serve every debugging purpose it would.
 		tracing.SetAttributes(ctx,
 			tracing.AccountID(senderAccountID),
 			tracing.AmountMinor(req.Amount),
 		)
 
-		transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderAccountID, req.RecipientAccountNumber, req.Amount)
+		transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderAccountID, userID, req.RecipientIban, req.Amount)
 		if err != nil {
 			tracing.Fail(ctx, "create_transfer_failed", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
@@ -107,6 +108,12 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		case createTransferInvalidAmount:
 			writeJSONError(w, http.StatusBadRequest, "invalid amount")
 			return
+		case createTransferInvalidRecipientIban:
+			writeJSONError(w, http.StatusBadRequest, "invalid IBAN")
+			return
+		case createTransferUnsupportedBank:
+			writeJSONError(w, http.StatusBadRequest, "only transfers within this bank are supported")
+			return
 		case createTransferRecipientNotFound:
 			writeJSONError(w, http.StatusNotFound, "recipient not found")
 			return
@@ -118,6 +125,9 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 			return
 		case createTransferSenderNotActive:
 			writeJSONError(w, http.StatusConflict, "sender account is not active")
+			return
+		case createTransferResolveRateLimited:
+			writeJSONError(w, http.StatusTooManyRequests, "too many resolve attempts, try again later")
 			return
 		case createTransferKeyReused:
 			writeJSONError(w, http.StatusUnprocessableEntity, "idempotency key already used with different parameters")

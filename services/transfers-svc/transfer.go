@@ -93,12 +93,15 @@ type createTransferOutcome int
 const (
 	createTransferOK createTransferOutcome = iota
 	createTransferInvalidAmount
+	createTransferInvalidRecipientIban // recipient IBAN failed format/check-digit validation — rejected before any accounts-svc database lookup
+	createTransferUnsupportedBank      // recipient IBAN is structurally valid but for a bank code that isn't this one — no SEPA/inter-bank rail exists
 	createTransferRecipientNotFound
 	createTransferSelfTransfer
 	createTransferRecipientClosed
 	createTransferSenderNotActive
-	createTransferReplayed  // an existing transfer was found for this idempotency key — do not re-settle, just return its current state
-	createTransferKeyReused // idempotency key reused with different parameters — client bug
+	createTransferResolveRateLimited // caller has made too many recipient-resolve attempts recently — see accounts-svc's ResolveAccountByIban
+	createTransferReplayed           // an existing transfer was found for this idempotency key — do not re-settle, just return its current state
+	createTransferKeyReused          // idempotency key reused with different parameters — client bug
 )
 
 // String renders the outcome for span attributes (and anything else that
@@ -113,6 +116,10 @@ func (o createTransferOutcome) String() string {
 		return "ok"
 	case createTransferInvalidAmount:
 		return "invalid_amount"
+	case createTransferInvalidRecipientIban:
+		return "invalid_recipient_iban"
+	case createTransferUnsupportedBank:
+		return "unsupported_bank"
 	case createTransferRecipientNotFound:
 		return "recipient_not_found"
 	case createTransferSelfTransfer:
@@ -121,6 +128,8 @@ func (o createTransferOutcome) String() string {
 		return "recipient_closed"
 	case createTransferSenderNotActive:
 		return "sender_not_active"
+	case createTransferResolveRateLimited:
+		return "resolve_rate_limited"
 	case createTransferReplayed:
 		return "replayed"
 	case createTransferKeyReused:
@@ -142,7 +151,13 @@ func (o createTransferOutcome) String() string {
 // and the INSERT's unique-violation handling below for how a retried or
 // concurrently-duplicated request is detected and reconciled rather than
 // creating (or racing to create) a second row.
-func createTransfer(ctx context.Context, pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, idempotencyKey, senderAccountID, recipientAccountNumber string, amount int64) (Transfer, createTransferOutcome, error) {
+//
+// userID is the caller's own authenticated identity (the gateway's
+// X-User-Id, distinct from senderAccountID which is that user's resolved
+// account id) — passed through to ResolveAccountByIban purely so
+// accounts-svc can key its per-user resolve rate limit on who is actually
+// asking, not on anything client-controlled.
+func createTransfer(ctx context.Context, pool *pgxpool.Pool, accountsClient accountsv1.AccountsServiceClient, idempotencyKey, senderAccountID, userID, recipientIban string, amount int64) (Transfer, createTransferOutcome, error) {
 	// Fast path: a prior attempt with this exact key already ran (the
 	// common case — client retried after a dropped response). Skip
 	// re-validating and re-calling accounts-svc; just reconcile and return
@@ -155,17 +170,24 @@ func createTransfer(ctx context.Context, pool *pgxpool.Pool, accountsClient acco
 		return Transfer{}, 0, err
 	}
 	if found {
-		return reconcileReplay(ctx, accountsClient, existing, senderAccountID, recipientAccountNumber, amount)
+		return reconcileReplay(ctx, accountsClient, existing, senderAccountID, userID, recipientIban, amount)
 	}
 
 	if amount <= 0 {
 		return Transfer{}, createTransferInvalidAmount, nil
 	}
 
-	recipient, err := accountsClient.ResolveAccountByNumber(ctx, &accountsv1.ResolveAccountByNumberRequest{AccountNumber: recipientAccountNumber})
+	recipient, err := accountsClient.ResolveAccountByIban(ctx, &accountsv1.ResolveAccountByIbanRequest{Iban: recipientIban, UserId: userID})
 	if err != nil {
-		if status.Code(err) == codes.NotFound {
+		switch status.Code(err) {
+		case codes.InvalidArgument:
+			return Transfer{}, createTransferInvalidRecipientIban, nil
+		case codes.FailedPrecondition:
+			return Transfer{}, createTransferUnsupportedBank, nil
+		case codes.NotFound:
 			return Transfer{}, createTransferRecipientNotFound, nil
+		case codes.ResourceExhausted:
+			return Transfer{}, createTransferResolveRateLimited, nil
 		}
 		return Transfer{}, 0, fmt.Errorf("resolve recipient account: %w", err)
 	}
@@ -204,7 +226,7 @@ func createTransfer(ctx context.Context, pool *pgxpool.Pool, accountsClient acco
 			if !found {
 				return Transfer{}, 0, fmt.Errorf("idempotency key %s: unique violation but no row found", idempotencyKey)
 			}
-			return reconcileReplay(ctx, accountsClient, winner, senderAccountID, recipientAccountNumber, amount)
+			return reconcileReplay(ctx, accountsClient, winner, senderAccountID, userID, recipientIban, amount)
 		}
 		return Transfer{}, 0, fmt.Errorf("insert pending transfer: %w", err)
 	}
@@ -332,15 +354,20 @@ func getTransferHistoryPage(ctx context.Context, pool *pgxpool.Pool, accountID s
 // (via the fast path, or because this request lost the insert race) against
 // the CURRENT request's parameters. A mismatch means the key was reused for
 // a different transfer — a client bug — and must not silently return
-// someone else's transfer state. recipientAccountNumber is resolved fresh
-// (a cheap, read-only, side-effect-free call) purely to obtain the
-// account_id to compare, not to re-run any business validation — those only
-// apply to a genuinely new transfer, not a replay.
-func reconcileReplay(ctx context.Context, accountsClient accountsv1.AccountsServiceClient, existing Transfer, senderAccountID, recipientAccountNumber string, amount int64) (Transfer, createTransferOutcome, error) {
+// someone else's transfer state. recipientIban is resolved fresh (a cheap,
+// read-only, side-effect-free call) purely to obtain the account_id to
+// compare, not to re-run any business validation — those only apply to a
+// genuinely new transfer, not a replay. Any resolve error here (rate
+// limited, invalid IBAN, wrong bank, not found, or a real transport
+// failure) is treated uniformly as a generic error, unlike createTransfer's
+// switch over specific outcomes: those specific outcomes describe a NEW
+// transfer's validation, and none of them make sense to report for a
+// replay of a request that already succeeded once.
+func reconcileReplay(ctx context.Context, accountsClient accountsv1.AccountsServiceClient, existing Transfer, senderAccountID, userID, recipientIban string, amount int64) (Transfer, createTransferOutcome, error) {
 	if existing.SenderAccountID != senderAccountID || existing.Amount != amount {
 		return Transfer{}, createTransferKeyReused, nil
 	}
-	recipient, err := accountsClient.ResolveAccountByNumber(ctx, &accountsv1.ResolveAccountByNumberRequest{AccountNumber: recipientAccountNumber})
+	recipient, err := accountsClient.ResolveAccountByIban(ctx, &accountsv1.ResolveAccountByIbanRequest{Iban: recipientIban, UserId: userID})
 	if err != nil {
 		return Transfer{}, 0, fmt.Errorf("resolve recipient account for idempotency check: %w", err)
 	}

@@ -64,13 +64,13 @@ func randomUUIDForTest(t *testing.T) string {
 // RPCs, this fake keeps compiling instead of breaking every test.
 type fakeAccountsClient struct {
 	accountsv1.AccountsServiceClient
-	resolveFunc              func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error)
+	resolveFunc              func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error)
 	getByIDFunc              func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error)
 	getByUserIDFunc          func(ctx context.Context, req *accountsv1.GetAccountByUserIDRequest) (*accountsv1.GetAccountByUserIDResponse, error)
 	resolveAccountsByIdsFunc func(ctx context.Context, req *accountsv1.ResolveAccountsByIdsRequest) (*accountsv1.ResolveAccountsByIdsResponse, error)
 }
 
-func (f *fakeAccountsClient) ResolveAccountByNumber(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest, opts ...grpc.CallOption) (*accountsv1.ResolveAccountByNumberResponse, error) {
+func (f *fakeAccountsClient) ResolveAccountByIban(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest, opts ...grpc.CallOption) (*accountsv1.ResolveAccountByIbanResponse, error) {
 	return f.resolveFunc(ctx, req)
 }
 
@@ -220,15 +220,15 @@ func TestCreateTransfer_Success(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: recipientID, Status: accountStatusActive}, nil
 		},
 		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
 			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: accountStatusActive}, nil
 		},
 	}
 
-	transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000001", 1500)
+	transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000001", 1500)
 	if err != nil {
 		t.Fatalf("createTransfer: unexpected error: %v", err)
 	}
@@ -261,8 +261,8 @@ func TestCreateTransfer_InvalidAmount(t *testing.T) {
 	ctx := context.Background()
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			t.Fatal("ResolveAccountByNumber should not be called when amount is invalid")
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			t.Fatal("ResolveAccountByIban should not be called when amount is invalid")
 			return nil, nil
 		},
 	}
@@ -271,7 +271,7 @@ func TestCreateTransfer_InvalidAmount(t *testing.T) {
 		idempotencyKey := randomUUIDForTest(t)
 		t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
-		_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, randomUUIDForTest(t), "NB0000000001", amount)
+		_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, randomUUIDForTest(t), "test-user", "NB0000000001", amount)
 		if err != nil {
 			t.Fatalf("createTransfer(amount=%d): unexpected error: %v", amount, err)
 		}
@@ -292,12 +292,12 @@ func TestCreateTransfer_RecipientNotFound(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
 			return nil, status.Error(codes.NotFound, "account not found")
 		},
 	}
 
-	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, randomUUIDForTest(t), "NB9999999999", 1000)
+	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, randomUUIDForTest(t), "test-user", "NB9999999999", 1000)
 	if err != nil {
 		t.Fatalf("createTransfer: unexpected error: %v", err)
 	}
@@ -318,13 +318,13 @@ func TestCreateTransfer_SelfTransfer(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
 			// The recipient's own account_number resolves back to the sender.
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: senderID, Status: accountStatusActive}, nil
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: senderID, Status: accountStatusActive}, nil
 		},
 	}
 
-	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000002", 1000)
+	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000002", 1000)
 	if err != nil {
 		t.Fatalf("createTransfer: unexpected error: %v", err)
 	}
@@ -346,12 +346,12 @@ func TestCreateTransfer_RecipientClosed(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusClosed}, nil
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: recipientID, Status: accountStatusClosed}, nil
 		},
 	}
 
-	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000003", 1000)
+	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000003", 1000)
 	if err != nil {
 		t.Fatalf("createTransfer: unexpected error: %v", err)
 	}
@@ -373,15 +373,15 @@ func TestCreateTransfer_SenderNotActive(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: recipientID, Status: accountStatusActive}, nil
 		},
 		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
 			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: "frozen"}, nil
 		},
 	}
 
-	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000004", 1000)
+	_, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000004", 1000)
 	if err != nil {
 		t.Fatalf("createTransfer: unexpected error: %v", err)
 	}
@@ -740,15 +740,15 @@ func TestCreateTransfer_IdempotentReplay_SameParams(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: recipientID, Status: accountStatusActive}, nil
 		},
 		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
 			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: accountStatusActive}, nil
 		},
 	}
 
-	first, outcome1, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000010", 2000)
+	first, outcome1, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000010", 2000)
 	if err != nil {
 		t.Fatalf("createTransfer (first): unexpected error: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestCreateTransfer_IdempotentReplay_SameParams(t *testing.T) {
 		t.Fatalf("first outcome = %v, want createTransferOK", outcome1)
 	}
 
-	second, outcome2, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000010", 2000)
+	second, outcome2, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000010", 2000)
 	if err != nil {
 		t.Fatalf("createTransfer (second): unexpected error: %v", err)
 	}
@@ -782,15 +782,15 @@ func TestCreateTransfer_IdempotentReplay_DifferentParams(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: recipientID, Status: accountStatusActive}, nil
 		},
 		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
 			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: accountStatusActive}, nil
 		},
 	}
 
-	_, outcome1, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000011", 2000)
+	_, outcome1, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000011", 2000)
 	if err != nil {
 		t.Fatalf("createTransfer (first): unexpected error: %v", err)
 	}
@@ -799,7 +799,7 @@ func TestCreateTransfer_IdempotentReplay_DifferentParams(t *testing.T) {
 	}
 
 	// Same key, different amount.
-	_, outcome2, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000011", 9999)
+	_, outcome2, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000011", 9999)
 	if err != nil {
 		t.Fatalf("createTransfer (reused key, different amount): unexpected error: %v", err)
 	}
@@ -808,7 +808,7 @@ func TestCreateTransfer_IdempotentReplay_DifferentParams(t *testing.T) {
 	}
 
 	// Same key, different sender.
-	_, outcome3, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, randomUUIDForTest(t), "NB0000000011", 2000)
+	_, outcome3, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, randomUUIDForTest(t), "test-user", "NB0000000011", 2000)
 	if err != nil {
 		t.Fatalf("createTransfer (reused key, different sender): unexpected error: %v", err)
 	}
@@ -835,12 +835,12 @@ func TestCreateTransfer_ReplayReturnsCurrentState(t *testing.T) {
 	}
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: recipientID, Status: accountStatusActive}, nil
 		},
 	}
 
-	replayed, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000012", 3000)
+	replayed, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000012", 3000)
 	if err != nil {
 		t.Fatalf("createTransfer: unexpected error: %v", err)
 	}
@@ -874,8 +874,8 @@ func TestCreateTransfer_ConcurrentDuplicate(t *testing.T) {
 	t.Cleanup(func() { deleteTransfer(t, ctx, pool, idempotencyKey) })
 
 	accountsClient := &fakeAccountsClient{
-		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByNumberRequest) (*accountsv1.ResolveAccountByNumberResponse, error) {
-			return &accountsv1.ResolveAccountByNumberResponse{AccountId: recipientID, Status: accountStatusActive}, nil
+		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
+			return &accountsv1.ResolveAccountByIbanResponse{AccountId: recipientID, Status: accountStatusActive}, nil
 		},
 		getByIDFunc: func(ctx context.Context, req *accountsv1.GetAccountByIDRequest) (*accountsv1.GetAccountByIDResponse, error) {
 			return &accountsv1.GetAccountByIDResponse{AccountId: senderID, Status: accountStatusActive}, nil
@@ -892,7 +892,7 @@ func TestCreateTransfer_ConcurrentDuplicate(t *testing.T) {
 	for i := 0; i < attempts; i++ {
 		go func(i int) {
 			defer wg.Done()
-			transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "NB0000000013", 2500)
+			transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderID, "test-user", "NB0000000013", 2500)
 			outcomes[i] = outcome
 			ids[i] = transfer.ID
 			errs[i] = err
@@ -1099,9 +1099,9 @@ func TestListTransfersHandler_BatchResolvesCounterpartiesOnce(t *testing.T) {
 		t.Fatalf("markTransferCompleted: %v", err)
 	}
 
-	accountNumbers := map[string]string{
-		accountB: "NB0000000001",
-		accountC: "NB0000000002",
+	ibans := map[string]string{
+		accountB: "IE29ZZZZ00000000000001",
+		accountC: "IE29ZZZZ00000000000002",
 	}
 
 	var resolveCalls int
@@ -1113,8 +1113,8 @@ func TestListTransfersHandler_BatchResolvesCounterpartiesOnce(t *testing.T) {
 			resolveCalls++
 			resp := &accountsv1.ResolveAccountsByIdsResponse{}
 			for _, id := range req.GetAccountIds() {
-				if number, ok := accountNumbers[id]; ok {
-					resp.Accounts = append(resp.Accounts, &accountsv1.AccountSummary{AccountId: id, AccountNumber: number})
+				if value, ok := ibans[id]; ok {
+					resp.Accounts = append(resp.Accounts, &accountsv1.AccountSummary{AccountId: id, Iban: value})
 				}
 			}
 			return resp, nil
@@ -1150,9 +1150,9 @@ func TestListTransfersHandler_BatchResolvesCounterpartiesOnce(t *testing.T) {
 	// up by amount instead, which is unique per transfer in this test
 	// (1000 -> accountB, 2000 -> accountC, 3000 -> accountB).
 	wantCounterpartyByAmount := map[int64]string{
-		1000: accountNumbers[accountB],
-		2000: accountNumbers[accountC],
-		3000: accountNumbers[accountB],
+		1000: ibans[accountB],
+		2000: ibans[accountC],
+		3000: ibans[accountB],
 	}
 	for _, entry := range resp.Transfers {
 		if entry.Type != "transfer" {
@@ -1162,8 +1162,8 @@ func TestListTransfersHandler_BatchResolvesCounterpartiesOnce(t *testing.T) {
 			t.Errorf("transfer %s direction = %q, want %q", entry.ID, entry.Direction, "outgoing")
 		}
 		want := wantCounterpartyByAmount[entry.Amount]
-		if entry.CounterpartyAccountNumber != want {
-			t.Errorf("transfer %s (amount=%d) counterparty_account_number = %q, want %q", entry.ID, entry.Amount, entry.CounterpartyAccountNumber, want)
+		if entry.CounterpartyIban != want {
+			t.Errorf("transfer %s (amount=%d) counterparty_iban = %q, want %q", entry.ID, entry.Amount, entry.CounterpartyIban, want)
 		}
 	}
 }

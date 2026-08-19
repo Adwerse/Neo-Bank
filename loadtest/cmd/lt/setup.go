@@ -263,20 +263,20 @@ func provisionUser(ctx context.Context, client *http.Client, gateway, mailpit, e
 	}
 
 	return FixtureUser{
-		Email:         email,
-		UserID:        account.UserID,
-		AccountID:     account.ID,
-		AccountNumber: account.AccountNumber,
-		AccessToken:   tokens.AccessToken,
+		Email:       email,
+		UserID:      account.UserID,
+		AccountID:   account.ID,
+		IBAN:        account.IBAN,
+		AccessToken: tokens.AccessToken,
 	}, nil
 }
 
 type meResponse struct {
-	ID            string `json:"id"`
-	UserID        string `json:"user_id"`
-	AccountNumber string `json:"account_number"`
-	Status        string `json:"status"`
-	Balance       int64  `json:"balance"`
+	ID      string `json:"id"`
+	UserID  string `json:"user_id"`
+	IBAN    string `json:"iban"`
+	Status  string `json:"status"`
+	Balance int64  `json:"balance"`
 }
 
 // waitForAccount polls GET /accounts/me until the Kafka pipeline described

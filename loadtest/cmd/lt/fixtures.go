@@ -38,11 +38,11 @@ type Fixtures struct {
 }
 
 type FixtureUser struct {
-	Email         string `json:"email"`
-	UserID        string `json:"user_id"`
-	AccountID     string `json:"account_id"`
-	AccountNumber string `json:"account_number"`
-	AccessToken   string `json:"access_token"`
+	Email       string `json:"email"`
+	UserID      string `json:"user_id"`
+	AccountID   string `json:"account_id"`
+	IBAN        string `json:"iban"`
+	AccessToken string `json:"access_token"`
 }
 
 // AccountIDs is what the verifier needs: the cohort, as ledger-svc knows

@@ -30,7 +30,10 @@ function failureReasonMessage(reason?: string): string {
 // transfer.go) to Russian messages, same lookup-with-fallback pattern as
 // LoginPage's INVALID_CREDENTIALS/EMAIL_NOT_VERIFIED.
 const API_ERROR_LABELS: Record<string, string> = {
-  'recipient not found': 'Получатель с таким номером счёта не найден',
+  'recipient not found': 'Получатель с таким IBAN не найден',
+  'invalid IBAN': 'Проверьте IBAN получателя — неверный формат или контрольные цифры',
+  'only transfers within this bank are supported': 'Переводы поддерживаются только внутри этого банка',
+  'too many resolve attempts, try again later': 'Слишком много попыток, попробуйте позже',
   'cannot transfer to your own account': 'Нельзя перевести самому себе',
   'recipient account is closed': 'Счёт получателя закрыт',
   'sender account is not active': 'Ваш счёт временно не может отправлять переводы',
@@ -108,7 +111,7 @@ export function TransferForm() {
     }
     try {
       const response = await createTransfer(
-        { recipient_account_number: values.recipientAccountNumber, amount: amountCents },
+        { recipient_iban: values.recipientIban, amount: amountCents },
         idempotencyKeyRef.current,
       )
       setResult(response)
@@ -145,11 +148,11 @@ export function TransferForm() {
       <h2>Перевод</h2>
       <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className={styles.field}>
-          <label className={styles.label} htmlFor="recipientAccountNumber">
-            Номер счёта получателя
+          <label className={styles.label} htmlFor="recipientIban">
+            IBAN получателя
           </label>
-          <Input id="recipientAccountNumber" autoComplete="off" {...register('recipientAccountNumber')} />
-          {errors.recipientAccountNumber && <ErrorText>{errors.recipientAccountNumber.message}</ErrorText>}
+          <Input id="recipientIban" autoComplete="off" {...register('recipientIban')} />
+          {errors.recipientIban && <ErrorText>{errors.recipientIban.message}</ErrorText>}
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="amount">

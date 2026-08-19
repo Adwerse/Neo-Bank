@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { parseAmountToCents } from './money'
 
 export const transferSchema = z.object({
-  recipientAccountNumber: z.string().min(1, 'Введите номер счёта получателя'),
+  recipientIban: z.string().min(1, 'Введите IBAN получателя'),
   amount: z
     .string()
     .regex(/^\d+([.,]\d{1,2})?$/, 'Введите сумму, например 100 или 99.50')

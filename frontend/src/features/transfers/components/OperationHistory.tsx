@@ -141,7 +141,7 @@ export function OperationHistory() {
                   {outgoing ? '−' : '+'}
                   {formatMoney(entry.amount, 'EUR')}
                 </span>
-                <span className={styles.counterparty}>{entry.type === 'transfer' ? entry.counterparty_account_number : '—'}</span>
+                <span className={styles.counterparty}>{entry.type === 'transfer' ? entry.counterparty_iban : '—'}</span>
                 <span className={[styles.status, entry.status === 'rejected' ? styles.rejected : ''].filter(Boolean).join(' ')}>
                   {STATUS_LABELS[entry.status] ?? entry.status}
                 </span>

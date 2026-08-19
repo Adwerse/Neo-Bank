@@ -98,10 +98,10 @@ export const settledDuration = new Trend('settled_duration', true);
 // successful "transfers" per second, and not one unit of money has moved.
 // This cost an hour the first time; it is written down so it costs nobody
 // else one.
-export function transfer(sender, recipientAccountNumber, idempotencyKey, amount = AMOUNT) {
+export function transfer(sender, recipientIban, idempotencyKey, amount = AMOUNT) {
   const res = http.post(
     `${gateway}/transfers/`,
-    JSON.stringify({ recipient_account_number: recipientAccountNumber, amount }),
+    JSON.stringify({ recipient_iban: recipientIban, amount }),
     {
       headers: {
         'Content-Type': 'application/json',

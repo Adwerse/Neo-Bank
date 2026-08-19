@@ -67,6 +67,11 @@ services:
       # A fictitious 4-letter institution code, not a real registered
       # Irish bank — see README, "Честные ограничения".
       BANK_CODE: "ZZZZ"
+      # Left at their code defaults (10 attempts / 5 minutes) — present
+      # here only so the rate limit is visible/tunable without a code
+      # change, same reasoning as RECONCILE_STALE_AFTER below.
+      IBAN_RESOLVE_RATE_LIMIT: "10"
+      IBAN_RESOLVE_RATE_WINDOW: "5m"
     depends_on:
       pg-haproxy:
         condition: service_healthy

@@ -21,27 +21,33 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-type ResolveAccountByNumberRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AccountNumber string                 `protobuf:"bytes,1,opt,name=account_number,json=accountNumber,proto3" json:"account_number,omitempty"`
+type ResolveAccountByIbanRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Iban  string                 `protobuf:"bytes,1,opt,name=iban,proto3" json:"iban,omitempty"`
+	// user_id is the caller's own authenticated user id (transfers-svc's
+	// gateway-injected X-User-Id, passed through explicitly since gRPC
+	// metadata doesn't carry it automatically) — required so accounts-svc can
+	// key its per-user resolve rate limit on the actual caller, not the IBAN
+	// being probed.
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ResolveAccountByNumberRequest) Reset() {
-	*x = ResolveAccountByNumberRequest{}
+func (x *ResolveAccountByIbanRequest) Reset() {
+	*x = ResolveAccountByIbanRequest{}
 	mi := &file_accounts_v1_accounts_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ResolveAccountByNumberRequest) String() string {
+func (x *ResolveAccountByIbanRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ResolveAccountByNumberRequest) ProtoMessage() {}
+func (*ResolveAccountByIbanRequest) ProtoMessage() {}
 
-func (x *ResolveAccountByNumberRequest) ProtoReflect() protoreflect.Message {
+func (x *ResolveAccountByIbanRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_accounts_v1_accounts_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -53,19 +59,26 @@ func (x *ResolveAccountByNumberRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ResolveAccountByNumberRequest.ProtoReflect.Descriptor instead.
-func (*ResolveAccountByNumberRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ResolveAccountByIbanRequest.ProtoReflect.Descriptor instead.
+func (*ResolveAccountByIbanRequest) Descriptor() ([]byte, []int) {
 	return file_accounts_v1_accounts_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *ResolveAccountByNumberRequest) GetAccountNumber() string {
+func (x *ResolveAccountByIbanRequest) GetIban() string {
 	if x != nil {
-		return x.AccountNumber
+		return x.Iban
 	}
 	return ""
 }
 
-type ResolveAccountByNumberResponse struct {
+func (x *ResolveAccountByIbanRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type ResolveAccountByIbanResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AccountId     string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
 	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
@@ -73,20 +86,20 @@ type ResolveAccountByNumberResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ResolveAccountByNumberResponse) Reset() {
-	*x = ResolveAccountByNumberResponse{}
+func (x *ResolveAccountByIbanResponse) Reset() {
+	*x = ResolveAccountByIbanResponse{}
 	mi := &file_accounts_v1_accounts_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ResolveAccountByNumberResponse) String() string {
+func (x *ResolveAccountByIbanResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ResolveAccountByNumberResponse) ProtoMessage() {}
+func (*ResolveAccountByIbanResponse) ProtoMessage() {}
 
-func (x *ResolveAccountByNumberResponse) ProtoReflect() protoreflect.Message {
+func (x *ResolveAccountByIbanResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_accounts_v1_accounts_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -98,19 +111,19 @@ func (x *ResolveAccountByNumberResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ResolveAccountByNumberResponse.ProtoReflect.Descriptor instead.
-func (*ResolveAccountByNumberResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ResolveAccountByIbanResponse.ProtoReflect.Descriptor instead.
+func (*ResolveAccountByIbanResponse) Descriptor() ([]byte, []int) {
 	return file_accounts_v1_accounts_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *ResolveAccountByNumberResponse) GetAccountId() string {
+func (x *ResolveAccountByIbanResponse) GetAccountId() string {
 	if x != nil {
 		return x.AccountId
 	}
 	return ""
 }
 
-func (x *ResolveAccountByNumberResponse) GetStatus() string {
+func (x *ResolveAccountByIbanResponse) GetStatus() string {
 	if x != nil {
 		return x.Status
 	}
@@ -407,11 +420,15 @@ func (x *ResolveAccountsByIdsResponse) GetAccounts() []*AccountSummary {
 
 // AccountSummary is a minimal per-account projection for batch lookups —
 // only what a caller needs to enrich a list of records with human-readable
-// account info, not the full GetAccountByIDResponse shape.
+// account info, not the full GetAccountByIDResponse shape. Carries iban
+// rather than account_number: transfers-svc uses this to label transfer
+// counterparties, and IBAN is this system's one user-facing account
+// identifier (see README) — the same one a sender types in to reach this
+// account in the first place.
 type AccountSummary struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AccountId     string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
-	AccountNumber string                 `protobuf:"bytes,2,opt,name=account_number,json=accountNumber,proto3" json:"account_number,omitempty"`
+	Iban          string                 `protobuf:"bytes,2,opt,name=iban,proto3" json:"iban,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -453,9 +470,9 @@ func (x *AccountSummary) GetAccountId() string {
 	return ""
 }
 
-func (x *AccountSummary) GetAccountNumber() string {
+func (x *AccountSummary) GetIban() string {
 	if x != nil {
-		return x.AccountNumber
+		return x.Iban
 	}
 	return ""
 }
@@ -464,10 +481,11 @@ var File_accounts_v1_accounts_proto protoreflect.FileDescriptor
 
 const file_accounts_v1_accounts_proto_rawDesc = "" +
 	"\n" +
-	"\x1aaccounts/v1/accounts.proto\x12\vaccounts.v1\"F\n" +
-	"\x1dResolveAccountByNumberRequest\x12%\n" +
-	"\x0eaccount_number\x18\x01 \x01(\tR\raccountNumber\"W\n" +
-	"\x1eResolveAccountByNumberResponse\x12\x1d\n" +
+	"\x1aaccounts/v1/accounts.proto\x12\vaccounts.v1\"J\n" +
+	"\x1bResolveAccountByIbanRequest\x12\x12\n" +
+	"\x04iban\x18\x01 \x01(\tR\x04iban\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"U\n" +
+	"\x1cResolveAccountByIbanResponse\x12\x1d\n" +
 	"\n" +
 	"account_id\x18\x01 \x01(\tR\taccountId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\"6\n" +
@@ -489,13 +507,13 @@ const file_accounts_v1_accounts_proto_rawDesc = "" +
 	"\vaccount_ids\x18\x01 \x03(\tR\n" +
 	"accountIds\"W\n" +
 	"\x1cResolveAccountsByIdsResponse\x127\n" +
-	"\baccounts\x18\x01 \x03(\v2\x1b.accounts.v1.AccountSummaryR\baccounts\"V\n" +
+	"\baccounts\x18\x01 \x03(\v2\x1b.accounts.v1.AccountSummaryR\baccounts\"C\n" +
 	"\x0eAccountSummary\x12\x1d\n" +
 	"\n" +
-	"account_id\x18\x01 \x01(\tR\taccountId\x12%\n" +
-	"\x0eaccount_number\x18\x02 \x01(\tR\raccountNumber2\xb3\x03\n" +
-	"\x0fAccountsService\x12q\n" +
-	"\x16ResolveAccountByNumber\x12*.accounts.v1.ResolveAccountByNumberRequest\x1a+.accounts.v1.ResolveAccountByNumberResponse\x12Y\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\x12\x12\n" +
+	"\x04iban\x18\x02 \x01(\tR\x04iban2\xad\x03\n" +
+	"\x0fAccountsService\x12k\n" +
+	"\x14ResolveAccountByIban\x12(.accounts.v1.ResolveAccountByIbanRequest\x1a).accounts.v1.ResolveAccountByIbanResponse\x12Y\n" +
 	"\x0eGetAccountByID\x12\".accounts.v1.GetAccountByIDRequest\x1a#.accounts.v1.GetAccountByIDResponse\x12e\n" +
 	"\x12GetAccountByUserID\x12&.accounts.v1.GetAccountByUserIDRequest\x1a'.accounts.v1.GetAccountByUserIDResponse\x12k\n" +
 	"\x14ResolveAccountsByIds\x12(.accounts.v1.ResolveAccountsByIdsRequest\x1a).accounts.v1.ResolveAccountsByIdsResponseB-Z+neobank/proto/gen/go/accounts/v1;accountsv1b\x06proto3"
@@ -514,23 +532,23 @@ func file_accounts_v1_accounts_proto_rawDescGZIP() []byte {
 
 var file_accounts_v1_accounts_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_accounts_v1_accounts_proto_goTypes = []any{
-	(*ResolveAccountByNumberRequest)(nil),  // 0: accounts.v1.ResolveAccountByNumberRequest
-	(*ResolveAccountByNumberResponse)(nil), // 1: accounts.v1.ResolveAccountByNumberResponse
-	(*GetAccountByIDRequest)(nil),          // 2: accounts.v1.GetAccountByIDRequest
-	(*GetAccountByIDResponse)(nil),         // 3: accounts.v1.GetAccountByIDResponse
-	(*GetAccountByUserIDRequest)(nil),      // 4: accounts.v1.GetAccountByUserIDRequest
-	(*GetAccountByUserIDResponse)(nil),     // 5: accounts.v1.GetAccountByUserIDResponse
-	(*ResolveAccountsByIdsRequest)(nil),    // 6: accounts.v1.ResolveAccountsByIdsRequest
-	(*ResolveAccountsByIdsResponse)(nil),   // 7: accounts.v1.ResolveAccountsByIdsResponse
-	(*AccountSummary)(nil),                 // 8: accounts.v1.AccountSummary
+	(*ResolveAccountByIbanRequest)(nil),  // 0: accounts.v1.ResolveAccountByIbanRequest
+	(*ResolveAccountByIbanResponse)(nil), // 1: accounts.v1.ResolveAccountByIbanResponse
+	(*GetAccountByIDRequest)(nil),        // 2: accounts.v1.GetAccountByIDRequest
+	(*GetAccountByIDResponse)(nil),       // 3: accounts.v1.GetAccountByIDResponse
+	(*GetAccountByUserIDRequest)(nil),    // 4: accounts.v1.GetAccountByUserIDRequest
+	(*GetAccountByUserIDResponse)(nil),   // 5: accounts.v1.GetAccountByUserIDResponse
+	(*ResolveAccountsByIdsRequest)(nil),  // 6: accounts.v1.ResolveAccountsByIdsRequest
+	(*ResolveAccountsByIdsResponse)(nil), // 7: accounts.v1.ResolveAccountsByIdsResponse
+	(*AccountSummary)(nil),               // 8: accounts.v1.AccountSummary
 }
 var file_accounts_v1_accounts_proto_depIdxs = []int32{
 	8, // 0: accounts.v1.ResolveAccountsByIdsResponse.accounts:type_name -> accounts.v1.AccountSummary
-	0, // 1: accounts.v1.AccountsService.ResolveAccountByNumber:input_type -> accounts.v1.ResolveAccountByNumberRequest
+	0, // 1: accounts.v1.AccountsService.ResolveAccountByIban:input_type -> accounts.v1.ResolveAccountByIbanRequest
 	2, // 2: accounts.v1.AccountsService.GetAccountByID:input_type -> accounts.v1.GetAccountByIDRequest
 	4, // 3: accounts.v1.AccountsService.GetAccountByUserID:input_type -> accounts.v1.GetAccountByUserIDRequest
 	6, // 4: accounts.v1.AccountsService.ResolveAccountsByIds:input_type -> accounts.v1.ResolveAccountsByIdsRequest
-	1, // 5: accounts.v1.AccountsService.ResolveAccountByNumber:output_type -> accounts.v1.ResolveAccountByNumberResponse
+	1, // 5: accounts.v1.AccountsService.ResolveAccountByIban:output_type -> accounts.v1.ResolveAccountByIbanResponse
 	3, // 6: accounts.v1.AccountsService.GetAccountByID:output_type -> accounts.v1.GetAccountByIDResponse
 	5, // 7: accounts.v1.AccountsService.GetAccountByUserID:output_type -> accounts.v1.GetAccountByUserIDResponse
 	7, // 8: accounts.v1.AccountsService.ResolveAccountsByIds:output_type -> accounts.v1.ResolveAccountsByIdsResponse
