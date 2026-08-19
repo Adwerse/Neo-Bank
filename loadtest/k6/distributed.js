@@ -20,5 +20,5 @@ export default function () {
   // the request down the replay path and quietly stop measuring the thing
   // this profile exists to measure.
   const key = `${runPrefix}-dist-${runId}-${__VU}-${__ITER}`;
-  transfer(users[from], users[to].account_number, key);
+  transfer(users[from], users[to].iban, key);
 }

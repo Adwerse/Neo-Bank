@@ -167,7 +167,7 @@ export interface paths {
         /** The caller's own transfer history (sent and received), newest first. */
         get: operations["listTransfers"];
         put?: never;
-        /** Create a transfer from the caller's own account to a recipient identified by account_number. sender_account_id is never taken from the request body — it's derived from the bearer token. */
+        /** Create a transfer from the caller's own account to a recipient identified by IBAN. sender_account_id is never taken from the request body — it's derived from the bearer token. Only transfers within this bank are supported (no SEPA/inter-bank rail) — a structurally valid IBAN for a different institution is rejected with 400, distinctly from a malformed IBAN or an unknown recipient within this bank. */
         post: operations["createTransfer"];
         delete?: never;
         options?: never;
@@ -275,6 +275,11 @@ export interface components {
             /** Format: uuid */
             user_id: string;
             account_number: string;
+            /**
+             * @description A checksum-valid IE IBAN, deterministically derived from account_number. The bank code is a fictitious institution — see README, "Честные ограничения".
+             * @example IE34ZZZZ00004234567890
+             */
+            iban: string;
             /** @enum {string} */
             status: "active" | "frozen" | "closed";
             /** Format: date-time */
@@ -290,7 +295,11 @@ export interface components {
             currency: string;
         };
         CreateTransferRequest: {
-            recipient_account_number: string;
+            /**
+             * @description The recipient's IBAN — this system's one user-facing account identifier (see AccountWithBalance.iban). Only IBANs for this bank's own code are resolvable; a structurally valid IBAN for another institution is rejected (400), not silently treated as "not found" (also 400, but a distinct message) — see README, "Честные ограничения".
+             * @example IE34ZZZZ00004234567890
+             */
+            recipient_iban: string;
             /**
              * Format: int64
              * @description Minor units (cents), must be positive.
@@ -390,7 +399,7 @@ export interface components {
              */
             direction?: "outgoing" | "incoming";
             /** @description transfer only — absent for deposit/withdrawal entries. */
-            counterparty_account_number?: string;
+            counterparty_iban?: string;
         };
     };
     responses: {
@@ -850,6 +859,15 @@ export interface operations {
             };
             /** @description Idempotency-Key was already used with different parameters. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Too many recipient-resolve attempts for this caller recently — see accounts-svc's per-user rate limit on resolving an IBAN (README, "Честные ограничения"). Distinct from a generic TooManyRequests: this specific limit exists because an endpoint that answers "this account exists"/"it doesn't" is an enumeration oracle, and a checksum-valid IBAN narrows the space worth guessing rather than making it safe to guess. */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

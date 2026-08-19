@@ -93,8 +93,8 @@ LEDGER_GRPC_ADDR="localhost:8083" \
 
 ## 3. Перевод второму пользователю → оба обновились без F5 (~1.5 мин)
 
-**Показать:** у Alice — «Перевести», номер счёта Bob (виден на его
-дашборде, `NB...`), сумма (например, 25.00). Отправить. Переключиться на
+**Показать:** у Alice — «Перевести», IBAN Bob (виден на его
+дашборде, `IE...`), сумма (например, 25.00). Отправить. Переключиться на
 профиль Bob — баланс и лента операций уже обновились сами (WebSocket-пуш
 → фронтенд перезапрашивает `/accounts/me`).
 
@@ -112,7 +112,7 @@ LEDGER_GRPC_ADDR="localhost:8083" \
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-transfer-1" \
-  -d '{"recipient_account_number":"<номер счёта Bob>","amount":2500}'
+  -d '{"recipient_iban":"<IBAN Bob>","amount":2500}'
 ```
 
 ## 4. Перевод, срабатывающий на fraud-правило → блокировка с причиной (~1 мин)
@@ -135,7 +135,7 @@ curl -s -X POST http://localhost:8080/transfers/ \
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-fraud-1" \
-  -d '{"recipient_account_number":"<номер счёта Bob>","amount":600000}'
+  -d '{"recipient_iban":"<IBAN Bob>","amount":600000}'
 # {"status":"rejected","failure_reason":"amount_threshold"}
 ```
 
@@ -163,7 +163,7 @@ docker compose stop fraud-svc
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-stuck-1" \
-  -d '{"recipient_account_number":"<номер счёта Bob>","amount":1000}'
+  -d '{"recipient_iban":"<IBAN Bob>","amount":1000}'
 # 202 {"status":"pending","message":"fraud check unavailable, transfer still pending"}
 docker compose start fraud-svc
 ```

@@ -18,23 +18,23 @@ import (
 // returns (listTransfersHandler, http.go) — transfers, deposits, and
 // withdrawals interleaved newest-first by (created_at, id), each tagged
 // with Type so the frontend knows which fields apply and how to label it.
-// Direction/CounterpartyAccountNumber are transfer-only (a deposit or
-// withdrawal has exactly one account, no counterparty) and simply omitted
-// for those types. The endpoint path and this response's own JSON key
-// ("transfers", see listTransfersResponse) stay as-is despite now covering
-// every operation type — renaming either is a bigger, purely cosmetic
-// change (gateway route, frontend calls, OpenAPI operationId) for no
-// functional gain.
+// Direction/CounterpartyIban are transfer-only (a deposit or withdrawal has
+// exactly one account, no counterparty) and simply omitted for those
+// types. The endpoint path and this response's own JSON key ("transfers",
+// see listTransfersResponse) stay as-is despite now covering every
+// operation type — renaming either is a bigger, purely cosmetic change
+// (gateway route, frontend calls, OpenAPI operationId) for no functional
+// gain.
 type historyEntry struct {
-	Type                      string    `json:"type"` // "transfer" | "deposit" | "withdrawal"
-	ID                        string    `json:"id"`
-	Amount                    int64     `json:"amount"`
-	Status                    string    `json:"status"`
-	FailureReason             *string   `json:"failure_reason,omitempty"`
-	CreatedAt                 time.Time `json:"created_at"`
-	UpdatedAt                 time.Time `json:"updated_at"`
-	Direction                 string    `json:"direction,omitempty"`
-	CounterpartyAccountNumber string    `json:"counterparty_account_number,omitempty"`
+	Type             string    `json:"type"` // "transfer" | "deposit" | "withdrawal"
+	ID               string    `json:"id"`
+	Amount           int64     `json:"amount"`
+	Status           string    `json:"status"`
+	FailureReason    *string   `json:"failure_reason,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	Direction        string    `json:"direction,omitempty"`
+	CounterpartyIban string    `json:"counterparty_iban,omitempty"`
 }
 
 // isInvalidCursorErr reports whether err is Postgres rejecting a
@@ -201,7 +201,7 @@ func getOperationHistoryPage(ctx context.Context, pool *pgxpool.Pool, accountsCl
 		return nil, false, err
 	}
 
-	counterpartyNumbers, err := resolveCounterpartyAccountNumbers(ctx, accountsClient, accountID, transfers)
+	counterpartyIbans, err := resolveCounterpartyIbans(ctx, accountsClient, accountID, transfers)
 	if err != nil {
 		return nil, false, err
 	}
@@ -219,7 +219,7 @@ func getOperationHistoryPage(ctx context.Context, pool *pgxpool.Pool, accountsCl
 			entry.Direction = "incoming"
 			counterpartyID = t.SenderAccountID
 		}
-		entry.CounterpartyAccountNumber = counterpartyNumbers[counterpartyID]
+		entry.CounterpartyIban = counterpartyIbans[counterpartyID]
 		merged = append(merged, entry)
 	}
 	for _, d := range deposits {
@@ -249,14 +249,14 @@ func getOperationHistoryPage(ctx context.Context, pool *pgxpool.Pool, accountsCl
 	return merged, hasMore, nil
 }
 
-// resolveCounterpartyAccountNumbers batch-resolves every unique
-// counterparty across transfers into human-readable account numbers in
-// one RPC call — unchanged in spirit from listTransfersHandler's prior
-// inline version (see TestListTransfersHandler_BatchResolvesCounterpartiesOnce
-// in transfer_test.go), just extracted so getOperationHistoryPage can call
-// it directly. Deposits/withdrawals have no counterparty, so they never
+// resolveCounterpartyIbans batch-resolves every unique counterparty across
+// transfers into their IBANs in one RPC call — unchanged in spirit from
+// listTransfersHandler's prior inline version (see
+// TestListTransfersHandler_BatchResolvesCounterpartiesOnce in
+// transfer_test.go), just extracted so getOperationHistoryPage can call it
+// directly. Deposits/withdrawals have no counterparty, so they never
 // contribute to counterpartyIDSet.
-func resolveCounterpartyAccountNumbers(ctx context.Context, accountsClient accountsv1.AccountsServiceClient, accountID string, transfers []Transfer) (map[string]string, error) {
+func resolveCounterpartyIbans(ctx context.Context, accountsClient accountsv1.AccountsServiceClient, accountID string, transfers []Transfer) (map[string]string, error) {
 	counterpartyIDSet := make(map[string]struct{}, len(transfers))
 	for _, t := range transfers {
 		if t.SenderAccountID == accountID {
@@ -275,11 +275,11 @@ func resolveCounterpartyAccountNumbers(ctx context.Context, accountsClient accou
 
 	resolved, err := accountsClient.ResolveAccountsByIds(ctx, &accountsv1.ResolveAccountsByIdsRequest{AccountIds: counterpartyIDs})
 	if err != nil {
-		return nil, fmt.Errorf("resolve counterparty account numbers: %w", err)
+		return nil, fmt.Errorf("resolve counterparty ibans: %w", err)
 	}
-	accountNumbers := make(map[string]string, len(resolved.GetAccounts()))
+	ibans := make(map[string]string, len(resolved.GetAccounts()))
 	for _, acc := range resolved.GetAccounts() {
-		accountNumbers[acc.GetAccountId()] = acc.GetAccountNumber()
+		ibans[acc.GetAccountId()] = acc.GetIban()
 	}
-	return accountNumbers, nil
+	return ibans, nil
 }

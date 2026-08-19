@@ -182,6 +182,26 @@ Postgres) — отдельно, в [DEMO.md](DEMO.md). Скриншоты/gif к
   `ibanPartsFromAccountNumber`) и досчитан для счетов, созданных до этого —
   см. `services/accounts-svc/backfill.go`.
 
+- **Переводы — только внутри банка, SEPA нет и не будет.** `POST
+  /transfers` резолвит получателя по IBAN через
+  `accounts-svc.ResolveAccountByIban`, но принимает только IBAN с
+  собственным кодом банка (`BANK_CODE`) — структурно валидный IBAN
+  другого учреждения отклоняется отдельным сообщением («переводы
+  поддерживаются только внутри банка»), а не тихо считается «получатель
+  не найден». Настоящий межбанковский перевод (SEPA Credit Transfer)
+  требует членства в клиринговой системе — не техническое ограничение,
+  архитектурное решение не строить то, что здесь не нужно демонстрировать.
+  Подробности — «Резолв получателя по IBAN» ниже.
+
+- **Имя получателя на подтверждении перевода не показывается.** Не
+  потому, что это не пришло в голову: в системе вообще нет поля с именем
+  пользователя — регистрация (`auth-svc`) собирает только email и пароль,
+  и это же поле было бы одним и тем же оракулом, что и сам резолв.
+  Настоящие банки показывают имя для защиты от опечатки в реквизитах —
+  здесь эта функция не реализована. Обоснование выбора среди трёх
+  вариантов (не показывать / показывать частично / показывать с жёстким
+  rate-limit) — «Резолв получателя по IBAN» ниже.
+
 - **KYC отсутствует.** Регистрация проверяет владение почтовым ящиком
   (шестизначный код на email) — и всё. Проверки личности (документ, селфи-
   сверка, санкционные списки, PEP-скрининг) в проекте нет и не планировалось:
@@ -710,8 +730,8 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
 
 Формат: `balance` — целое число в **минимальных единицах** (центах), плюс отдельное поле `currency` (сейчас всегда `"EUR"` — в ledger нет измерения валюты, а форматирование `"123.45 €"` — работа фронта, не API):
 ```json
-{ "id": "...", "user_id": "...", "account_number": "NB...", "status": "active",
-  "created_at": "...", "updated_at": "...", "balance": 50000, "currency": "EUR" }
+{ "id": "...", "user_id": "...", "account_number": "NB...", "iban": "IE34ZZZZ00004234567890",
+  "status": "active", "created_at": "...", "updated_at": "...", "balance": 50000, "currency": "EUR" }
 ```
 У нового пользователя ledger-аккаунт уже создан (через Kafka-обработчик выше), проводок нет → `balance: 0`.
 
@@ -734,7 +754,7 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
 
 ## Перевод денег через ledger (transfers-svc)
 
-`transfers-svc` создаёт запись `transfers` в статусе `pending` (валидация: сумма положительна, получатель резолвится через `accounts-svc.ResolveAccountByNumber`, получатель ≠ отправитель, получатель не `closed`, отправитель `active` — баланс здесь **не** проверяется, это сделает `ledger-svc` атомарно), а затем вызывает `ledger-svc.ExecuteTransfer(sender_account_id, recipient_account_id, amount)` и по результату обновляет запись:
+`transfers-svc` создаёт запись `transfers` в статусе `pending` (валидация: сумма положительна, получатель резолвится по IBAN через `accounts-svc.ResolveAccountByIban` — подробности резолва и его отказов см. «Резолв получателя по IBAN» ниже, получатель ≠ отправитель, получатель не `closed`, отправитель `active` — баланс здесь **не** проверяется, это сделает `ledger-svc` атомарно), а затем вызывает `ledger-svc.ExecuteTransfer(sender_account_id, recipient_account_id, amount)` и по результату обновляет запись:
 - успех → `status = 'completed'`, `ledger_transaction_id` — id проводки из ответа ledger.
 - `ledger` вернул «недостаточно средств» (`FailedPrecondition`) → `status = 'failed'`, `failure_reason = 'insufficient_funds'`.
 - `ledger` вернул «аккаунт не найден» (`NotFound`) или невалидную сумму (`InvalidArgument`, на практике недостижимо — `transfers-svc` уже проверил сумму раньше) или свою внутреннюю ошибку (`Internal`) → `status = 'failed'` с соответствующей `failure_reason` (`account_not_found` / `invalid_amount` / `ledger_internal_error`) — каждая доменная ошибка размечена явно, а не свалена в один общий `'error'`.
@@ -755,9 +775,66 @@ curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
-  -d '{"recipient_account_number":"NB...","amount":1000}'
+  -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":1000}'
 ```
 Успешный перевод — `201` и `"status":"completed"` с заполненным `ledger_transaction_id`; сумма больше баланса — `201` и `"status":"failed","failure_reason":"insufficient_funds"`; оба случая проверяются balance-diff через `GET /accounts/me` обеих сторон (см. `cmd/devtopup` выше — им удобно завести отправителю стартовый баланс).
+
+## Резолв получателя по IBAN (transfers-svc → accounts-svc)
+
+`accounts-svc.ResolveAccountByIban` (`services/accounts-svc/grpc_server.go`) — единственное место в системе, которое отвечает на вопрос «существует ли счёт с таким IBAN». Именно поэтому его контракт и то, что он умеет отличать, важнее, чем может показаться для одной internal-RPC.
+
+### IBAN вместо `account_number` — один идентификатор, не два
+
+`POST /transfers` раньше принимал `recipient_account_number`; теперь — только `recipient_iban`, и `account_number` как способ адресовать чужой счёт **удалён**, а не оставлен вторым путём «для совместимости» (`ResolveAccountByNumber` и `getAccountByAccountNumber` физически убраны из кодовой базы, не просто помечены deprecated). Причина не техническая — оба варианта работали одинаково надёжно, — а продуктовая: пользователь не должен решать, каким из двух номеров назвать себя собеседнику. `account_number` никуда не делся как поле (он всё ещё в `GET /accounts/me`, это внутренний номер счёта), но адресовать *чужой* счёт можно теперь только по IBAN — единому пользовательскому идентификатору, который заодно проходит настоящую проверку контрольных цифр.
+
+### Три разных исхода — три разных сообщения, не один общий 404
+
+Раньше «получатель не резолвится» значило одно: `NotFound`. У IBAN отказов больше, и они означают разное, поэтому `ResolveAccountByIban` различает их через отдельные gRPC-коды, в порядке возрастания цены проверки:
+
+1. **`codes.InvalidArgument` — формат или контрольные цифры не сошлись.** Проверяется локально (`iban.Validate`), **до** любого обращения к базе — не только быстрее, но и часть защиты от перебора (mod-97-10 отсеивает даром ~96% случайных строк, см. ниже).
+2. **`codes.FailedPrecondition` — IBAN валиден, но код банка чужой.** Ни один SEPA-рельс здесь не подключён (см. «Честные ограничения»), поэтому это не «не найдено», а «в принципе не наш получатель» — разные сообщения клиенту, разная диагностика на стороне оператора.
+3. **`codes.NotFound` — наш банк, но такого счёта нет.**
+4. **`codes.ResourceExhausted` — сам резолв заблокирован rate-limit'ом** (ниже) — тоже отдельный код, не общая 500-ка.
+
+`transfers-svc` (`createTransfer`, `services/transfers-svc/transfer.go`) транслирует каждый из четырёх кодов в свой `createTransferOutcome`, а `http.go` — в свой HTTP-статус и текст: `400 invalid IBAN`, `400 only transfers within this bank are supported`, `404 recipient not found`, `429 too many resolve attempts, try again later`.
+
+### Rate-limit на резолв, а не только на перевод
+
+Эндпоинт, который отвечает «существует/не существует» — оракул для перебора чужих реквизитов, и валидные контрольные цифры **сужают** пространство перебора (остаются только строки, совместимые с mod-97-10), а не делают перебор безопасным. Поэтому лимит стоит именно на резолв, per-user (`user_id` — обязательное поле `ResolveAccountByIbanRequest`, прокинутое из `X-User-Id`, а не что-то, что клиент мог бы подделать), а не только на создание перевода: перевод несёт побочный эффект (идемпотентность, fraud-check, запись в БД) и естественно дороже долбить, а голый резолв — нет.
+
+Реализация — `services/accounts-svc/rate_limit.go`: одна SQL-инструкция (`WITH ... SELECT count(*) ... INSERT ... SELECT ... WHERE count < limit RETURNING id`) считает попытки пользователя за окно и, только если лимит не исчерпан, тут же атомарно записывает эту попытку — без отдельного `SELECT`, а значит без окна гонки, в котором два параллельных запроса от одного пользователя оба увидели бы «лимит не исчерпан» до того, как любой из них записался. По умолчанию 10 попыток / 5 минут (`IBAN_RESOLVE_RATE_LIMIT` / `IBAN_RESOLVE_RATE_WINDOW`), таблица `iban_resolve_attempts` чистится фоновым воркером раз в 10 минут (retention 1 час — заведомо больше самого длинного разумного окна).
+
+Порядок проверок внутри `ResolveAccountByIban` не случаен: сначала бесплатная проверка контрольных цифр (без БД), потом лимит (единственное место, которое пишет в БД до собственно поиска), потом бесплатное сравнение кода банка, и только в конце — сам `SELECT` по `accounts`. Каждая более дешёвая проверка стоит перед более дорогой.
+
+### Показывать ли имя получателя — не показываем
+
+Настоящие банки на экране подтверждения перевода показывают имя владельца счёта — это защита от опечатки в реквизитах. Но тот же самый резолв, который выясняет имя, превращается в способ узнать чьё-то имя по IBAN, а IBAN — не секрет (он попадает в чек, в письмо, в разговор). Три варианта на выбор были: не показывать вовсе; показывать частично (первая буква имени + фамилия); показывать полностью с жёстким rate-limit.
+
+Выбран первый — но не потому, что это единственно верный ответ (правильного ответа тут нет, это осознанный компромисс, а не готовое правило), а потому что в этой системе решение уже предопределено на уровень ниже: **имени пользователя не существует нигде** — регистрация (`auth-svc/register.go`) собирает только email и пароль, ни в одной таблице, ни в одном proto-сообщении нет поля с именем. Показывать частичное или полное имя означало бы сначала добавить его сбор (новое поле в форме регистрации, новую колонку, новый proto-филд, прокинутый через `ResolveAccountByIban`) — а это уже не решение «как показывать», а отдельная фича с собственной ценой (что, если два пользователя одинаково представятся при регистрации? как это соотносится с KYC, которого тоже нет — см. «Честные ограничения»?). Ничего не показывать — единственный из трёх вариантов, который не требует придумывать данные, которых в системе никогда не было.
+
+### Проверка вручную
+```bash
+# 1. Битый IBAN — отклоняется без обращения к БД (400, "invalid IBAN")
+curl -s -X POST http://localhost:8080/transfers/ \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <uuid>" \
+  -d '{"recipient_iban":"IE00ZZZZ00004234567890","amount":1000}'
+
+# 2. Чужой банк — отдельное сообщение (400, "only transfers within this bank are supported")
+curl -s -X POST http://localhost:8080/transfers/ \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <uuid>" \
+  -d '{"recipient_iban":"IE29AIBK93115212345678","amount":1000}'
+
+# 3. Rate-limit: 11 резолвов подряд одним пользователем за < 5 минут —
+#    11-й получает 429 "too many resolve attempts, try again later"
+for i in $(seq 1 11); do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/transfers/ \
+    -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+    -H "Idempotency-Key: $(uuidgen)" \
+    -d '{"recipient_iban":"IE29ZZZZ00000000000000","amount":1000}'
+done
+```
 
 ## Stripe-фондированные депозиты (transfers-svc, ledger-svc)
 
@@ -1845,7 +1922,7 @@ notifications handle transfer.events            (весь путь сообще�
 docker compose stop fraud-svc
 curl -s -X POST http://localhost:8080/transfers/ -H "Authorization: Bearer $TOKEN" \
   -H "Idempotency-Key: stuck-1" -H 'Content-Type: application/json' \
-  -d '{"recipient_account_number":"NB...","amount":2500}'
+  -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":2500}'
 # {"status":"pending","message":"fraud check unavailable, transfer still pending"}
 docker compose start fraud-svc
 # подождать RECONCILE_STALE_AFTER + тик воркера (30s)
@@ -2068,14 +2145,14 @@ Fraud-проверка вызывается **строго после** того
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
-  -d '{"recipient_account_number":"NB...","amount":1000}'
+  -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":1000}'
 # {"status":"completed","ledger_transaction_id":"..."}
 
 # перевод выше порога — reject, ledger не вызывается
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
-  -d '{"recipient_account_number":"NB...","amount":600000}'
+  -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":600000}'
 # {"status":"rejected","failure_reason":"amount_threshold"}
 
 # fraud-svc недоступен
@@ -2083,7 +2160,7 @@ docker compose stop fraud-svc
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
-  -d '{"recipient_account_number":"NB...","amount":1000}'
+  -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":1000}'
 # 202 {"status":"pending","message":"fraud check unavailable, transfer still pending"}
 docker compose start fraud-svc
 ```
@@ -2289,7 +2366,7 @@ docker compose up -d --build
 # 1. Успешный перевод между двумя пользователями → ДВА письма
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_account_number":"<номер счёта bob>","amount":123456}'
+  -d '{"recipient_iban":"<IBAN bob>","amount":123456}'
 
 curl -s http://localhost:8025/api/v1/messages \
   | jq -r '.total, (.messages[] | "\(.To[0].Address)  \(.Subject)")'
@@ -2302,7 +2379,7 @@ curl -s http://localhost:8025/api/v1/messages \
 curl -s -X DELETE http://localhost:8025/api/v1/messages
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_account_number":"<номер счёта bob>","amount":600000}'
+  -d '{"recipient_iban":"<IBAN bob>","amount":600000}'
 # {"status":"rejected","failure_reason":"amount_threshold"}  <- API говорит; письмо не должно
 
 curl -s http://localhost:8025/api/v1/messages | jq -r '.total, (.messages[]|.To[0].Address)'
@@ -2362,7 +2439,7 @@ docker compose exec kafka kafka-console-consumer.sh --bootstrap-server localhost
 docker compose start mailpit
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_account_number":"<номер счёта bob>","amount":1000}'
+  -d '{"recipient_iban":"<IBAN bob>","amount":1000}'
 curl -s http://localhost:8025/api/v1/messages | jq .total
 #  ^ следующий перевод дошёл нормально — партиция не заблокирована предыдущим,
 #    ушедшим в DLQ
@@ -2435,7 +2512,7 @@ HTTP-сервер (`http.Server` вместо голого `http.ListenAndServe`
 docker compose stop mailpit                   # чтобы гарантированно поймать сообщение в процессе ретраев
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_account_number":"<номер счёта bob>","amount":1000}'
+  -d '{"recipient_iban":"<IBAN bob>","amount":1000}'
 docker compose stop --timeout 30 notifications-svc
 docker compose logs notifications-svc | tail -20
 # notifications-svc: shutdown signal received, draining in-flight work

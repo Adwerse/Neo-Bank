@@ -6,14 +6,22 @@ option go_package = "neobank/proto/gen/go/accounts/v1;accountsv1";
 
 // AccountsService is accounts-svc's internal service-to-service contract.
 // Not exposed through the gateway — the intended caller is transfers-svc,
-// which needs to resolve a human-entered account_number to an internal
-// account_id, and check either party's account status, without touching
-// accounts-svc's Postgres database directly.
+// which needs to resolve a human-entered IBAN to an internal account_id,
+// and check either party's account status, without touching accounts-svc's
+// Postgres database directly.
 service AccountsService {
-  // ResolveAccountByNumber looks up an account by its human-readable
-  // account_number (as shown to users), returning its internal account_id
-  // and current status.
-  rpc ResolveAccountByNumber(ResolveAccountByNumberRequest) returns (ResolveAccountByNumberResponse);
+  // ResolveAccountByIban looks up an account by its IBAN (as shown to and
+  // entered by users), returning its internal account_id and current
+  // status. Distinguishes three failure kinds via gRPC status code, each
+  // meaning something different to the caller: codes.InvalidArgument (the
+  // IBAN's own format/check-digits don't check out — rejected locally,
+  // before ever touching the database), codes.FailedPrecondition (a
+  // structurally valid IBAN, but for a bank code that isn't this one — this
+  // system has no SEPA/inter-bank rail), and codes.NotFound (this bank's
+  // IBAN, but no account behind it). codes.ResourceExhausted means the
+  // calling user (identified by the required user_id field) has made too
+  // many resolve attempts recently — see ResolveAccountByIbanRequest.
+  rpc ResolveAccountByIban(ResolveAccountByIbanRequest) returns (ResolveAccountByIbanResponse);
   // GetAccountByID looks up an account by its internal account_id — used to
   // check the sender's own account status.
   rpc GetAccountByID(GetAccountByIDRequest) returns (GetAccountByIDResponse);
@@ -32,11 +40,17 @@ service AccountsService {
   rpc ResolveAccountsByIds(ResolveAccountsByIdsRequest) returns (ResolveAccountsByIdsResponse);
 }
 
-message ResolveAccountByNumberRequest {
-  string account_number = 1;
+message ResolveAccountByIbanRequest {
+  string iban = 1;
+  // user_id is the caller's own authenticated user id (transfers-svc's
+  // gateway-injected X-User-Id, passed through explicitly since gRPC
+  // metadata doesn't carry it automatically) — required so accounts-svc can
+  // key its per-user resolve rate limit on the actual caller, not the IBAN
+  // being probed.
+  string user_id = 2;
 }
 
-message ResolveAccountByNumberResponse {
+message ResolveAccountByIbanResponse {
   string account_id = 1;
   string status = 2;
 }
@@ -70,8 +84,12 @@ message ResolveAccountsByIdsResponse {
 
 // AccountSummary is a minimal per-account projection for batch lookups —
 // only what a caller needs to enrich a list of records with human-readable
-// account info, not the full GetAccountByIDResponse shape.
+// account info, not the full GetAccountByIDResponse shape. Carries iban
+// rather than account_number: transfers-svc uses this to label transfer
+// counterparties, and IBAN is this system's one user-facing account
+// identifier (see README) — the same one a sender types in to reach this
+// account in the first place.
 message AccountSummary {
   string account_id = 1;
-  string account_number = 2;
+  string iban = 2;
 }

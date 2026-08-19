@@ -162,7 +162,7 @@ func TestGetOperationHistoryPage_MergesTypesInTimeOrder(t *testing.T) {
 	client := &fakeAccountsClient{
 		resolveAccountsByIdsFunc: func(ctx context.Context, req *accountsv1.ResolveAccountsByIdsRequest) (*accountsv1.ResolveAccountsByIdsResponse, error) {
 			return &accountsv1.ResolveAccountsByIdsResponse{
-				Accounts: []*accountsv1.AccountSummary{{AccountId: accountB, AccountNumber: "NB0000000099"}},
+				Accounts: []*accountsv1.AccountSummary{{AccountId: accountB, Iban: "IE29ZZZZ00000000000099"}},
 			}, nil
 		},
 	}
@@ -191,8 +191,8 @@ func TestGetOperationHistoryPage_MergesTypesInTimeOrder(t *testing.T) {
 	if entries[2].Direction != "outgoing" {
 		t.Errorf("entries[2].Direction = %q, want %q", entries[2].Direction, "outgoing")
 	}
-	if entries[2].CounterpartyAccountNumber != "NB0000000099" {
-		t.Errorf("entries[2].CounterpartyAccountNumber = %q, want %q", entries[2].CounterpartyAccountNumber, "NB0000000099")
+	if entries[2].CounterpartyIban != "IE29ZZZZ00000000000099" {
+		t.Errorf("entries[2].CounterpartyIban = %q, want %q", entries[2].CounterpartyIban, "IE29ZZZZ00000000000099")
 	}
 }
 

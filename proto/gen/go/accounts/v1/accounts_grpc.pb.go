@@ -19,10 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AccountsService_ResolveAccountByNumber_FullMethodName = "/accounts.v1.AccountsService/ResolveAccountByNumber"
-	AccountsService_GetAccountByID_FullMethodName         = "/accounts.v1.AccountsService/GetAccountByID"
-	AccountsService_GetAccountByUserID_FullMethodName     = "/accounts.v1.AccountsService/GetAccountByUserID"
-	AccountsService_ResolveAccountsByIds_FullMethodName   = "/accounts.v1.AccountsService/ResolveAccountsByIds"
+	AccountsService_ResolveAccountByIban_FullMethodName = "/accounts.v1.AccountsService/ResolveAccountByIban"
+	AccountsService_GetAccountByID_FullMethodName       = "/accounts.v1.AccountsService/GetAccountByID"
+	AccountsService_GetAccountByUserID_FullMethodName   = "/accounts.v1.AccountsService/GetAccountByUserID"
+	AccountsService_ResolveAccountsByIds_FullMethodName = "/accounts.v1.AccountsService/ResolveAccountsByIds"
 )
 
 // AccountsServiceClient is the client API for AccountsService service.
@@ -31,14 +31,22 @@ const (
 //
 // AccountsService is accounts-svc's internal service-to-service contract.
 // Not exposed through the gateway — the intended caller is transfers-svc,
-// which needs to resolve a human-entered account_number to an internal
-// account_id, and check either party's account status, without touching
-// accounts-svc's Postgres database directly.
+// which needs to resolve a human-entered IBAN to an internal account_id,
+// and check either party's account status, without touching accounts-svc's
+// Postgres database directly.
 type AccountsServiceClient interface {
-	// ResolveAccountByNumber looks up an account by its human-readable
-	// account_number (as shown to users), returning its internal account_id
-	// and current status.
-	ResolveAccountByNumber(ctx context.Context, in *ResolveAccountByNumberRequest, opts ...grpc.CallOption) (*ResolveAccountByNumberResponse, error)
+	// ResolveAccountByIban looks up an account by its IBAN (as shown to and
+	// entered by users), returning its internal account_id and current
+	// status. Distinguishes three failure kinds via gRPC status code, each
+	// meaning something different to the caller: codes.InvalidArgument (the
+	// IBAN's own format/check-digits don't check out — rejected locally,
+	// before ever touching the database), codes.FailedPrecondition (a
+	// structurally valid IBAN, but for a bank code that isn't this one — this
+	// system has no SEPA/inter-bank rail), and codes.NotFound (this bank's
+	// IBAN, but no account behind it). codes.ResourceExhausted means the
+	// calling user (identified by the required user_id field) has made too
+	// many resolve attempts recently — see ResolveAccountByIbanRequest.
+	ResolveAccountByIban(ctx context.Context, in *ResolveAccountByIbanRequest, opts ...grpc.CallOption) (*ResolveAccountByIbanResponse, error)
 	// GetAccountByID looks up an account by its internal account_id — used to
 	// check the sender's own account status.
 	GetAccountByID(ctx context.Context, in *GetAccountByIDRequest, opts ...grpc.CallOption) (*GetAccountByIDResponse, error)
@@ -65,10 +73,10 @@ func NewAccountsServiceClient(cc grpc.ClientConnInterface) AccountsServiceClient
 	return &accountsServiceClient{cc}
 }
 
-func (c *accountsServiceClient) ResolveAccountByNumber(ctx context.Context, in *ResolveAccountByNumberRequest, opts ...grpc.CallOption) (*ResolveAccountByNumberResponse, error) {
+func (c *accountsServiceClient) ResolveAccountByIban(ctx context.Context, in *ResolveAccountByIbanRequest, opts ...grpc.CallOption) (*ResolveAccountByIbanResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ResolveAccountByNumberResponse)
-	err := c.cc.Invoke(ctx, AccountsService_ResolveAccountByNumber_FullMethodName, in, out, cOpts...)
+	out := new(ResolveAccountByIbanResponse)
+	err := c.cc.Invoke(ctx, AccountsService_ResolveAccountByIban_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -111,14 +119,22 @@ func (c *accountsServiceClient) ResolveAccountsByIds(ctx context.Context, in *Re
 //
 // AccountsService is accounts-svc's internal service-to-service contract.
 // Not exposed through the gateway — the intended caller is transfers-svc,
-// which needs to resolve a human-entered account_number to an internal
-// account_id, and check either party's account status, without touching
-// accounts-svc's Postgres database directly.
+// which needs to resolve a human-entered IBAN to an internal account_id,
+// and check either party's account status, without touching accounts-svc's
+// Postgres database directly.
 type AccountsServiceServer interface {
-	// ResolveAccountByNumber looks up an account by its human-readable
-	// account_number (as shown to users), returning its internal account_id
-	// and current status.
-	ResolveAccountByNumber(context.Context, *ResolveAccountByNumberRequest) (*ResolveAccountByNumberResponse, error)
+	// ResolveAccountByIban looks up an account by its IBAN (as shown to and
+	// entered by users), returning its internal account_id and current
+	// status. Distinguishes three failure kinds via gRPC status code, each
+	// meaning something different to the caller: codes.InvalidArgument (the
+	// IBAN's own format/check-digits don't check out — rejected locally,
+	// before ever touching the database), codes.FailedPrecondition (a
+	// structurally valid IBAN, but for a bank code that isn't this one — this
+	// system has no SEPA/inter-bank rail), and codes.NotFound (this bank's
+	// IBAN, but no account behind it). codes.ResourceExhausted means the
+	// calling user (identified by the required user_id field) has made too
+	// many resolve attempts recently — see ResolveAccountByIbanRequest.
+	ResolveAccountByIban(context.Context, *ResolveAccountByIbanRequest) (*ResolveAccountByIbanResponse, error)
 	// GetAccountByID looks up an account by its internal account_id — used to
 	// check the sender's own account status.
 	GetAccountByID(context.Context, *GetAccountByIDRequest) (*GetAccountByIDResponse, error)
@@ -145,8 +161,8 @@ type AccountsServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAccountsServiceServer struct{}
 
-func (UnimplementedAccountsServiceServer) ResolveAccountByNumber(context.Context, *ResolveAccountByNumberRequest) (*ResolveAccountByNumberResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ResolveAccountByNumber not implemented")
+func (UnimplementedAccountsServiceServer) ResolveAccountByIban(context.Context, *ResolveAccountByIbanRequest) (*ResolveAccountByIbanResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveAccountByIban not implemented")
 }
 func (UnimplementedAccountsServiceServer) GetAccountByID(context.Context, *GetAccountByIDRequest) (*GetAccountByIDResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetAccountByID not implemented")
@@ -178,20 +194,20 @@ func RegisterAccountsServiceServer(s grpc.ServiceRegistrar, srv AccountsServiceS
 	s.RegisterService(&AccountsService_ServiceDesc, srv)
 }
 
-func _AccountsService_ResolveAccountByNumber_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ResolveAccountByNumberRequest)
+func _AccountsService_ResolveAccountByIban_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveAccountByIbanRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AccountsServiceServer).ResolveAccountByNumber(ctx, in)
+		return srv.(AccountsServiceServer).ResolveAccountByIban(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AccountsService_ResolveAccountByNumber_FullMethodName,
+		FullMethod: AccountsService_ResolveAccountByIban_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AccountsServiceServer).ResolveAccountByNumber(ctx, req.(*ResolveAccountByNumberRequest))
+		return srv.(AccountsServiceServer).ResolveAccountByIban(ctx, req.(*ResolveAccountByIbanRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -258,8 +274,8 @@ var AccountsService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*AccountsServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "ResolveAccountByNumber",
-			Handler:    _AccountsService_ResolveAccountByNumber_Handler,
+			MethodName: "ResolveAccountByIban",
+			Handler:    _AccountsService_ResolveAccountByIban_Handler,
 		},
 		{
 			MethodName: "GetAccountByID",

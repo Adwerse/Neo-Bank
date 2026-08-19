@@ -17,12 +17,20 @@ import (
 // field layout.
 const CountryIE = "IE"
 
+// IELength is the fixed length of a normalized IE IBAN. Exported because
+// Validate only enforces this shape for country code "IE" — for any other
+// country it just checks the generic checksum, with no minimum length
+// beyond 4 — so a caller that needs to safely slice into the fixed IE BBAN
+// layout (bank code, sort code, account number) must check both the
+// country code AND this length first, not assume Validate already implies
+// it for arbitrary input.
+const IELength = 2 + 2 + bankCodeLength + sortCodeLength + bbanAccountNumberLength // 22
+
 const (
-	bankCodeLength           = 4  // letters
-	sortCodeLength           = 6  // digits
-	bbanAccountNumberLength  = 8  // digits
-	ieIBANLength             = 2 + 2 + bankCodeLength + sortCodeLength + bbanAccountNumberLength // 22
-	mod97Modulus             = 97
+	bankCodeLength          = 4 // letters
+	sortCodeLength          = 6 // digits
+	bbanAccountNumberLength = 8 // digits
+	mod97Modulus            = 97
 )
 
 var mod97 = big.NewInt(mod97Modulus)
@@ -84,8 +92,8 @@ func Validate(s string) error {
 	}
 
 	if country == CountryIE {
-		if len(n) != ieIBANLength {
-			return fmt.Errorf("iban: IE IBANs must be %d characters, %q is %d", ieIBANLength, s, len(n))
+		if len(n) != IELength {
+			return fmt.Errorf("iban: IE IBANs must be %d characters, %q is %d", IELength, s, len(n))
 		}
 		bankCode := bban[0:bankCodeLength]
 		sortCode := bban[bankCodeLength : bankCodeLength+sortCodeLength]

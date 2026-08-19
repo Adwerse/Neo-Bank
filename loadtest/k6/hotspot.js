@@ -48,8 +48,8 @@ export default function () {
   const key = `${runPrefix}-hot-${runId}-${__VU}-${__ITER}`;
 
   if (DIRECTION === 'outbound') {
-    transfer(users[HOT], users[other].account_number, key);
+    transfer(users[HOT], users[other].iban, key);
   } else {
-    transfer(users[other], users[HOT].account_number, key);
+    transfer(users[other], users[HOT].iban, key);
   }
 }

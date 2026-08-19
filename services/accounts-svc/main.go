@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
@@ -39,6 +40,13 @@ const (
 	// ограничения" for why generated IBANs must not point at a real
 	// organization.
 	defaultBankCode = "ZZZZ"
+
+	// defaultResolveRateLimit/Window bound ResolveAccountByIban's per-user
+	// attempt rate (grpc_server.go, rate_limit.go): generous enough for a
+	// real user retrying a mistyped IBAN a few times, tight enough to
+	// slow down scripted enumeration of which IBANs exist.
+	defaultResolveRateLimit  = 10
+	defaultResolveRateWindow = 5 * time.Minute
 )
 
 func main() {
@@ -65,6 +73,22 @@ func main() {
 	bankCode := os.Getenv("BANK_CODE")
 	if bankCode == "" {
 		bankCode = defaultBankCode
+	}
+	resolveRateLimit := defaultResolveRateLimit
+	if v := os.Getenv("IBAN_RESOLVE_RATE_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			log.Fatalf("accounts-svc: invalid IBAN_RESOLVE_RATE_LIMIT %q: must be a positive integer", v)
+		}
+		resolveRateLimit = n
+	}
+	resolveRateWindow := defaultResolveRateWindow
+	if v := os.Getenv("IBAN_RESOLVE_RATE_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			log.Fatalf("accounts-svc: invalid IBAN_RESOLVE_RATE_WINDOW %q: %v", v, err)
+		}
+		resolveRateWindow = d
 	}
 	outboxRetention := defaultOutboxRetention
 	if v := os.Getenv("OUTBOX_RETENTION"); v != "" {
@@ -153,6 +177,7 @@ func main() {
 	go runUserActivatedConsumer(context.Background(), kafkaReader, pool, ledgerClient, bankCode)
 	go outbox.RunRelay(context.Background(), pool, accountsOutboxTable, kafkaWriter, outboxRelayInterval, outbox.DefaultBatchSize, "accounts-svc")
 	go outbox.RunCleanupWorker(context.Background(), pool, accountsOutboxTable, outboxRetention, outbox.DefaultCleanupInterval, "accounts-svc")
+	go runResolveAttemptsCleanupWorker(context.Background(), pool)
 
 	grpcPort := os.Getenv("GRPC_PORT")
 	if grpcPort == "" {
@@ -167,7 +192,12 @@ func main() {
 	// what puts this service under transfers-svc in the same trace rather
 	// than in a trace of its own.
 	grpcServer := grpc.NewServer(tracing.GRPCServerOption())
-	accountsv1.RegisterAccountsServiceServer(grpcServer, &accountsServer{pool: pool})
+	accountsv1.RegisterAccountsServiceServer(grpcServer, &accountsServer{
+		pool:              pool,
+		bankCode:          bankCode,
+		resolveRateLimit:  resolveRateLimit,
+		resolveRateWindow: resolveRateWindow,
+	})
 
 	grpcHealthServer := health.NewServer()
 	grpcHealthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)

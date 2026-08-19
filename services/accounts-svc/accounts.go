@@ -272,11 +272,11 @@ func getAccountsByIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 	return accounts, rows.Err()
 }
 
-func getAccountByAccountNumber(ctx context.Context, pool *pgxpool.Pool, accountNumber string) (Account, bool, error) {
+func getAccountByIBAN(ctx context.Context, pool *pgxpool.Pool, ibanValue string) (Account, bool, error) {
 	var acc Account
 	err := pool.QueryRow(ctx,
-		"SELECT id, user_id, account_number, iban, status, created_at, updated_at FROM accounts WHERE account_number = $1",
-		accountNumber,
+		"SELECT id, user_id, account_number, iban, status, created_at, updated_at FROM accounts WHERE iban = $1",
+		ibanValue,
 	).Scan(&acc.ID, &acc.UserID, &acc.AccountNumber, &acc.IBAN, &acc.Status, &acc.CreatedAt, &acc.UpdatedAt)
 	if isNotFoundErr(err) {
 		return Account{}, false, nil

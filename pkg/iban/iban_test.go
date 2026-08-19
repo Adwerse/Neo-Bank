@@ -114,6 +114,22 @@ func TestValidate_Invalid(t *testing.T) {
 	}
 }
 
+// TestValidate_ShortNonIEPassesGenerically documents a real, load-bearing
+// edge case rather than guarding against one: Validate only enforces the
+// fixed 22-character layout for country "IE" — for any other country it
+// checks nothing but the generic checksum, with no minimum length beyond
+// 4. "AT18" is exactly such a string: a 4-character, non-IE input whose
+// mod-97 checksum happens to check out. A caller that assumes "Validate
+// passed" implies "safe to slice out an 8-character bank code" is wrong
+// for non-IE input — see accounts-svc's ResolveAccountByIban, which checks
+// country and iban.IELength explicitly before ever slicing, precisely
+// because of this.
+func TestValidate_ShortNonIEPassesGenerically(t *testing.T) {
+	if err := Validate("AT18"); err != nil {
+		t.Fatalf("Validate(%q) = %v, want nil (documents that short non-IE strings can pass generically)", "AT18", err)
+	}
+}
+
 func TestNormalize(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"IE29 AIBK 9311 5212 3456 78", "IE29AIBK93115212345678"},

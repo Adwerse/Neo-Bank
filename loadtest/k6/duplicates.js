@@ -40,5 +40,5 @@ export default function () {
   const from = group % users.length;
   const to = (group + 1) % users.length;
   const key = `${runPrefix}-dup-${runId}-${group}`;
-  transfer(users[from], users[to].account_number, key);
+  transfer(users[from], users[to].iban, key);
 }
