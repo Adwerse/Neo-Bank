@@ -141,6 +141,18 @@ const (
 	eventTypeDepositCredited   = "DepositCredited"
 )
 
+// user.events carries two event types from auth-svc's single auth_outbox
+// table: UserActivated (since sprint 2) and, as of the profile sprint,
+// ProfileUpdated — see README's mini-ADR for why profile data reuses this
+// same outbox/topic rather than getting its own. Unlike
+// TransferCompleted/Failed/Rejected, these two don't share field numbers
+// (there's no accidental-cross-decode risk), but the header is still the
+// only way to know which one a given message is without guessing.
+const (
+	eventTypeUserActivated  = "UserActivated"
+	eventTypeProfileUpdated = "ProfileUpdated"
+)
+
 // newProjectionReader and newNotificationReader differ in exactly one
 // setting, StartOffset, and that difference is the most consequential
 // choice in this service.
@@ -264,7 +276,7 @@ func commitMessage(ctx context.Context, reader *kafka.Reader, msg kafka.Message,
 	}
 }
 
-// runUserActivatedConsumer and runAccountCreatedConsumer follow the same
+// runUserEventsConsumer and runAccountCreatedConsumer follow the same
 // at-least-once shape as accounts-svc's runUserActivatedConsumer:
 // FetchMessage + explicit CommitMessages, only after the handler
 // succeeds, so a crash or DB error between fetch and commit leaves the
@@ -279,7 +291,16 @@ func commitMessage(ctx context.Context, reader *kafka.Reader, msg kafka.Message,
 // moment after the fetch returned — see runTransferEventsConsumer's doc
 // comment, which spells this out in more depth since that loop also owns
 // a retry/DLQ decision.
-func runUserActivatedConsumer(fetchCtx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
+//
+// Dispatches by event_type header — user.events has carried more than
+// one message type since ProfileUpdated started sharing auth-svc's
+// outbox with UserActivated. No header (eventTypeOf returns "") is
+// treated as UserActivated, not rejected: every message on this topic
+// before ProfileUpdated existed WAS one, so that's the correct read of a
+// legacy pre-header message here — unlike transfer.events, where
+// UserActivated's sibling event types genuinely can't be told apart
+// without the header and guessing would be wrong.
+func runUserEventsConsumer(fetchCtx context.Context, reader *kafka.Reader, pool *pgxpool.Pool) {
 	const topic = "user.events"
 	for {
 		msg, err := reader.FetchMessage(fetchCtx)
@@ -306,23 +327,53 @@ func runUserActivatedConsumer(fetchCtx context.Context, reader *kafka.Reader, po
 			),
 		)
 
-		var event eventsv1.UserActivated
-		if err := proto.Unmarshal(msg.Value, &event); err != nil {
-			log.Printf("notifications-svc: %s: failed to unmarshal UserActivated at offset %d: %v", topic, msg.Offset, err)
-			tracing.Fail(ctx, "unmarshal_failed", err)
-			// No amount of redelivery makes an unparseable payload
-			// parseable — commit it so a poison message doesn't block
-			// the partition forever.
+		switch eventType := eventTypeOf(msg); eventType {
+		case "", eventTypeUserActivated:
+			var event eventsv1.UserActivated
+			if err := proto.Unmarshal(msg.Value, &event); err != nil {
+				log.Printf("notifications-svc: %s: failed to unmarshal UserActivated at offset %d: %v", topic, msg.Offset, err)
+				tracing.Fail(ctx, "unmarshal_failed", err)
+				// No amount of redelivery makes an unparseable payload
+				// parseable — commit it so a poison message doesn't block
+				// the partition forever.
+				commitMessage(ctx, reader, msg, topic)
+				span.End()
+				continue
+			}
+			if err := handleUserActivated(ctx, pool, &event); err != nil {
+				log.Printf("notifications-svc: failed to handle UserActivated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
+				tracing.Fail(ctx, "useractivated_handling_failed", err)
+				span.End()
+				continue // do not commit — message will be redelivered
+			}
+
+		case eventTypeProfileUpdated:
+			var event eventsv1.ProfileUpdated
+			if err := proto.Unmarshal(msg.Value, &event); err != nil {
+				log.Printf("notifications-svc: %s: failed to unmarshal ProfileUpdated at offset %d: %v", topic, msg.Offset, err)
+				tracing.Fail(ctx, "unmarshal_failed", err)
+				commitMessage(ctx, reader, msg, topic)
+				span.End()
+				continue
+			}
+			if err := handleProfileUpdated(ctx, pool, &event); err != nil {
+				log.Printf("notifications-svc: failed to handle ProfileUpdated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
+				tracing.Fail(ctx, "profileupdated_handling_failed", err)
+				span.End()
+				continue // do not commit — message will be redelivered
+			}
+
+		default:
+			// Forward compatibility, same policy as transfer.events'
+			// unknown-type branch: a type a later sprint adds must not
+			// permanently wedge an older binary's partition. This topic
+			// has no DLQ, so — matching this topic's existing (pre-header)
+			// poison handling — commit past it rather than spin forever.
+			log.Printf("notifications-svc: %s: unknown event_type %q at offset %d, skipping", topic, eventType, msg.Offset)
+			tracing.Fail(ctx, "unknown_event_type", fmt.Errorf("unknown event_type %q", eventType))
 			commitMessage(ctx, reader, msg, topic)
 			span.End()
 			continue
-		}
-
-		if err := handleUserActivated(ctx, pool, &event); err != nil {
-			log.Printf("notifications-svc: failed to handle UserActivated event %s for user %s: %v", event.GetEventId(), event.GetUserId(), err)
-			tracing.Fail(ctx, "useractivated_handling_failed", err)
-			span.End()
-			continue // do not commit — message will be redelivered
 		}
 
 		commitMessage(ctx, reader, msg, topic)
@@ -411,6 +462,34 @@ func handleUserActivated(ctx context.Context, pool *pgxpool.Pool, event *eventsv
 	return nil
 }
 
+// handleProfileUpdated is idempotent for the same reason handleUserActivated
+// is, and follows the identical shape: fast-path check, apply the
+// projection write, mark processed_events LAST. It never produces a
+// notification either — it only feeds the projection so a later
+// transfer/deposit email can address the recipient by name; sending mail
+// ABOUT a profile change was never asked for and isn't done here.
+func handleProfileUpdated(ctx context.Context, pool *pgxpool.Pool, event *eventsv1.ProfileUpdated) error {
+	eventID := event.GetEventId()
+
+	processed, err := isEventProcessed(ctx, pool, eventID)
+	if err != nil {
+		return fmt.Errorf("check processed_events for event %s: %w", eventID, err)
+	}
+	if processed {
+		log.Printf("notifications-svc: event %s already processed, skipping (redelivery)", eventID)
+		return nil
+	}
+
+	if err := updateUserContactDisplayName(ctx, pool, event.GetUserId(), event.GetDisplayName()); err != nil {
+		return fmt.Errorf("update user_contacts display_name for user %s: %w", event.GetUserId(), err)
+	}
+
+	if err := markEventProcessed(ctx, pool, eventID, eventStatusSkipped); err != nil {
+		return fmt.Errorf("mark event %s processed: %w", eventID, err)
+	}
+	return nil
+}
+
 // handleAccountCreated links accountID into an existing user_contacts row.
 // Unlike handleUserActivated, "the row doesn't exist yet" is a real,
 // expected possibility here — AccountCreated is causally downstream of
@@ -467,7 +546,7 @@ func handleAccountCreated(ctx context.Context, pool *pgxpool.Pool, event *events
 // handlers reach outside the process, and the only one backed by a dead
 // letter topic.
 //
-// fetchCtx is the shutdown signal, exactly as in runUserActivatedConsumer:
+// fetchCtx is the shutdown signal, exactly as in runUserEventsConsumer:
 // FetchMessage blocks on it, so cancelling it unblocks an idle reader and
 // this loop returns without starting new work. Once a message IS in
 // hand, though, it is handed to handleTransferMessageWithRetry with a

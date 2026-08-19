@@ -145,7 +145,7 @@ func main() {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		runUserActivatedConsumer(ctx, userEventsReader, pool)
+		runUserEventsConsumer(ctx, userEventsReader, pool)
 	}()
 	go func() {
 		defer wg.Done()

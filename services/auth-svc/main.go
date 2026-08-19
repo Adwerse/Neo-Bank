@@ -149,6 +149,12 @@ func main() {
 	http.HandleFunc("/logout", logoutHandler(rdb))
 	http.HandleFunc("/forgot-password", forgotPasswordHandler(pool, rdb, smtpAddr, smtpFrom))
 	http.HandleFunc("/reset-password", resetPasswordHandler(pool, rdb))
+	// Method-qualified (unlike the bare paths above): GET and PATCH are
+	// genuinely different operations here, and mixing a method-qualified
+	// pattern into an otherwise bare-path mux is supported — accounts-svc
+	// already does the same thing on its own mux.
+	http.HandleFunc("GET /profile", getProfileHandler(pool))
+	http.HandleFunc("PATCH /profile", updateProfileHandler(pool))
 
 	log.Printf("auth-svc listening on :%s", port)
 	// http.DefaultServeMux named explicitly rather than passing nil:

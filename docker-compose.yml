@@ -425,6 +425,50 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  # S3-compatible object storage for avatar uploads. Provisioned this
+  # sprint (bucket only — nothing uploads into it yet, that's next); see
+  # README's "Честные ограничения" for the prod-swap story: R2/S3 speak
+  # the same API, so going to production is an endpoint/credential change
+  # here and in whichever service ends up with an S3 client, not a
+  # rewrite. Dev credentials are the same "publicly a file in this repo
+  # the moment it's committed, so hiding them is pointless" reasoning as
+  # Postgres's — see that bullet in README.
+  #
+  # No healthcheck block: MinIO's image ships no shell utility (curl/wget)
+  # a HEALTHCHECK could use — the same situation kafka is in below, and
+  # solved the same way: minio-init retry-loops until the API actually
+  # answers, rather than the compose file asserting a liveness check that
+  # doesn't have a command to run.
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: neobank
+      MINIO_ROOT_PASSWORD: neobank_dev_password
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # One-shot: waits for MinIO's API to come up, then creates the avatars
+  # bucket if it doesn't already exist (--ignore-existing is idempotent,
+  # same convention as kafka-init's --if-not-exists below). mc is MinIO's
+  # own client and the image that ships it and nothing else, mirroring
+  # kafka-init's shape exactly.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      MINIO_ROOT_USER: neobank
+      MINIO_ROOT_PASSWORD: neobank_dev_password
+    command:
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do sleep 2; done
+        mc mb --ignore-existing local/avatars
+
   # Distributed tracing backend. all-in-one bundles the collector, the
   # storage and the UI in one container with an in-memory store — which
   # is the right shape for local development and explicitly not for
@@ -469,3 +513,4 @@ volumes:
   pg_node3_data:
   etcd_data:
   kafka_data:
+  minio_data:
