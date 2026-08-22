@@ -1,13 +1,111 @@
 :root {
-  --color-bg: #ffffff;
-  --color-surface: #f7f7f8;
-  --color-surface-hover: #eeeef0;
-  --color-text: #1a1a1f;
-  --color-text-muted: #6b6b76;
-  --color-border: #e2e2e6;
-  --color-accent: #4f46e5;
-  --color-accent-hover: #4338ca;
-  --color-accent-contrast: #ffffff;
+  /* Neutral and accent ramps — generated on one shared lightness scale, so
+     the same step of either ramp reads as the same "weight" as the other.
+     Same values in both themes; only which semantic role points at which
+     step changes below. */
+  --color-neutral-100: #f3f5fe;
+  --color-neutral-200: #e4e7f5;
+  --color-neutral-300: #cfd3e5;
+  --color-neutral-400: #b2b6ca;
+  --color-neutral-500: #9397ab;
+  --color-neutral-600: #75798c;
+  --color-neutral-700: #595d6c;
+  --color-neutral-800: #3f424d;
+  --color-neutral-900: #292b31;
+
+  --color-accent-100: #f5f4ff;
+  --color-accent-200: #e7e5fe;
+  --color-accent-300: #d2cefd;
+  --color-accent-400: #b5abfc;
+  --color-accent-500: #968ae0;
+  --color-accent-600: #796cbf;
+  --color-accent-700: #5d5294;
+  --color-accent-800: #423a6a;
+  --color-accent-900: #2b2741;
+
+  --color-accent-2: #a7a1db;
+  --color-accent-2-100: #f5f4ff;
+  --color-accent-2-200: #e7e5fe;
+  --color-accent-2-300: #d2cefd;
+  --color-accent-2-400: #b5afe8;
+  --color-accent-2-500: #9690c9;
+  --color-accent-2-600: #7972a9;
+  --color-accent-2-700: #5c5783;
+  --color-accent-2-800: #423e5d;
+  --color-accent-2-900: #2b293a;
+
+  /* The accent itself doesn't change between themes — only the ground
+     around it does (see the per-theme blocks below). */
+  --color-accent: #9184d9;
+
+  --space-1: 2.8px;
+  --space-2: 5.6px;
+  --space-3: 8.4px;
+  --space-4: 11.2px;
+  --space-6: 16.8px;
+  --space-8: 22.4px;
+
+  --radius: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+
+  --font-heading: 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font-heading-weight: 500;
+  --font-body: 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+  --font-sans: var(--font-body);
+}
+
+/* Mobile-width default: dark, dense "Terminal" ground. */
+:root,
+:root[data-theme='nocturne-dark'] {
+  color-scheme: dark;
+
+  --color-bg: #161826;
+  --color-surface: #232532;
+  --color-surface-hover: #2b2e3f;
+  --color-text: #e9e9ed;
+  --color-text-muted: color-mix(in srgb, var(--color-text) 55%, transparent);
+  --color-border: color-mix(in srgb, var(--color-text) 12%, transparent);
+  --color-divider: color-mix(in srgb, var(--color-text) 16%, transparent);
+
+  --color-accent-hover: var(--color-accent-400);
+  --color-accent-contrast: var(--color-bg);
+
+  --color-danger: #f87171;
+  --color-danger-bg: #450a0a;
+  --color-warning: #fbbf24;
+  --color-warning-bg: #451a03;
+  --color-success: #4ade80;
+  --color-success-bg: #052e16;
+
+  --money-in: oklch(74% 0.13 152);
+  --money-out: oklch(68% 0.15 27);
+  --money-pending: color-mix(in srgb, var(--color-text) 42%, transparent);
+
+  --shadow-sm: 0 0 0 1px #3f424d;
+  --shadow-md: 0 0 0 1px #595d6c, 0 6px 18px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 0 0 1px #9397ab, 0 16px 40px rgba(0, 0, 0, 0.65);
+}
+
+/* Desktop-width "Blueprint" ground: same tokens, recolored light. Applied
+   via [data-theme] (set by useIsDesktop(), see Layout.tsx) rather than
+   prefers-color-scheme — viewport width picks the theme now, not the OS
+   setting. */
+:root[data-theme='nocturne-light'] {
+  color-scheme: light;
+
+  --color-bg: var(--color-neutral-200);
+  --color-surface: var(--color-neutral-100);
+  --color-surface-hover: var(--color-neutral-200);
+  --color-text: var(--color-neutral-900);
+  --color-text-muted: color-mix(in srgb, var(--color-text) 55%, transparent);
+  --color-border: color-mix(in srgb, var(--color-text) 12%, transparent);
+  --color-divider: color-mix(in srgb, var(--color-text) 16%, transparent);
+
+  --color-accent-hover: var(--color-accent-600);
+  --color-accent-contrast: var(--color-neutral-100);
+
   --color-danger: #dc2626;
   --color-danger-bg: #fee2e2;
   --color-warning: #b45309;
@@ -15,35 +113,15 @@
   --color-success: #15803d;
   --color-success-bg: #dcfce7;
 
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-6: 24px;
-  --space-8: 32px;
+  --money-in: oklch(48% 0.13 152);
+  --money-out: oklch(52% 0.16 27);
+  --money-pending: color-mix(in srgb, var(--color-text) 42%, transparent);
 
-  --radius: 6px;
-  --radius-lg: 12px;
-
-  --font-sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-bg: #16171d;
-    --color-surface: #1f2028;
-    --color-surface-hover: #292a33;
-    --color-text: #f3f4f6;
-    --color-text-muted: #9ca3af;
-    --color-border: #2e303a;
-    --color-accent: #818cf8;
-    --color-accent-hover: #a5b4fc;
-    --color-accent-contrast: #16171d;
-    --color-danger: #f87171;
-    --color-danger-bg: #450a0a;
-    --color-warning: #fbbf24;
-    --color-warning-bg: #451a03;
-    --color-success: #4ade80;
-    --color-success-bg: #052e16;
-  }
+  --shadow-sm: 0 1px 2px color-mix(in srgb, var(--color-neutral-900) 8%, transparent);
+  --shadow-md:
+    0 1px 2px color-mix(in srgb, var(--color-neutral-900) 6%, transparent),
+    0 8px 20px color-mix(in srgb, var(--color-neutral-900) 10%, transparent);
+  --shadow-lg:
+    0 1px 2px color-mix(in srgb, var(--color-neutral-900) 10%, transparent),
+    0 16px 40px color-mix(in srgb, var(--color-neutral-900) 16%, transparent);
 }

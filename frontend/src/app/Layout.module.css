@@ -52,6 +52,10 @@
   flex: 1;
   display: flex;
   justify-content: center;
-  align-items: center;
+  /* flex-start, not center: a centered flex item taller than its container
+     (the new Terminal dashboard, once it has real content) overflows both
+     above and below the fold instead of scrolling in from the top. Auth
+     pages (short, narrow cards) look fine top-aligned too. */
+  align-items: flex-start;
   padding: var(--space-8);
 }

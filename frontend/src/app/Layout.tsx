@@ -1,7 +1,9 @@
+import { useEffect } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router'
 import { useAuth } from '../features/auth/AuthContext'
 import { ConnectionStatus } from '../shared/ws-client/ConnectionStatus'
 import { IncomingTransferWatcher } from '../features/transfers/IncomingTransferWatcher'
+import { useIsDesktop } from '../shared/ui/useIsDesktop'
 import styles from './Layout.module.css'
 
 const navItems = [
@@ -15,6 +17,14 @@ const navItems = [
 export function Layout() {
   const { status, logout } = useAuth()
   const navigate = useNavigate()
+  const isDesktop = useIsDesktop()
+
+  // Viewport width picks the theme now, not prefers-color-scheme — this is
+  // the one place that decides it, so it must run regardless of which shell
+  // ends up rendering below.
+  useEffect(() => {
+    document.documentElement.dataset.theme = isDesktop ? 'nocturne-light' : 'nocturne-dark'
+  }, [isDesktop])
 
   async function handleLogout() {
     await logout()

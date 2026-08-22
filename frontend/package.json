@@ -11,6 +11,8 @@
     "gen:api": "openapi-typescript ../gateway/openapi.yaml -o src/shared/api-client/schema.ts"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.2.9",
+    "@fontsource/inter": "^5.2.8",
     "@hookform/resolvers": "^5.4.3",
     "@stripe/react-stripe-js": "^6.8.0",
     "@stripe/stripe-js": "^9.13.0",

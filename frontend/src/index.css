@@ -1,3 +1,7 @@
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
 @import './shared/ui/tokens.css';
 
 * {
@@ -15,5 +19,7 @@ body {
   font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
-  color-scheme: light dark;
+  /* color-scheme is set per-theme on :root (tokens.css) so native controls
+     and scrollbars follow the viewport-driven theme, not the OS setting —
+     not redeclared here, so it inherits. */
 }

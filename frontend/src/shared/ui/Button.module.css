@@ -19,12 +19,17 @@
 }
 
 .primary {
-  background: var(--color-accent);
-  color: var(--color-accent-contrast);
+  background: transparent;
+  color: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .primary:hover:not(:disabled) {
-  background: var(--color-accent-hover);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.primary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
 }
 
 .secondary {
