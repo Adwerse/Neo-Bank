@@ -199,6 +199,141 @@ func TestNewHandler_WebhookStripe_PublicAndRawBodyPreserved(t *testing.T) {
 	}
 }
 
+func TestNewHandler_ProfileExactPath_NoRedirectAndUnstripped(t *testing.T) {
+	backend, rec := newRecordingBackend(t)
+	t.Setenv("AUTH_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
+
+	const secret = "test-secret"
+	gw := httptest.NewServer(newTestHandler(secret))
+	t.Cleanup(gw.Close)
+
+	req, _ := http.NewRequest(http.MethodPatch, gw.URL+"/profile", strings.NewReader(`{"display_name":"Alice"}`))
+	req.Header.Set("Authorization", "Bearer "+signedTestJWT(t, secret, "user-123"))
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("PATCH /profile: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		t.Fatalf("got redirect status %d — a bare PATCH /profile must never redirect (fetch() would demote the retry to GET and drop the body)", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if rec.method != http.MethodPatch {
+		t.Errorf("backend saw method %s, want PATCH", rec.method)
+	}
+	if rec.path != "/profile" {
+		t.Errorf("backend saw path %q, want %q (unstripped)", rec.path, "/profile")
+	}
+	if string(rec.body) != `{"display_name":"Alice"}` {
+		t.Errorf("backend saw body %q, want unchanged", rec.body)
+	}
+	if got := rec.headers.Get("X-User-Id"); got != "user-123" {
+		t.Errorf("backend saw X-User-Id %q, want %q", got, "user-123")
+	}
+}
+
+func TestNewHandler_ProfileAvatarSubpath_NoRedirectAndUnstripped(t *testing.T) {
+	backend, rec := newRecordingBackend(t)
+	t.Setenv("AUTH_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
+
+	const secret = "test-secret"
+	gw := httptest.NewServer(newTestHandler(secret))
+	t.Cleanup(gw.Close)
+
+	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/profile/avatar/upload-url", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTestJWT(t, secret, "user-123"))
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("POST /profile/avatar/upload-url: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if rec.path != "/profile/avatar/upload-url" {
+		t.Errorf("backend saw path %q, want %q (unstripped)", rec.path, "/profile/avatar/upload-url")
+	}
+}
+
+func TestNewHandler_ProfileRequiresJWT(t *testing.T) {
+	backend, _ := newRecordingBackend(t)
+	t.Setenv("AUTH_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
+
+	gw := httptest.NewServer(newTestHandler("test-secret"))
+	t.Cleanup(gw.Close)
+
+	resp, err := http.Get(gw.URL + "/profile")
+	if err != nil {
+		t.Fatalf("GET /profile without a token: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d — /profile must stay JWT-protected", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestNewHandler_ProfileStripsClientSuppliedUserID confirms /profile gets
+// the same anti-spoofing guarantee as every other protected route: a
+// client cannot set its own X-User-Id and have it survive to the backend.
+func TestNewHandler_ProfileStripsClientSuppliedUserID(t *testing.T) {
+	backend, rec := newRecordingBackend(t)
+	t.Setenv("AUTH_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
+
+	const secret = "test-secret"
+	gw := httptest.NewServer(newTestHandler(secret))
+	t.Cleanup(gw.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTestJWT(t, secret, "real-user"))
+	req.Header.Set("X-User-Id", "attacker-supplied-should-be-stripped")
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("GET /profile: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := rec.headers.Get("X-User-Id"); got != "real-user" {
+		t.Errorf("backend saw X-User-Id %q, want %q (from the JWT, not the client-supplied header)", got, "real-user")
+	}
+}
+
+// TestNewHandler_AuthProfileStillStrips confirms the new unstripped
+// "/profile" route coexists with the pre-existing "/auth" prefix route
+// rather than replacing it: "/auth/profile" must still reach auth-svc as
+// "/profile" (stripped), the same as before this sprint.
+func TestNewHandler_AuthProfileStillStrips(t *testing.T) {
+	backend, rec := newRecordingBackend(t)
+	t.Setenv("AUTH_SVC_ADDR", strings.TrimPrefix(backend.URL, "http://"))
+
+	const secret = "test-secret"
+	gw := httptest.NewServer(newTestHandler(secret))
+	t.Cleanup(gw.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/auth/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTestJWT(t, secret, "user-123"))
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("GET /auth/profile: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if rec.path != "/profile" {
+		t.Errorf("backend saw path %q, want %q (the /auth prefix must still be stripped)", rec.path, "/profile")
+	}
+}
+
 // TestNewHandler_TransfersPrefixStillStrips is a regression guard: the new
 // no-strip routes must not disturb the existing "/transfers" (and
 // auth/accounts/fraud/notifications) prefix-stripping behavior.
