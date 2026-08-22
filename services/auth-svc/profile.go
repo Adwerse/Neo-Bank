@@ -75,17 +75,22 @@ func validateDisplayName(s string) error {
 }
 
 // Profile is the JSON representation of a user's profile — the response
-// shape for both GET and PATCH /profile. AvatarKey/AvatarUpdatedAt are
-// always null today (upload lands in a later sprint); they're included
-// now so the response shape doesn't change again once it doesn't.
+// shape for GET /profile, PATCH /profile, and POST /profile/avatar/confirm.
+// AvatarKey is the raw storage key (harmless to expose: it's meaningless
+// without this service's credentials to sign a request for it, see
+// storage.go). AvatarURL64/AvatarURL256 are presigned GET URLs, freshly
+// signed on every response that includes them (see withAvatarURLs,
+// avatar.go) — omitted entirely, not merely null, when there's no avatar.
 type Profile struct {
 	UserID          string     `json:"user_id"`
 	DisplayName     *string    `json:"display_name"`
 	AvatarKey       *string    `json:"avatar_key"`
 	AvatarUpdatedAt *time.Time `json:"avatar_updated_at"`
+	AvatarURL64     *string    `json:"avatar_url_64,omitempty"`
+	AvatarURL256    *string    `json:"avatar_url_256,omitempty"`
 }
 
-func getProfileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+func getProfileHandler(pool *pgxpool.Pool, storage *avatarStorage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -106,7 +111,7 @@ func getProfileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(profile)
+		json.NewEncoder(w).Encode(withAvatarURLs(r.Context(), storage, profile))
 	}
 }
 
@@ -119,7 +124,7 @@ type updateProfileRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
-func updateProfileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+func updateProfileHandler(pool *pgxpool.Pool, storage *avatarStorage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -159,7 +164,7 @@ func updateProfileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(profile)
+		json.NewEncoder(w).Encode(withAvatarURLs(r.Context(), storage, profile))
 	}
 }
 

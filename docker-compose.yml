@@ -41,6 +41,16 @@ services:
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: user.events
       JWT_SECRET: neobank_dev_jwt_secret_change_me
+      MINIO_ENDPOINT: minio:9000
+      # Presigned URLs are signed against this endpoint instead — a client
+      # outside the compose network (a browser, or `docker compose exec`-free
+      # host tooling) can't resolve the "minio" hostname MINIO_ENDPOINT uses
+      # for this service's own direct calls. See storage.go's avatarStorage
+      # doc comment.
+      MINIO_PUBLIC_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: neobank
+      MINIO_SECRET_KEY: neobank_dev_password
+      MINIO_BUCKET: avatars
     depends_on:
       pg-haproxy:
         condition: service_healthy
@@ -48,6 +58,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
 
   accounts-svc:
     build:
