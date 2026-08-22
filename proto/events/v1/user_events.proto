@@ -14,3 +14,23 @@ message UserActivated {
   google.protobuf.Timestamp occurred_at = 3;
   string event_id = 4;
 }
+
+// ProfileUpdated is published whenever PATCH /profile changes a user's
+// display_name, on the same auth_outbox/user.events path as UserActivated
+// (see README's mini-ADR on why profile data lives in auth-svc). Shares
+// this topic rather than getting its own, so consumers already reading
+// user.events for UserActivated discriminate by the event_type header
+// pkg/outbox's relay stamps on every message — see notifications-svc's
+// eventTypeOf.
+//
+// display_name is the canonical (already-trimmed) new value. An empty
+// string means the name was cleared (stored as SQL NULL), never a
+// literal empty name — auth-svc's validation rejects a trimmed-empty
+// PATCH body as "reset to NULL", not as an empty display name, so this
+// field is never ambiguous between "unset" and "deliberately blank".
+message ProfileUpdated {
+  string user_id = 1;
+  string display_name = 2;
+  google.protobuf.Timestamp occurred_at = 3;
+  string event_id = 4;
+}

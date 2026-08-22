@@ -134,6 +134,24 @@ func newHandler(jwtSecret string, ws *wsServer) http.Handler {
 	mux.Handle("/deposits/", noStripProxy)
 	mux.Handle("/webhooks/stripe", noStripProxy)
 
+	// /profile, /profile/avatar/upload-url, /profile/avatar/confirm all
+	// live on auth-svc's own mux as top-level paths (see
+	// services/auth-svc/main.go), not nested under an internal "/profile"
+	// prefix — same shape as transfers-svc's /deposits above, and for the
+	// same reason forwarded unstripped rather than through the routes()
+	// loop's newProxy. The exact "/profile" registration matters even more
+	// here than for "/deposits": a redirect on GET is comparatively benign,
+	// but PATCH /profile hitting only a "/profile/" subtree registration
+	// would 301 to "/profile/", and fetch() demotes a redirected PATCH to
+	// GET and drops the body — silently turning a display_name update into
+	// a no-op read. (auth-svc is also still reachable the old way, under
+	// "/auth/profile" via the routes() loop below — this is a second,
+	// intentionally shorter path to the same handlers, not a replacement.)
+	authAddr := envOr("AUTH_SVC_ADDR", "auth-svc:8081")
+	noStripAuthProxy := newNoStripProxy(authAddr)
+	mux.Handle("/profile", noStripAuthProxy)
+	mux.Handle("/profile/", noStripAuthProxy)
+
 	// Tracing wraps the JWT middleware rather than sitting inside it, so
 	// the span covers authentication too: a request rejected with 401
 	// still produces a trace showing where it died. The reverse order

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	eventsv1 "neobank/proto/gen/go/events/v1"
 )
 
 // newTestPool follows the convention pkg/outbox's tests established: DB
@@ -225,5 +227,109 @@ func TestGetContactByAccountID(t *testing.T) {
 	}
 	if c.AccountNumber != "NB0012345678" {
 		t.Errorf("AccountNumber = %q, want %q", c.AccountNumber, "NB0012345678")
+	}
+}
+
+// displayNameOf reads user_contacts.display_name directly, as NULL ("")
+// or a value, for tests to assert against without needing a new exported
+// accessor.
+func displayNameOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID string) string {
+	t.Helper()
+	var name string
+	if err := pool.QueryRow(ctx, "SELECT COALESCE(display_name, '') FROM user_contacts WHERE user_id = $1", userID).Scan(&name); err != nil {
+		t.Fatalf("read display_name for %s: %v", userID, err)
+	}
+	return name
+}
+
+// TestUpdateUserContactDisplayName is the projection-side half of the
+// DoD: a ProfileUpdated event's display_name must land in user_contacts,
+// and clearing it (empty string, per auth-svc's NULL-vs-empty contract —
+// see ProfileUpdated's doc comment in user_events.proto) must reset the
+// column to NULL, not to a literal empty string.
+func TestUpdateUserContactDisplayName(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	userID := randomUUID(t)
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "DELETE FROM user_contacts WHERE user_id = $1", userID); err != nil {
+			t.Logf("cleanup: delete test contact %s: %v", userID, err)
+		}
+	})
+	if _, err := pool.Exec(ctx, "INSERT INTO user_contacts (user_id, email) VALUES ($1, $2)", userID, "display-name-test@example.com"); err != nil {
+		t.Fatalf("seed user_contacts: %v", err)
+	}
+
+	if err := updateUserContactDisplayName(ctx, pool, userID, "Alice"); err != nil {
+		t.Fatalf("updateUserContactDisplayName (set): %v", err)
+	}
+	if got := displayNameOf(t, ctx, pool, userID); got != "Alice" {
+		t.Errorf("display_name after set = %q, want %q", got, "Alice")
+	}
+
+	if err := updateUserContactDisplayName(ctx, pool, userID, ""); err != nil {
+		t.Fatalf("updateUserContactDisplayName (clear): %v", err)
+	}
+	if got := displayNameOf(t, ctx, pool, userID); got != "" {
+		t.Errorf("display_name after clear = %q, want \"\" (NULL, not a literal empty string)", got)
+	}
+}
+
+// TestUpdateUserContactDisplayName_NoRowIsNotAnError exercises the "should
+// be unreachable" branch (see the function's doc comment): a ProfileUpdated
+// for a user this projection has no row for yet must not be treated as a
+// retryable failure — there's nothing a retry would fix.
+func TestUpdateUserContactDisplayName_NoRowIsNotAnError(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	if err := updateUserContactDisplayName(ctx, pool, randomUUID(t), "Nobody"); err != nil {
+		t.Errorf("updateUserContactDisplayName for a missing row returned an error: %v, want nil", err)
+	}
+}
+
+// TestHandleProfileUpdated_Idempotent proves the redelivery guard end to
+// end: a second delivery of the same event_id must not be reprocessed
+// (and, if it dropped the guard, would have no observable effect anyway
+// since the value is already what it's being set to — this test's real
+// job is confirming isEventProcessed short-circuits it, not merely that
+// the outcome looks the same).
+func TestHandleProfileUpdated_Idempotent(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	userID := randomUUID(t)
+	eventID := newTestEventID(t, ctx, pool)
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "DELETE FROM user_contacts WHERE user_id = $1", userID); err != nil {
+			t.Logf("cleanup: delete test contact %s: %v", userID, err)
+		}
+	})
+	if _, err := pool.Exec(ctx, "INSERT INTO user_contacts (user_id, email) VALUES ($1, $2)", userID, "idempotent-test@example.com"); err != nil {
+		t.Fatalf("seed user_contacts: %v", err)
+	}
+
+	event := &eventsv1.ProfileUpdated{UserId: userID, DisplayName: "Dana", EventId: eventID}
+
+	if err := handleProfileUpdated(ctx, pool, event); err != nil {
+		t.Fatalf("handleProfileUpdated (first delivery): %v", err)
+	}
+	if got := displayNameOf(t, ctx, pool, userID); got != "Dana" {
+		t.Fatalf("display_name after first delivery = %q, want %q", got, "Dana")
+	}
+	if got := eventStatus(t, ctx, pool, eventID); got != eventStatusSkipped {
+		t.Errorf("event status after first delivery = %q, want %q", got, eventStatusSkipped)
+	}
+
+	// Redelivery with a DIFFERENT name in the (otherwise identical, same
+	// event_id) message: if the idempotency guard were broken, this would
+	// overwrite Dana with Eve, silently. It must not.
+	redelivered := &eventsv1.ProfileUpdated{UserId: userID, DisplayName: "Eve", EventId: eventID}
+	if err := handleProfileUpdated(ctx, pool, redelivered); err != nil {
+		t.Fatalf("handleProfileUpdated (redelivery): %v", err)
+	}
+	if got := displayNameOf(t, ctx, pool, userID); got != "Dana" {
+		t.Errorf("display_name after redelivery = %q, want %q unchanged (idempotency guard should have skipped it)", got, "Dana")
 	}
 }

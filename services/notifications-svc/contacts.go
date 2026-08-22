@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,6 +64,37 @@ func updateUserContactAccountLink(ctx context.Context, pool *pgxpool.Pool, userI
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// updateUserContactDisplayName applies a ProfileUpdated event to the
+// projection. UPDATE-only, not an upsert — unlike updateUserContactAccountLink
+// (which links AccountCreated and UserActivated, two topics with no
+// ordering guarantee between them), ProfileUpdated and UserActivated
+// share this service's user.events consumer and auth-svc's own
+// partition_key=user_id, so Kafka guarantees this user's UserActivated
+// (which creates the row) is always consumed first — there is no race to
+// guard against, unlike the account-link case.
+//
+// displayName is "" to clear the column to NULL (NULLIF, same convention
+// as account_number in migration 000003) — never stored as a literal
+// empty string, matching auth-svc's own "empty means cleared, not blank"
+// rule so this projection can't drift from the source of truth's
+// NULL-vs-value distinction.
+func updateUserContactDisplayName(ctx context.Context, pool *pgxpool.Pool, userID, displayName string) error {
+	tag, err := pool.Exec(ctx,
+		"UPDATE user_contacts SET display_name = NULLIF($1, ''), updated_at = now() WHERE user_id = $2",
+		displayName, userID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Should be unreachable per this function's doc comment — logged,
+		// not returned as an error, since retrying can't fix a row that
+		// structurally should already exist; see handleProfileUpdated.
+		log.Printf("notifications-svc: ProfileUpdated for user %s: no user_contacts row found", userID)
+	}
+	return nil
 }
 
 // getContactByAccountID resolves a transfer event's sender_account_id or
