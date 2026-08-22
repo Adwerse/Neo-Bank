@@ -1,0 +1,44 @@
+.shell {
+  display: flex;
+  flex: 1;
+  min-height: 100%;
+}
+
+.content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-6) var(--space-8);
+  background-color: var(--color-bg);
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--color-accent) 7%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 7%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.greeting {
+  font: 500 18px var(--font-heading);
+  color: var(--color-text);
+}
+
+.date {
+  margin-top: 3px;
+  font: 11px var(--font-mono);
+  color: color-mix(in srgb, var(--color-text) 50%, transparent);
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+}

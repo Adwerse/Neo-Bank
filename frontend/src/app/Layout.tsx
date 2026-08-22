@@ -4,6 +4,7 @@ import { useAuth } from '../features/auth/AuthContext'
 import { ConnectionStatus } from '../shared/ws-client/ConnectionStatus'
 import { IncomingTransferWatcher } from '../features/transfers/IncomingTransferWatcher'
 import { useIsDesktop } from '../shared/ui/useIsDesktop'
+import { DesktopShell } from './DesktopShell'
 import styles from './Layout.module.css'
 
 const navItems = [
@@ -29,6 +30,20 @@ export function Layout() {
   async function handleLogout() {
     await logout()
     navigate('/login', { replace: true })
+  }
+
+  // The sidebar shell only makes sense for an authenticated session (its
+  // nav and footer both need a logged-in user) — every other combination
+  // (mobile at any auth state, desktop while logged out) keeps the top-bar
+  // chrome below, just re-themed by the effect above.
+  if (status === 'authenticated' && isDesktop) {
+    return (
+      <div className={styles.shell}>
+        <ConnectionStatus />
+        <IncomingTransferWatcher />
+        <DesktopShell />
+      </div>
+    )
   }
 
   return (
