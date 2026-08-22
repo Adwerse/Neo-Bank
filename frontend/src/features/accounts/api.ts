@@ -6,3 +6,5 @@ type MeResponse = paths['/accounts/me']['get']['responses']['200']['content']['a
 export function getMe(): Promise<MeResponse> {
   return request<MeResponse>('/accounts/me')
 }
+
+export type { MeResponse }

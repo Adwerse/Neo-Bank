@@ -1,0 +1,45 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: 10px;
+  font-family: var(--font-body);
+  color: color-mix(in srgb, var(--color-text) 65%, transparent);
+}
+
+.dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.dotLive {
+  background: var(--money-in);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--money-in) 25%, transparent);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.dotPolling {
+  background: var(--color-text-muted);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dotLive {
+    animation: none;
+  }
+}
