@@ -1,0 +1,169 @@
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: var(--space-4) 0 var(--space-8);
+  font-family: var(--font-body);
+  color: var(--color-text);
+}
+
+.wordmark {
+  font-weight: 600;
+  font-size: 10px;
+  font-family: var(--font-heading);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--color-text) 45%, transparent);
+}
+
+.topRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-accent-600);
+  background: var(--color-accent-800);
+  color: var(--color-accent-100);
+  font: 600 14px var(--font-heading);
+}
+
+.greetingSmall {
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
+
+.greetingName {
+  font: 500 15px/1.3 var(--font-heading);
+}
+
+.bellButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-divider);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.bellButton:hover {
+  background: var(--color-surface-hover);
+}
+
+.balanceRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.balanceLabel {
+  margin-bottom: 4px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+
+.balanceValueRow {
+  display: flex;
+  align-items: baseline;
+}
+
+.balanceValue {
+  font: 600 30px/1 var(--font-mono);
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+@keyframes terminal-balance-flash {
+  0% {
+    color: var(--color-accent);
+  }
+  100% {
+    color: var(--color-text);
+  }
+}
+
+.balanceFlash {
+  animation: terminal-balance-flash 1.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .balanceFlash {
+    animation: none;
+  }
+}
+
+.deltaUp,
+.deltaDown {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  font: 600 11px var(--font-mono);
+}
+
+.deltaUp {
+  color: var(--money-in);
+}
+
+.deltaDown {
+  color: var(--money-out);
+}
+
+.sparklineWrap {
+  flex: none;
+  padding-top: 4px;
+}
+
+.identityChips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  scroll-margin-top: var(--space-6);
+}
+
+.iban {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sectionLabel {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}

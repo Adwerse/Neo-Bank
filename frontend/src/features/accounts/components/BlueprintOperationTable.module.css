@@ -1,0 +1,132 @@
+.card {
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-4) var(--space-2);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.table th {
+  padding: 7px 10px;
+  border-top: 1px solid var(--color-divider);
+  border-bottom: 1px solid var(--color-divider);
+  border-right: 1px solid var(--color-divider);
+  background: var(--color-neutral-200);
+  text-align: left;
+  font: 9px var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
+
+.table th:last-child {
+  border-right: none;
+}
+
+.table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-divider);
+  border-right: 1px solid var(--color-divider);
+  color: var(--color-text);
+}
+
+.table td:last-child {
+  border-right: none;
+}
+
+.table tbody tr {
+  transition: background-color 0.3s ease;
+}
+
+.rowChanged td {
+  background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+.colNo {
+  width: 36px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: color-mix(in srgb, var(--color-text) 45%, transparent);
+}
+
+.right {
+  text-align: right;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.counterparty {
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
+
+.status {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--color-text) 65%, transparent);
+}
+
+.statusBad {
+  font-size: 11px;
+  color: var(--money-out);
+}
+
+.amountIn {
+  color: var(--money-in);
+  font-weight: 600;
+}
+
+.amountOut {
+  color: var(--money-out);
+  font-weight: 600;
+}
+
+.amountPending {
+  color: var(--money-pending);
+  font-weight: 600;
+}
+
+.balance {
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
+
+.skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+
+.skeletonRow {
+  height: 2rem;
+  width: 100%;
+}
+
+.errorBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+
+.empty {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-4);
+  font-size: 12px;
+  color: var(--color-text-muted);
+}

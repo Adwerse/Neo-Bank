@@ -1,29 +1,24 @@
-import { Link } from 'react-router'
-import { isApiError } from '../../../shared/api-client/ApiError'
-import { getAccessTokenEmail } from '../../../shared/api-client/jwt'
-import { Card } from '../../../shared/ui/Card'
 import { Banner } from '../../../shared/ui/Banner'
 import { Button } from '../../../shared/ui/Button'
+import { Card } from '../../../shared/ui/Card'
 import { Skeleton } from '../../../shared/ui/Skeleton'
-import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
-import buttonStyles from '../../../shared/ui/Button.module.css'
+import { useIsDesktop } from '../../../shared/ui/useIsDesktop'
+import { useScrollToHash } from '../../../shared/ui/useScrollToHash'
+import { getAccountErrorMessage } from '../errorMessages'
+import { useDashboardOperations } from '../useDashboardOperations'
 import { useMe } from '../useMe'
-import { formatMoney } from '../money'
+import { BlueprintDashboard } from './BlueprintDashboard'
 import styles from './DashboardPage.module.css'
-
-const STATUS_LABELS: Record<string, string> = {
-  active: 'Активен',
-  frozen: 'Заморожен',
-  closed: 'Закрыт',
-}
+import { TerminalDashboard } from './TerminalDashboard'
 
 export function DashboardPage() {
   const { data, isLoading, isError, error, refetch } = useMe()
-  const email = getAccessTokenEmail()
+  const isDesktop = useIsDesktop()
   // Called unconditionally (before the loading/error early returns below)
-  // per the rules of hooks — data?.balance is undefined until the first
-  // load resolves, which is fine, that's not a "change" either.
-  const balanceFlash = useFlashOnChange(data?.balance)
+  // per the rules of hooks — undefined/empty results until data resolves
+  // are handled internally, that's not a "change" either.
+  const operations = useDashboardOperations(data?.balance)
+  useScrollToHash()
 
   if (isLoading) {
     return (
@@ -37,17 +32,9 @@ export function DashboardPage() {
   }
 
   if (isError) {
-    // Never fall back to showing a 0 balance here — an honest "unavailable"
-    // beats a fake number in a banking product.
-    let message = 'Не удалось загрузить данные счёта, попробуйте ещё раз.'
-    if (isApiError(error) && error.status === 503) {
-      message = 'Баланс временно недоступен. Попробуйте ещё раз через минуту.'
-    } else if (isApiError(error) && error.status === 404) {
-      message = 'Ваш счёт ещё создаётся — это обычно занимает несколько секунд. Попробуйте обновить.'
-    }
     return (
       <Card>
-        <Banner variant="warning">{message}</Banner>
+        <Banner variant="warning">{getAccountErrorMessage(error)}</Banner>
         <Button className={styles.retryButton} onClick={() => refetch()}>
           Повторить
         </Button>
@@ -62,7 +49,7 @@ export function DashboardPage() {
   const isRestricted = account.status === 'frozen' || account.status === 'closed'
 
   return (
-    <Card>
+    <div className={styles.container}>
       {isRestricted && (
         <Banner variant={account.status === 'closed' ? 'danger' : 'warning'} className={styles.statusBanner}>
           {account.status === 'closed'
@@ -70,24 +57,11 @@ export function DashboardPage() {
             : 'Счёт заморожен. Операции временно недоступны.'}
         </Banner>
       )}
-
-      <div className={[styles.balance, balanceFlash && styles.balanceChanged].filter(Boolean).join(' ')}>
-        {formatMoney(account.balance, account.currency)}
-      </div>
-      <Link to="/deposit" className={`${buttonStyles.button} ${buttonStyles.primary} ${styles.depositLink}`}>
-        Пополнить счёт
-      </Link>
-
-      <dl className={styles.details}>
-        <dt className={styles.label}>Номер счёта</dt>
-        <dd className={styles.value}>{account.account_number}</dd>
-
-        <dt className={styles.label}>Статус</dt>
-        <dd className={styles.value}>{STATUS_LABELS[account.status] ?? account.status}</dd>
-
-        <dt className={styles.label}>Email</dt>
-        <dd className={styles.value}>{email ?? '—'}</dd>
-      </dl>
-    </Card>
+      {isDesktop ? (
+        <BlueprintDashboard account={account} operations={operations} />
+      ) : (
+        <TerminalDashboard account={account} operations={operations} />
+      )}
+    </div>
   )
 }
