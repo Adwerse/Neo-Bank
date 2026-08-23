@@ -299,6 +299,50 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /accounts/me/balance-history:
+    get:
+      operationId: getBalanceHistory
+      summary: >
+        Day-aggregated balance series for the caller's own account, for
+        charting. Already aggregated server-side — never pulls the full
+        entries log to the client.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: range
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [week, month, all]
+      responses:
+        '200':
+          description: Balance series, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceHistoryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No account exists for this user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: >
+            ledger-svc is temporarily unreachable. Not a 200 with a
+            fabricated series.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /transfers:
     post:
       operationId: createTransfer
@@ -702,6 +746,28 @@ components:
         currency:
           type: string
           example: EUR
+
+    BalanceHistoryPoint:
+      type: object
+      required: [date, balance]
+      properties:
+        date:
+          type: string
+          format: date
+        balance:
+          type: integer
+          format: int64
+          description: Closing balance for that day, minor units (cents).
+
+    BalanceHistoryResponse:
+      type: object
+      required: [points]
+      properties:
+        points:
+          type: array
+          description: Oldest first.
+          items:
+            $ref: '#/components/schemas/BalanceHistoryPoint'
 
     CreateTransferRequest:
       type: object

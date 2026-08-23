@@ -140,6 +140,85 @@ func getHistory(ctx context.Context, pool *pgxpool.Pool, accountID string, limit
 	return entries, nil
 }
 
+// BalancePoint is one day's closing balance, oldest first, as returned by
+// getBalanceHistory.
+type BalancePoint struct {
+	Date    time.Time
+	Balance int64
+}
+
+// getBalanceHistory returns accountID's daily closing balance from from
+// (inclusive) to now, oldest first, for charting — already aggregated
+// server-side so a caller never has to walk the raw entries log itself.
+// from nil means "from the beginning of history."
+//
+// When from is set, the first returned point is not "the first day
+// something happened" but the balance carried INTO the window, dated at
+// from (day-truncated) — so a chart never has to guess what the balance
+// was before its own first visible entry. When from is nil there is no
+// such anchor: a ledger account's balance is definitionally 0 before its
+// first entry, so the real data already starts at the right place.
+//
+// A single query handles both the bounded and unbounded case (pgx binds a
+// nil *time.Time as SQL NULL) rather than branching between two SQL
+// strings, matching this file's existing no-dynamic-SQL style.
+func getBalanceHistory(ctx context.Context, pool *pgxpool.Pool, accountID string, from *time.Time) ([]BalancePoint, error) {
+	var ledgerAccountID string
+	err := pool.QueryRow(ctx,
+		"SELECT id FROM ledger_accounts WHERE account_id = $1",
+		accountID,
+	).Scan(&ledgerAccountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrLedgerAccountNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("look up ledger account: %w", err)
+	}
+
+	var balanceBefore int64
+	if from != nil {
+		err = pool.QueryRow(ctx,
+			"SELECT COALESCE(SUM(amount), 0)::bigint FROM entries WHERE ledger_account_id = $1 AND created_at < $2",
+			ledgerAccountID, *from,
+		).Scan(&balanceBefore)
+		if err != nil {
+			return nil, fmt.Errorf("sum entries before range: %w", err)
+		}
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT date_trunc('day', created_at AT TIME ZONE 'UTC')::date AS day, SUM(amount)::bigint AS delta
+		 FROM entries
+		 WHERE ledger_account_id = $1 AND ($2::timestamptz IS NULL OR created_at >= $2)
+		 GROUP BY 1
+		 ORDER BY 1`,
+		ledgerAccountID, from,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query daily deltas: %w", err)
+	}
+	defer rows.Close()
+
+	points := make([]BalancePoint, 0)
+	if from != nil {
+		points = append(points, BalancePoint{Date: from.Truncate(24 * time.Hour), Balance: balanceBefore})
+	}
+	running := balanceBefore
+	for rows.Next() {
+		var day time.Time
+		var delta int64
+		if err := rows.Scan(&day, &delta); err != nil {
+			return nil, fmt.Errorf("scan daily delta: %w", err)
+		}
+		running += delta
+		points = append(points, BalancePoint{Date: day, Balance: running})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate daily deltas: %w", err)
+	}
+	return points, nil
+}
+
 // rebuildBalance recomputes accountID's balance from the entries log —
 // the source of truth — and overwrites account_balances with the result,
 // fixing any drift between the cache and the log. It locks the ledger

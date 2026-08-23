@@ -242,6 +242,7 @@ func main() {
 	// gateway/proxy.go's newProxy/StripPrefix), so these routes must not
 	// repeat it themselves.
 	http.HandleFunc("GET /me", meAccountHandler(pool, ledgerClient))
+	http.HandleFunc("GET /me/balance-history", balanceHistoryHandler(pool, ledgerClient))
 	http.HandleFunc("GET /{id}", getAccountHandler(pool))
 	http.HandleFunc("PATCH /{id}/status", updateAccountStatusHandler(pool))
 

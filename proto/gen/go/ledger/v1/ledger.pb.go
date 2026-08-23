@@ -698,6 +698,159 @@ func (x *DepositResponse) GetTransactionId() string {
 	return ""
 }
 
+type GetBalanceHistoryRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	AccountId string                 `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	// Inclusive lower bound. Unset means "from the beginning of the
+	// account's history" — ledger-svc has no concept of week/month/all,
+	// that translation happens in the caller (accounts-svc).
+	From          *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=from,proto3" json:"from,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBalanceHistoryRequest) Reset() {
+	*x = GetBalanceHistoryRequest{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBalanceHistoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBalanceHistoryRequest) ProtoMessage() {}
+
+func (x *GetBalanceHistoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBalanceHistoryRequest.ProtoReflect.Descriptor instead.
+func (*GetBalanceHistoryRequest) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *GetBalanceHistoryRequest) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *GetBalanceHistoryRequest) GetFrom() *timestamppb.Timestamp {
+	if x != nil {
+		return x.From
+	}
+	return nil
+}
+
+type GetBalanceHistoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Points        []*BalancePoint        `protobuf:"bytes,1,rep,name=points,proto3" json:"points,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBalanceHistoryResponse) Reset() {
+	*x = GetBalanceHistoryResponse{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBalanceHistoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBalanceHistoryResponse) ProtoMessage() {}
+
+func (x *GetBalanceHistoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBalanceHistoryResponse.ProtoReflect.Descriptor instead.
+func (*GetBalanceHistoryResponse) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *GetBalanceHistoryResponse) GetPoints() []*BalancePoint {
+	if x != nil {
+		return x.Points
+	}
+	return nil
+}
+
+// BalancePoint is one day's closing balance, oldest first. Days with no
+// entries are gaps here, not filled with a repeated value.
+type BalancePoint struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Date          *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=date,proto3" json:"date,omitempty"`
+	Balance       int64                  `protobuf:"varint,2,opt,name=balance,proto3" json:"balance,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BalancePoint) Reset() {
+	*x = BalancePoint{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BalancePoint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BalancePoint) ProtoMessage() {}
+
+func (x *BalancePoint) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BalancePoint.ProtoReflect.Descriptor instead.
+func (*BalancePoint) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *BalancePoint) GetDate() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Date
+	}
+	return nil
+}
+
+func (x *BalancePoint) GetBalance() int64 {
+	if x != nil {
+		return x.Balance
+	}
+	return 0
+}
+
 var File_ledger_v1_ledger_proto protoreflect.FileDescriptor
 
 const file_ledger_v1_ledger_proto_rawDesc = "" +
@@ -746,7 +899,16 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x06amount\x18\x02 \x01(\x03R\x06amount\x12\x1c\n" +
 	"\treference\x18\x03 \x01(\tR\treference\"8\n" +
 	"\x0fDepositResponse\x12%\n" +
-	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId2\xe8\x04\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\"i\n" +
+	"\x18GetBalanceHistoryRequest\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x01 \x01(\tR\taccountId\x12.\n" +
+	"\x04from\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x04from\"L\n" +
+	"\x19GetBalanceHistoryResponse\x12/\n" +
+	"\x06points\x18\x01 \x03(\v2\x17.ledger.v1.BalancePointR\x06points\"X\n" +
+	"\fBalancePoint\x12.\n" +
+	"\x04date\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x04date\x12\x18\n" +
+	"\abalance\x18\x02 \x01(\x03R\abalance2\xc8\x05\n" +
 	"\rLedgerService\x12I\n" +
 	"\n" +
 	"GetBalance\x12\x1c.ledger.v1.GetBalanceRequest\x1a\x1d.ledger.v1.GetBalanceResponse\x12X\n" +
@@ -756,7 +918,8 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x13CreateLedgerAccount\x12%.ledger.v1.CreateLedgerAccountRequest\x1a&.ledger.v1.CreateLedgerAccountResponse\x12v\n" +
 	"\x19GetTransactionByReference\x12+.ledger.v1.GetTransactionByReferenceRequest\x1a,.ledger.v1.GetTransactionByReferenceResponse\x12@\n" +
 	"\aDeposit\x12\x19.ledger.v1.DepositRequest\x1a\x1a.ledger.v1.DepositResponse\x12G\n" +
-	"\x0eReverseDeposit\x12\x19.ledger.v1.DepositRequest\x1a\x1a.ledger.v1.DepositResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
+	"\x0eReverseDeposit\x12\x19.ledger.v1.DepositRequest\x1a\x1a.ledger.v1.DepositResponse\x12^\n" +
+	"\x11GetBalanceHistory\x12#.ledger.v1.GetBalanceHistoryRequest\x1a$.ledger.v1.GetBalanceHistoryResponseB)Z'neobank/proto/gen/go/ledger/v1;ledgerv1b\x06proto3"
 
 var (
 	file_ledger_v1_ledger_proto_rawDescOnce sync.Once
@@ -770,7 +933,7 @@ func file_ledger_v1_ledger_proto_rawDescGZIP() []byte {
 	return file_ledger_v1_ledger_proto_rawDescData
 }
 
-var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_ledger_v1_ledger_proto_goTypes = []any{
 	(*GetBalanceRequest)(nil),                 // 0: ledger.v1.GetBalanceRequest
 	(*GetBalanceResponse)(nil),                // 1: ledger.v1.GetBalanceResponse
@@ -785,31 +948,39 @@ var file_ledger_v1_ledger_proto_goTypes = []any{
 	(*CreateLedgerAccountResponse)(nil),       // 10: ledger.v1.CreateLedgerAccountResponse
 	(*DepositRequest)(nil),                    // 11: ledger.v1.DepositRequest
 	(*DepositResponse)(nil),                   // 12: ledger.v1.DepositResponse
-	(*timestamppb.Timestamp)(nil),             // 13: google.protobuf.Timestamp
+	(*GetBalanceHistoryRequest)(nil),          // 13: ledger.v1.GetBalanceHistoryRequest
+	(*GetBalanceHistoryResponse)(nil),         // 14: ledger.v1.GetBalanceHistoryResponse
+	(*BalancePoint)(nil),                      // 15: ledger.v1.BalancePoint
+	(*timestamppb.Timestamp)(nil),             // 16: google.protobuf.Timestamp
 }
 var file_ledger_v1_ledger_proto_depIdxs = []int32{
 	8,  // 0: ledger.v1.GetHistoryResponse.entries:type_name -> ledger.v1.Entry
-	13, // 1: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
-	13, // 2: ledger.v1.CreateLedgerAccountResponse.created_at:type_name -> google.protobuf.Timestamp
-	0,  // 3: ledger.v1.LedgerService.GetBalance:input_type -> ledger.v1.GetBalanceRequest
-	2,  // 4: ledger.v1.LedgerService.ExecuteTransfer:input_type -> ledger.v1.ExecuteTransferRequest
-	6,  // 5: ledger.v1.LedgerService.GetHistory:input_type -> ledger.v1.GetHistoryRequest
-	9,  // 6: ledger.v1.LedgerService.CreateLedgerAccount:input_type -> ledger.v1.CreateLedgerAccountRequest
-	4,  // 7: ledger.v1.LedgerService.GetTransactionByReference:input_type -> ledger.v1.GetTransactionByReferenceRequest
-	11, // 8: ledger.v1.LedgerService.Deposit:input_type -> ledger.v1.DepositRequest
-	11, // 9: ledger.v1.LedgerService.ReverseDeposit:input_type -> ledger.v1.DepositRequest
-	1,  // 10: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
-	3,  // 11: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
-	7,  // 12: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
-	10, // 13: ledger.v1.LedgerService.CreateLedgerAccount:output_type -> ledger.v1.CreateLedgerAccountResponse
-	5,  // 14: ledger.v1.LedgerService.GetTransactionByReference:output_type -> ledger.v1.GetTransactionByReferenceResponse
-	12, // 15: ledger.v1.LedgerService.Deposit:output_type -> ledger.v1.DepositResponse
-	12, // 16: ledger.v1.LedgerService.ReverseDeposit:output_type -> ledger.v1.DepositResponse
-	10, // [10:17] is the sub-list for method output_type
-	3,  // [3:10] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	16, // 1: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
+	16, // 2: ledger.v1.CreateLedgerAccountResponse.created_at:type_name -> google.protobuf.Timestamp
+	16, // 3: ledger.v1.GetBalanceHistoryRequest.from:type_name -> google.protobuf.Timestamp
+	15, // 4: ledger.v1.GetBalanceHistoryResponse.points:type_name -> ledger.v1.BalancePoint
+	16, // 5: ledger.v1.BalancePoint.date:type_name -> google.protobuf.Timestamp
+	0,  // 6: ledger.v1.LedgerService.GetBalance:input_type -> ledger.v1.GetBalanceRequest
+	2,  // 7: ledger.v1.LedgerService.ExecuteTransfer:input_type -> ledger.v1.ExecuteTransferRequest
+	6,  // 8: ledger.v1.LedgerService.GetHistory:input_type -> ledger.v1.GetHistoryRequest
+	9,  // 9: ledger.v1.LedgerService.CreateLedgerAccount:input_type -> ledger.v1.CreateLedgerAccountRequest
+	4,  // 10: ledger.v1.LedgerService.GetTransactionByReference:input_type -> ledger.v1.GetTransactionByReferenceRequest
+	11, // 11: ledger.v1.LedgerService.Deposit:input_type -> ledger.v1.DepositRequest
+	11, // 12: ledger.v1.LedgerService.ReverseDeposit:input_type -> ledger.v1.DepositRequest
+	13, // 13: ledger.v1.LedgerService.GetBalanceHistory:input_type -> ledger.v1.GetBalanceHistoryRequest
+	1,  // 14: ledger.v1.LedgerService.GetBalance:output_type -> ledger.v1.GetBalanceResponse
+	3,  // 15: ledger.v1.LedgerService.ExecuteTransfer:output_type -> ledger.v1.ExecuteTransferResponse
+	7,  // 16: ledger.v1.LedgerService.GetHistory:output_type -> ledger.v1.GetHistoryResponse
+	10, // 17: ledger.v1.LedgerService.CreateLedgerAccount:output_type -> ledger.v1.CreateLedgerAccountResponse
+	5,  // 18: ledger.v1.LedgerService.GetTransactionByReference:output_type -> ledger.v1.GetTransactionByReferenceResponse
+	12, // 19: ledger.v1.LedgerService.Deposit:output_type -> ledger.v1.DepositResponse
+	12, // 20: ledger.v1.LedgerService.ReverseDeposit:output_type -> ledger.v1.DepositResponse
+	14, // 21: ledger.v1.LedgerService.GetBalanceHistory:output_type -> ledger.v1.GetBalanceHistoryResponse
+	14, // [14:22] is the sub-list for method output_type
+	6,  // [6:14] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_ledger_v1_ledger_proto_init() }
@@ -823,7 +994,7 @@ func file_ledger_v1_ledger_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ledger_v1_ledger_proto_rawDesc), len(file_ledger_v1_ledger_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

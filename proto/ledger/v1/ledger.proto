@@ -47,6 +47,11 @@ service LedgerService {
   // leaves account_id negative (a known MVP limitation, see README). Same
   // idempotency-on-reference contract as Deposit.
   rpc ReverseDeposit(DepositRequest) returns (DepositResponse);
+  // GetBalanceHistory returns a day-aggregated balance series, already
+  // summed server-side — callers must never pull the full entries log to
+  // build a chart client-side. from unset means the account's entire
+  // history.
+  rpc GetBalanceHistory(GetBalanceHistoryRequest) returns (GetBalanceHistoryResponse);
 }
 
 message GetBalanceRequest {
@@ -126,4 +131,23 @@ message DepositRequest {
 
 message DepositResponse {
   string transaction_id = 1;
+}
+
+message GetBalanceHistoryRequest {
+  string account_id = 1;
+  // Inclusive lower bound. Unset means "from the beginning of the
+  // account's history" — ledger-svc has no concept of week/month/all,
+  // that translation happens in the caller (accounts-svc).
+  google.protobuf.Timestamp from = 2;
+}
+
+message GetBalanceHistoryResponse {
+  repeated BalancePoint points = 1;
+}
+
+// BalancePoint is one day's closing balance, oldest first. Days with no
+// entries are gaps here, not filled with a repeated value.
+message BalancePoint {
+  google.protobuf.Timestamp date = 1;
+  int64 balance = 2;
 }

@@ -157,6 +157,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/accounts/me/balance-history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Day-aggregated balance series for the caller's own account, for charting. Already aggregated server-side — never pulls the full entries log to the client. */
+        get: operations["getBalanceHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/transfers": {
         parameters: {
             query?: never;
@@ -293,6 +310,19 @@ export interface components {
             balance: number;
             /** @example EUR */
             currency: string;
+        };
+        BalanceHistoryPoint: {
+            /** Format: date */
+            date: string;
+            /**
+             * Format: int64
+             * @description Closing balance for that day, minor units (cents).
+             */
+            balance: number;
+        };
+        BalanceHistoryResponse: {
+            /** @description Oldest first. */
+            points: components["schemas"]["BalanceHistoryPoint"][];
         };
         CreateTransferRequest: {
             /**
@@ -740,6 +770,49 @@ export interface operations {
             };
             500: components["responses"]["InternalError"];
             /** @description ledger-svc is temporarily unreachable. Deliberately not a 200 with a zero balance — a fake zero is worse than an honest "unavailable" in a banking product. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getBalanceHistory: {
+        parameters: {
+            query: {
+                range: "week" | "month" | "all";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Balance series, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BalanceHistoryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description No account exists for this user. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+            /** @description ledger-svc is temporarily unreachable. Not a 200 with a fabricated series. */
             503: {
                 headers: {
                     [name: string]: unknown;

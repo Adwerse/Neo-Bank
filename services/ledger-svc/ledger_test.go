@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -80,6 +81,21 @@ func insertEntry(t *testing.T, ctx context.Context, pool *pgxpool.Pool, transact
 	)
 	if err != nil {
 		t.Fatalf("insert entry: %v", err)
+	}
+}
+
+// insertEntryAt is insertEntry with an explicit created_at, for tests that
+// need entries spread across specific days — getBalanceHistory's
+// day-bucketing can't otherwise be exercised, since insertEntry (used by
+// ~20 other tests, left untouched here) always lands on the DB's now().
+func insertEntryAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, transactionID, ledgerAccountID string, amount int64, createdAt time.Time) {
+	t.Helper()
+	_, err := pool.Exec(ctx,
+		"INSERT INTO entries (transaction_id, ledger_account_id, amount, created_at) VALUES ($1, $2, $3, $4)",
+		transactionID, ledgerAccountID, amount, createdAt,
+	)
+	if err != nil {
+		t.Fatalf("insert entry at %v: %v", createdAt, err)
 	}
 }
 
@@ -1108,5 +1124,118 @@ func TestReverseDeposit_IsIdempotentByReference(t *testing.T) {
 	}
 	if accountBalance != -800 {
 		t.Errorf("account balance = %d, want -800 (the second call must not have reversed a second time)", accountBalance)
+	}
+}
+
+func TestGetBalanceHistory_AccountNotFound(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	_, err := getBalanceHistory(ctx, pool, randomUUID(t), nil)
+	if !errors.Is(err, ErrLedgerAccountNotFound) {
+		t.Fatalf("getBalanceHistory for a nonexistent account_id = %v, want ErrLedgerAccountNotFound", err)
+	}
+}
+
+func TestGetBalanceHistory_EmptyAccount(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	accountID := randomUUID(t)
+	insertLedgerAccount(t, ctx, pool, accountID)
+
+	points, err := getBalanceHistory(ctx, pool, accountID, nil)
+	if err != nil {
+		t.Fatalf("getBalanceHistory: unexpected error: %v", err)
+	}
+	if len(points) != 0 {
+		t.Errorf("getBalanceHistory for an account with no entries = %d points, want 0", len(points))
+	}
+}
+
+// TestGetBalanceHistory_AllRange exercises day-bucketing with from=nil: two
+// distinct days, the second holding two same-day entries that must collapse
+// into one bucket's delta rather than two points.
+func TestGetBalanceHistory_AllRange(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	testAccountID := randomUUID(t)
+	counterpartyAccountID := randomUUID(t)
+	testLedgerID := insertLedgerAccount(t, ctx, pool, testAccountID)
+	counterpartyLedgerID := insertLedgerAccount(t, ctx, pool, counterpartyAccountID)
+
+	now := time.Now().UTC()
+	day1 := now.AddDate(0, 0, -2)
+	day2 := now.AddDate(0, 0, -1)
+
+	insertEntryAt(t, ctx, pool, randomUUID(t), testLedgerID, 10000, day1)
+	insertEntryAt(t, ctx, pool, randomUUID(t), counterpartyLedgerID, -10000, day1)
+
+	// Two entries on day2 — must net into a single -1000 delta for that day.
+	insertEntryAt(t, ctx, pool, randomUUID(t), testLedgerID, -3000, day2)
+	insertEntryAt(t, ctx, pool, randomUUID(t), counterpartyLedgerID, 3000, day2)
+	insertEntryAt(t, ctx, pool, randomUUID(t), testLedgerID, 2000, day2)
+	insertEntryAt(t, ctx, pool, randomUUID(t), counterpartyLedgerID, -2000, day2)
+
+	points, err := getBalanceHistory(ctx, pool, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("getBalanceHistory: unexpected error: %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("getBalanceHistory = %d points, want 2 (one per distinct day)", len(points))
+	}
+	if points[0].Balance != 10000 {
+		t.Errorf("points[0].Balance = %d, want 10000 (day1's running total)", points[0].Balance)
+	}
+	if points[1].Balance != 9000 {
+		t.Errorf("points[1].Balance = %d, want 9000 (day1's 10000 plus day2's net -1000)", points[1].Balance)
+	}
+	if !points[0].Date.Before(points[1].Date) {
+		t.Errorf("points not ordered oldest-first: %v then %v", points[0].Date, points[1].Date)
+	}
+}
+
+// TestGetBalanceHistory_BoundedRangeIncludesAnchor proves the from-set case:
+// an entry before the window is folded into an anchor point dated at
+// from (not surfaced as its own point), and an entry inside the window
+// produces a second point building on that anchor.
+func TestGetBalanceHistory_BoundedRangeIncludesAnchor(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	testAccountID := randomUUID(t)
+	counterpartyAccountID := randomUUID(t)
+	testLedgerID := insertLedgerAccount(t, ctx, pool, testAccountID)
+	counterpartyLedgerID := insertLedgerAccount(t, ctx, pool, counterpartyAccountID)
+
+	now := time.Now().UTC()
+	before := now.AddDate(0, 0, -10) // outside the range
+	inRange := now.AddDate(0, 0, -1) // inside the range
+
+	insertEntryAt(t, ctx, pool, randomUUID(t), testLedgerID, 5000, before)
+	insertEntryAt(t, ctx, pool, randomUUID(t), counterpartyLedgerID, -5000, before)
+
+	insertEntryAt(t, ctx, pool, randomUUID(t), testLedgerID, 1500, inRange)
+	insertEntryAt(t, ctx, pool, randomUUID(t), counterpartyLedgerID, -1500, inRange)
+
+	from := now.AddDate(0, 0, -7) // excludes `before`, includes `inRange`
+
+	points, err := getBalanceHistory(ctx, pool, testAccountID, &from)
+	if err != nil {
+		t.Fatalf("getBalanceHistory: unexpected error: %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("getBalanceHistory = %d points, want 2 (anchor + the one in-range day)", len(points))
+	}
+	if points[0].Balance != 5000 {
+		t.Errorf("points[0].Balance (anchor) = %d, want 5000 (balance carried into the range)", points[0].Balance)
+	}
+	wantAnchorDate := from.Truncate(24 * time.Hour)
+	if !points[0].Date.Equal(wantAnchorDate) {
+		t.Errorf("points[0].Date = %v, want %v (day-truncated from)", points[0].Date, wantAnchorDate)
+	}
+	if points[1].Balance != 6500 {
+		t.Errorf("points[1].Balance = %d, want 6500 (5000 anchor plus the 1500 in-range entry)", points[1].Balance)
 	}
 }

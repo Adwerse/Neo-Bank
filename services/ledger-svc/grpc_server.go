@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"neobank/pkg/tracing"
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
@@ -145,6 +146,32 @@ func (s *ledgerServer) GetTransactionByReference(ctx context.Context, req *ledge
 		return nil, status.Error(codes.Internal, "internal error")
 	}
 	return &ledgerv1.GetTransactionByReferenceResponse{Found: found, TransactionId: transactionID}, nil
+}
+
+func (s *ledgerServer) GetBalanceHistory(ctx context.Context, req *ledgerv1.GetBalanceHistoryRequest) (*ledgerv1.GetBalanceHistoryResponse, error) {
+	var from *time.Time
+	if req.GetFrom() != nil {
+		t := req.GetFrom().AsTime()
+		from = &t
+	}
+
+	points, err := getBalanceHistory(ctx, s.pool, req.GetAccountId(), from)
+	if errors.Is(err, ErrLedgerAccountNotFound) {
+		return nil, status.Error(codes.NotFound, "ledger account not found")
+	}
+	if err != nil {
+		log.Printf("ledger-svc: GetBalanceHistory: %v", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+
+	resp := &ledgerv1.GetBalanceHistoryResponse{Points: make([]*ledgerv1.BalancePoint, 0, len(points))}
+	for _, p := range points {
+		resp.Points = append(resp.Points, &ledgerv1.BalancePoint{
+			Date:    timestamppb.New(p.Date),
+			Balance: p.Balance,
+		})
+	}
+	return resp, nil
 }
 
 func (s *ledgerServer) CreateLedgerAccount(ctx context.Context, req *ledgerv1.CreateLedgerAccountRequest) (*ledgerv1.CreateLedgerAccountResponse, error) {

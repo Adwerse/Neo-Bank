@@ -26,6 +26,7 @@ const (
 	LedgerService_GetTransactionByReference_FullMethodName = "/ledger.v1.LedgerService/GetTransactionByReference"
 	LedgerService_Deposit_FullMethodName                   = "/ledger.v1.LedgerService/Deposit"
 	LedgerService_ReverseDeposit_FullMethodName            = "/ledger.v1.LedgerService/ReverseDeposit"
+	LedgerService_GetBalanceHistory_FullMethodName         = "/ledger.v1.LedgerService/GetBalanceHistory"
 )
 
 // LedgerServiceClient is the client API for LedgerService service.
@@ -73,6 +74,11 @@ type LedgerServiceClient interface {
 	// leaves account_id negative (a known MVP limitation, see README). Same
 	// idempotency-on-reference contract as Deposit.
 	ReverseDeposit(ctx context.Context, in *DepositRequest, opts ...grpc.CallOption) (*DepositResponse, error)
+	// GetBalanceHistory returns a day-aggregated balance series, already
+	// summed server-side — callers must never pull the full entries log to
+	// build a chart client-side. from unset means the account's entire
+	// history.
+	GetBalanceHistory(ctx context.Context, in *GetBalanceHistoryRequest, opts ...grpc.CallOption) (*GetBalanceHistoryResponse, error)
 }
 
 type ledgerServiceClient struct {
@@ -153,6 +159,16 @@ func (c *ledgerServiceClient) ReverseDeposit(ctx context.Context, in *DepositReq
 	return out, nil
 }
 
+func (c *ledgerServiceClient) GetBalanceHistory(ctx context.Context, in *GetBalanceHistoryRequest, opts ...grpc.CallOption) (*GetBalanceHistoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBalanceHistoryResponse)
+	err := c.cc.Invoke(ctx, LedgerService_GetBalanceHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LedgerServiceServer is the server API for LedgerService service.
 // All implementations must embed UnimplementedLedgerServiceServer
 // for forward compatibility.
@@ -198,6 +214,11 @@ type LedgerServiceServer interface {
 	// leaves account_id negative (a known MVP limitation, see README). Same
 	// idempotency-on-reference contract as Deposit.
 	ReverseDeposit(context.Context, *DepositRequest) (*DepositResponse, error)
+	// GetBalanceHistory returns a day-aggregated balance series, already
+	// summed server-side — callers must never pull the full entries log to
+	// build a chart client-side. from unset means the account's entire
+	// history.
+	GetBalanceHistory(context.Context, *GetBalanceHistoryRequest) (*GetBalanceHistoryResponse, error)
 	mustEmbedUnimplementedLedgerServiceServer()
 }
 
@@ -228,6 +249,9 @@ func (UnimplementedLedgerServiceServer) Deposit(context.Context, *DepositRequest
 }
 func (UnimplementedLedgerServiceServer) ReverseDeposit(context.Context, *DepositRequest) (*DepositResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReverseDeposit not implemented")
+}
+func (UnimplementedLedgerServiceServer) GetBalanceHistory(context.Context, *GetBalanceHistoryRequest) (*GetBalanceHistoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetBalanceHistory not implemented")
 }
 func (UnimplementedLedgerServiceServer) mustEmbedUnimplementedLedgerServiceServer() {}
 func (UnimplementedLedgerServiceServer) testEmbeddedByValue()                       {}
@@ -376,6 +400,24 @@ func _LedgerService_ReverseDeposit_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LedgerService_GetBalanceHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBalanceHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).GetBalanceHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_GetBalanceHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).GetBalanceHistory(ctx, req.(*GetBalanceHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // LedgerService_ServiceDesc is the grpc.ServiceDesc for LedgerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -410,6 +452,10 @@ var LedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReverseDeposit",
 			Handler:    _LedgerService_ReverseDeposit_Handler,
+		},
+		{
+			MethodName: "GetBalanceHistory",
+			Handler:    _LedgerService_GetBalanceHistory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

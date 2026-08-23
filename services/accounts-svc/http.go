@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	ledgerv1 "neobank/proto/gen/go/ledger/v1"
 )
@@ -73,6 +75,78 @@ func meAccountHandler(pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceCli
 			Balance:  balResp.GetBalance(),
 			Currency: defaultCurrency,
 		})
+	}
+}
+
+// balanceHistoryPoint is one day's closing balance, oldest first.
+type balanceHistoryPoint struct {
+	Date    string `json:"date"` // YYYY-MM-DD
+	Balance int64  `json:"balance"`
+}
+
+type balanceHistoryResponse struct {
+	Points []balanceHistoryPoint `json:"points"`
+}
+
+// balanceHistoryHandler translates the week/month/all range a chart asks
+// for into the `from` cutoff ledger-svc's GetBalanceHistory actually wants
+// — ledger-svc itself has no notion of those periods. Same
+// never-fake-a-number contract as meAccountHandler: ledger-svc being
+// unreachable is a 503, never a 200 with an empty or fabricated series.
+func balanceHistoryHandler(pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		userID := r.Header.Get("X-User-Id")
+		if userID == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing X-User-Id header")
+			return
+		}
+
+		var from *timestamppb.Timestamp
+		switch r.URL.Query().Get("range") {
+		case "week":
+			from = timestamppb.New(time.Now().AddDate(0, 0, -7))
+		case "month":
+			from = timestamppb.New(time.Now().AddDate(0, -1, 0))
+		case "all":
+			from = nil
+		default:
+			writeJSONError(w, http.StatusBadRequest, "range must be one of: week, month, all")
+			return
+		}
+
+		acc, found, err := getAccountByUserID(r.Context(), pool, userID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			return
+		}
+		if !found {
+			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		}
+
+		histResp, err := ledgerClient.GetBalanceHistory(r.Context(), &ledgerv1.GetBalanceHistoryRequest{AccountId: acc.ID, From: from})
+		if err != nil {
+			switch status.Code(err) {
+			case codes.Unavailable, codes.DeadlineExceeded:
+				writeJSONError(w, http.StatusServiceUnavailable, "balance history temporarily unavailable")
+			default:
+				writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			}
+			return
+		}
+
+		points := make([]balanceHistoryPoint, 0, len(histResp.GetPoints()))
+		for _, p := range histResp.GetPoints() {
+			points = append(points, balanceHistoryPoint{
+				Date:    p.GetDate().AsTime().Format("2006-01-02"),
+				Balance: p.GetBalance(),
+			})
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(balanceHistoryResponse{Points: points})
 	}
 }
 
