@@ -36,12 +36,17 @@
   border-left: 2px solid transparent;
   font-size: 13px;
   font-family: var(--font-body);
-  color: color-mix(in srgb, var(--color-text) 68%, transparent);
+  color: var(--color-text-muted);
   text-decoration: none;
 }
 
 .navItem:hover {
   background: color-mix(in srgb, var(--color-text) 6%, transparent);
+}
+
+.navItem:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 
 .navItemActive {

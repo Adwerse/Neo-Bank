@@ -8,7 +8,7 @@
   background: var(--color-surface);
   font-size: 10px;
   font-family: var(--font-body);
-  color: color-mix(in srgb, var(--color-text) 65%, transparent);
+  color: var(--color-text-muted);
 }
 
 .dot {
@@ -21,7 +21,7 @@
 .dotLive {
   background: var(--money-in);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--money-in) 25%, transparent);
-  animation: pulse 2s ease-in-out infinite;
+  animation: pulse var(--duration-loop) ease-in-out infinite;
 }
 
 .dotPolling {

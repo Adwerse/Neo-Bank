@@ -7,9 +7,28 @@
   background: var(--color-bg);
   color: var(--color-text);
   font: inherit;
+  transition: border-color var(--duration-fast) ease;
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--color-text-muted);
+}
+
+.input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .input:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
+}
+
+.error,
+.error:hover:not(:disabled) {
+  border-color: var(--color-danger);
+}
+
+.error:focus-visible {
+  outline-color: var(--color-danger);
 }

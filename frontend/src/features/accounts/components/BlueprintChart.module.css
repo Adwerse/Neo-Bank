@@ -38,7 +38,7 @@
 }
 
 .segOptActive {
-  color: var(--color-accent);
+  color: var(--color-accent-text);
   box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
@@ -54,7 +54,7 @@
 .axisLabel {
   font-family: var(--font-mono);
   font-size: 9px;
-  fill: color-mix(in srgb, var(--color-text) 55%, transparent);
+  fill: var(--color-text-muted);
 }
 
 .peakLabel {
@@ -70,7 +70,7 @@
   padding: 4px 2px 0;
   font-family: var(--font-mono);
   font-size: 9px;
-  color: color-mix(in srgb, var(--color-text) 50%, transparent);
+  color: var(--color-text-faint);
 }
 
 .rangeNote {

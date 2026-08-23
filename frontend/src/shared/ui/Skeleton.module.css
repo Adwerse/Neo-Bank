@@ -1,7 +1,7 @@
 .skeleton {
   background: var(--color-surface-hover);
   border-radius: var(--radius);
-  animation: pulse 1.5s ease-in-out infinite;
+  animation: pulse var(--duration-loop) ease-in-out infinite;
 }
 
 @keyframes pulse {
@@ -11,5 +11,11 @@
   }
   50% {
     opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
   }
 }

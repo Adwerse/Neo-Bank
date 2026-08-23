@@ -54,6 +54,21 @@
   --font-body: 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
   --font-sans: var(--font-body);
+
+  /* Durations — the one source of truth for every transition/animation in
+     the app. "fast" is a micro-interaction (hover/active), "base" is an
+     enter/exit transition, "flash" is the one-shot "this value just
+     changed" pulse, "loop" is a continuous ambient animation (skeleton
+     shimmer, live-connection dot), "spin" is the loading-spinner rotation
+     period. */
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --duration-flash: 1500ms;
+  --duration-loop: 2000ms;
+  --duration-spin: 600ms;
+
+  --z-toast: 1000;
+  --z-modal: 1100;
 }
 
 /* Mobile-width default: dark, dense "Terminal" ground. */
@@ -65,12 +80,22 @@
   --color-surface: #232532;
   --color-surface-hover: #2b2e3f;
   --color-text: #e9e9ed;
-  --color-text-muted: color-mix(in srgb, var(--color-text) 55%, transparent);
+  /* 68%/60% — verified by WCAG contrast script against every surface this
+     sits on (bg/surface/surfaceHover): 5.6-7.3:1 and 5.0-5.9:1. The 55%
+     this replaced only just cleared 4.5:1 on surfaceHover (4.51:1), no
+     margin — several components were already dipping below it (42-50%),
+     which is how the light-theme failures below got missed too. */
+  --color-text-muted: color-mix(in srgb, var(--color-text) 68%, transparent);
+  --color-text-faint: color-mix(in srgb, var(--color-text) 60%, transparent);
   --color-border: color-mix(in srgb, var(--color-text) 12%, transparent);
   --color-divider: color-mix(in srgb, var(--color-text) 16%, transparent);
 
   --color-accent-hover: var(--color-accent-400);
   --color-accent-contrast: var(--color-bg);
+  /* Text/border color for anything using the accent as a *label*, not a
+     fill — plain --color-accent fails AA as text in the light theme (see
+     that block below), so this is the theme-aware version to use instead. */
+  --color-accent-text: var(--color-accent);
 
   --color-danger: #f87171;
   --color-danger-bg: #450a0a;
@@ -81,7 +106,7 @@
 
   --money-in: oklch(74% 0.13 152);
   --money-out: oklch(68% 0.15 27);
-  --money-pending: color-mix(in srgb, var(--color-text) 42%, transparent);
+  --money-pending: var(--color-text-faint);
 
   --shadow-sm: 0 0 0 1px #3f424d;
   --shadow-md: 0 0 0 1px #595d6c, 0 6px 18px rgba(0, 0, 0, 0.55);
@@ -99,14 +124,28 @@
   --color-surface: var(--color-neutral-100);
   --color-surface-hover: var(--color-neutral-200);
   --color-text: var(--color-neutral-900);
-  --color-text-muted: color-mix(in srgb, var(--color-text) 55%, transparent);
+  /* Solid colors, not opacity blends — blending a dark color onto this
+     light a background inherently produces low contrast (verified: every
+     opacity from 42% to 65% failed 4.5:1 here, only 68%+ scraped by).
+     neutral-700 and this faint step are picked from the WCAG contrast
+     script: 5.3-6.0:1 and 4.7-5.3:1 against bg/surface/surfaceHover. */
+  --color-text-muted: var(--color-neutral-700);
+  --color-text-faint: #616576;
   --color-border: color-mix(in srgb, var(--color-text) 12%, transparent);
   --color-divider: color-mix(in srgb, var(--color-text) 16%, transparent);
 
   --color-accent-hover: var(--color-accent-600);
   --color-accent-contrast: var(--color-neutral-100);
+  /* Plain --color-accent as text fails AA here (2.6-3.0:1) — accent-700
+     passes (5.5-6.2:1) at the same hue. Any label/border-as-text usage of
+     the accent must go through this token, not --color-accent directly. */
+  --color-accent-text: var(--color-accent-700);
 
-  --color-danger: #dc2626;
+  /* #dc2626 (the original app's danger red, inherited unchanged when this
+     theme was built) fails against its own -bg tint (3.95:1) and the
+     light surface (4.44:1) — never re-verified until now. b91c1c is a
+     well-established AA-safe red at the same hue: 5.3-6.0:1. */
+  --color-danger: #b91c1c;
   --color-danger-bg: #fee2e2;
   --color-warning: #b45309;
   --color-warning-bg: #fef3c7;
@@ -115,7 +154,7 @@
 
   --money-in: oklch(48% 0.13 152);
   --money-out: oklch(52% 0.16 27);
-  --money-pending: color-mix(in srgb, var(--color-text) 42%, transparent);
+  --money-pending: var(--color-text-faint);
 
   --shadow-sm: 0 1px 2px color-mix(in srgb, var(--color-neutral-900) 8%, transparent);
   --shadow-md:

@@ -34,7 +34,7 @@
 .date {
   margin-top: 3px;
   font: 11px var(--font-mono);
-  color: color-mix(in srgb, var(--color-text) 50%, transparent);
+  color: var(--color-text-faint);
 }
 
 .body {

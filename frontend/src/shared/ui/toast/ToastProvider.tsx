@@ -4,13 +4,16 @@ import styles from './ToastProvider.module.css'
 
 const AUTO_DISMISS_MS = 6000
 
+export type ToastVariant = 'info' | 'success' | 'warning' | 'danger'
+
 interface Toast {
   id: number
   message: string
+  variant: ToastVariant
 }
 
 interface ToastContextValue {
-  showToast: (message: string) => void
+  showToast: (message: string, variant?: ToastVariant) => void
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null)
@@ -31,9 +34,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const showToast = useCallback(
-    (message: string) => {
+    (message: string, variant: ToastVariant = 'info') => {
       const id = nextIdRef.current++
-      setToasts((current) => [...current, { id, message }])
+      setToasts((current) => [...current, { id, message, variant }])
       setTimeout(() => dismiss(id), AUTO_DISMISS_MS)
     },
     [dismiss],
@@ -44,7 +47,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div className={styles.stack} role="region" aria-label="Уведомления">
         {toasts.map((toast) => (
-          <div key={toast.id} className={styles.toast} role="status" aria-live="polite">
+          <div
+            key={toast.id}
+            className={[styles.toast, styles[toast.variant]].join(' ')}
+            role="status"
+            aria-live="polite"
+          >
             <span>{toast.message}</span>
             <button
               type="button"
