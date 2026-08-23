@@ -4,10 +4,12 @@ import { useWsConnected } from '../../shared/ws-client/WebSocketProvider'
 import { listTransfers } from '../transfers/api'
 import { computeRunningBalances } from './runningBalance'
 
-// "Enough for a reasonable-looking chart" — GET /transfers has no
-// documented max, so this is a judgment call, not a guarantee. Every
-// consumer already treats the result as "however many points we got," not a
-// fixed count.
+// "Enough for a reasonable-looking recent-operations list and delta stat" —
+// GET /transfers has no documented max, so this is a judgment call, not a
+// guarantee. The balance-over-time chart no longer reads this (see
+// BalanceChart.tsx/useBalanceHistory.ts, backed by a real ledger-svc
+// aggregation instead) — this remains the operations table/list's and the
+// balance-delta stat's data source.
 const LIMIT = 100
 // Same fallback cadence and reasoning as useMe's/useOperationHistory's —
 // only used while the WS is down.

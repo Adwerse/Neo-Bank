@@ -10,75 +10,6 @@
   color: var(--color-text);
 }
 
-.wordmark {
-  font-weight: 600;
-  font-size: 10px;
-  font-family: var(--font-heading);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--color-text-faint);
-}
-
-.topRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.identity {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.avatar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  border: 1.5px solid var(--color-accent-600);
-  background: var(--color-accent-800);
-  color: var(--color-accent-100);
-  font: 600 14px var(--font-heading);
-}
-
-.greetingSmall {
-  font-size: 10.5px;
-  line-height: 1.3;
-  color: var(--color-text-muted);
-}
-
-.greetingName {
-  font: 500 15px/1.3 var(--font-heading);
-}
-
-.bellButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius);
-  border: 1px solid var(--color-divider);
-  background: transparent;
-  color: var(--color-text);
-  cursor: pointer;
-}
-
-.bellButton:hover {
-  background: var(--color-surface-hover);
-}
-
-.balanceRow {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
 .balanceLabel {
   margin-bottom: 4px;
   font-size: 10px;
@@ -91,6 +22,16 @@
   display: flex;
   align-items: baseline;
   --money-hero-size: 30px;
+}
+
+.balanceSkeleton {
+  height: 30px;
+  width: 140px;
+}
+
+.ibanSkeleton {
+  height: 12px;
+  width: 60%;
 }
 
 @keyframes terminal-balance-flash {
@@ -127,11 +68,6 @@
 
 .deltaDown {
   color: var(--money-out);
-}
-
-.sparklineWrap {
-  flex: none;
-  padding-top: 4px;
 }
 
 .identityChips {

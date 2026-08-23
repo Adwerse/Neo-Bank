@@ -76,6 +76,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     // shows up next.
     function invalidateAfterReconnect() {
       batcher.queue(['accounts', 'me'])
+      batcher.queue(['accounts', 'balance-history'])
       batcher.queue(['transfers', 'history'])
     }
 
@@ -87,6 +88,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         switch (message.type) {
           case 'balance.changed':
             batcher.queue(['accounts', 'me'])
+            batcher.queue(['accounts', 'balance-history'])
             break
           case 'transfer.updated':
             // No per-transfer detail cache exists in this app (GET
@@ -187,6 +189,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     isStale,
     refreshNow: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts', 'me'] })
+      queryClient.invalidateQueries({ queryKey: ['accounts', 'balance-history'] })
       queryClient.invalidateQueries({ queryKey: ['transfers', 'history'] })
     },
   }

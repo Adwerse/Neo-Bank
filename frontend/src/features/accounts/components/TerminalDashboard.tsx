@@ -1,89 +1,68 @@
-import { getAccessTokenEmail } from '../../../shared/api-client/jwt'
-import { BellIcon } from '../../../shared/ui/icons'
 import { CopyButton } from '../../../shared/ui/CopyButton'
 import { Money } from '../../../shared/ui/Money'
-import { Sparkline } from '../../../shared/ui/Sparkline'
+import { Skeleton } from '../../../shared/ui/Skeleton'
 import { Tag } from '../../../shared/ui/Tag'
 import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
-import { LiveIndicator } from '../../../shared/ws-client/LiveIndicator'
 import type { MeResponse } from '../api'
-import { getDisplayName } from '../displayName'
 import { computeBalanceDelta } from '../runningBalance'
 import { ACCOUNT_STATUS_LABELS } from '../statusLabels'
 import type { useDashboardOperations } from '../useDashboardOperations'
+import { BalanceChart } from './BalanceChart'
 import { MoneyFlowBar } from './MoneyFlowBar'
 import { QuickActions } from './QuickActions'
 import { TerminalOperationList } from './TerminalOperationList'
 import styles from './TerminalDashboard.module.css'
 
 interface TerminalDashboardProps {
-  account: MeResponse
+  // undefined while useMe() is still loading — each block below skeletons
+  // its own piece of this rather than the whole page waiting on one spinner.
+  account: MeResponse | undefined
   operations: ReturnType<typeof useDashboardOperations>
 }
 
+// Avatar/greeting/bell and LiveIndicator live in MobileShell now — that
+// chrome is the same across every mobile page, not just the dashboard, the
+// same way DesktopShell's header isn't BlueprintDashboard's to own either.
 export function TerminalDashboard({ account, operations }: TerminalDashboardProps) {
-  const balanceFlash = useFlashOnChange(account.balance)
-  const { name, initial } = getDisplayName(getAccessTokenEmail())
   const { entries, balanceBeforeEarliest, isLoading, isError, refetch } = operations
 
   const earliestCreatedAt = entries[entries.length - 1]?.created_at
-  const delta = computeBalanceDelta(account.balance, balanceBeforeEarliest, earliestCreatedAt)
-  const fullSparkline = entries.length > 0 ? [balanceBeforeEarliest, ...[...entries].reverse().map((e) => e.balanceAfter)] : []
+  const delta = account ? computeBalanceDelta(account.balance, balanceBeforeEarliest, earliestCreatedAt) : null
 
   return (
     <div className={styles.screen}>
-      <div className={styles.wordmark}>Neo·Bank</div>
-
-      <div className={styles.topRow}>
-        <div className={styles.identity}>
-          <div className={styles.avatar}>{initial}</div>
-          <div>
-            <div className={styles.greetingSmall}>С возвращением,</div>
-            <div className={styles.greetingName}>{name}</div>
-          </div>
+      <div>
+        <div className={styles.balanceLabel}>Баланс</div>
+        <div className={styles.balanceValueRow}>
+          {account ? <TerminalBalanceValue account={account} /> : <Skeleton className={styles.balanceSkeleton} />}
         </div>
-        <button type="button" className={styles.bellButton} aria-label="Уведомления">
-          <BellIcon size={17} />
-        </button>
-      </div>
-
-      <LiveIndicator />
-
-      <div className={styles.balanceRow}>
-        <div>
-          <div className={styles.balanceLabel}>Баланс</div>
-          <div className={styles.balanceValueRow}>
-            <Money
-              value={account.balance}
-              currency={account.currency}
-              showSign={false}
-              size="hero"
-              className={balanceFlash ? styles.balanceFlash : undefined}
-            />
-          </div>
-          {delta.periodLabel && (
-            <div className={delta.direction === 'down' ? styles.deltaDown : styles.deltaUp}>
-              <span>{delta.direction === 'down' ? '▼' : '▲'}</span>
-              {delta.pct !== null ? (
-                `${delta.pct >= 0 ? '+' : ''}${delta.pct.toFixed(1)}%`
-              ) : (
-                <Money value={delta.absoluteMinorUnits} currency={account.currency} size="compact" />
-              )}{' '}
-              за {delta.periodLabel}
-            </div>
-          )}
-        </div>
-        {fullSparkline.length >= 2 && (
-          <div className={styles.sparklineWrap}>
-            <Sparkline values={fullSparkline} />
+        {account && delta && delta.periodLabel && (
+          <div className={delta.direction === 'down' ? styles.deltaDown : styles.deltaUp}>
+            <span>{delta.direction === 'down' ? '▼' : '▲'}</span>
+            {delta.pct !== null ? (
+              `${delta.pct >= 0 ? '+' : ''}${delta.pct.toFixed(1)}%`
+            ) : (
+              <Money value={delta.absoluteMinorUnits} currency={account.currency} size="compact" />
+            )}{' '}
+            за {delta.periodLabel}
           </div>
         )}
       </div>
 
+      <div className={styles.section}>
+        <BalanceChart account={account} header={<span className={styles.sectionLabel}>Баланс во времени</span>} />
+      </div>
+
       <div id="account-details" className={styles.identityChips}>
-        <Tag variant="accent">{ACCOUNT_STATUS_LABELS[account.status] ?? account.status}</Tag>
-        <span className={styles.iban}>{account.iban}</span>
-        <CopyButton value={account.iban} label="Скопировать IBAN" />
+        {account ? (
+          <>
+            <Tag variant="accent">{ACCOUNT_STATUS_LABELS[account.status] ?? account.status}</Tag>
+            <span className={styles.iban}>{account.iban}</span>
+            <CopyButton value={account.iban} label="Скопировать IBAN" />
+          </>
+        ) : (
+          <Skeleton className={styles.ibanSkeleton} />
+        )}
       </div>
 
       <QuickActions layout="row" />
@@ -95,5 +74,21 @@ export function TerminalDashboard({ account, operations }: TerminalDashboardProp
 
       <TerminalOperationList entries={entries} isLoading={isLoading} isError={isError} onRetry={refetch} />
     </div>
+  )
+}
+
+// Split out so useFlashOnChange only mounts once account is actually
+// loaded — otherwise the undefined-to-first-value transition on initial
+// load would itself register as a "changed" balance and flash on mount.
+function TerminalBalanceValue({ account }: { account: MeResponse }) {
+  const balanceFlash = useFlashOnChange(account.balance)
+  return (
+    <Money
+      value={account.balance}
+      currency={account.currency}
+      showSign={false}
+      size="hero"
+      className={balanceFlash ? styles.balanceFlash : undefined}
+    />
   )
 }

@@ -1,10 +1,11 @@
 import { useEffect } from 'react'
-import { NavLink, Outlet, useNavigate } from 'react-router'
+import { NavLink, Outlet } from 'react-router'
 import { useAuth } from '../features/auth/AuthContext'
 import { ConnectionStatus } from '../shared/ws-client/ConnectionStatus'
 import { IncomingTransferWatcher } from '../features/transfers/IncomingTransferWatcher'
 import { useIsDesktop } from '../shared/ui/useIsDesktop'
 import { DesktopShell } from './DesktopShell'
+import { MobileShell } from './MobileShell'
 import styles from './Layout.module.css'
 
 const navItems = [
@@ -16,8 +17,7 @@ const navItems = [
 ]
 
 export function Layout() {
-  const { status, logout } = useAuth()
-  const navigate = useNavigate()
+  const { status } = useAuth()
   const isDesktop = useIsDesktop()
 
   // Viewport width picks the theme now, not prefers-color-scheme — this is
@@ -27,15 +27,10 @@ export function Layout() {
     document.documentElement.dataset.theme = isDesktop ? 'nocturne-light' : 'nocturne-dark'
   }, [isDesktop])
 
-  async function handleLogout() {
-    await logout()
-    navigate('/login', { replace: true })
-  }
-
-  // The sidebar shell only makes sense for an authenticated session (its
-  // nav and footer both need a logged-in user) — every other combination
-  // (mobile at any auth state, desktop while logged out) keeps the top-bar
-  // chrome below, just re-themed by the effect above.
+  // Both persistent-nav shells only make sense for an authenticated session
+  // (their nav/header both need a logged-in user) — logged-out at any
+  // width keeps the top-bar chrome below, just re-themed by the effect
+  // above.
   if (status === 'authenticated' && isDesktop) {
     return (
       <div className={styles.shell}>
@@ -46,6 +41,20 @@ export function Layout() {
     )
   }
 
+  if (status === 'authenticated') {
+    return (
+      <div className={styles.shell}>
+        <ConnectionStatus />
+        <IncomingTransferWatcher />
+        <MobileShell />
+      </div>
+    )
+  }
+
+  // Reached only while logged out (both authenticated branches above
+  // already returned) — no Logout button, ConnectionStatus, or
+  // IncomingTransferWatcher, since none of those mean anything without a
+  // session.
   return (
     <div className={styles.shell}>
       <header className={styles.header}>
@@ -60,19 +69,8 @@ export function Layout() {
               {item.label}
             </NavLink>
           ))}
-          {status === 'authenticated' && (
-            <button type="button" className={styles.navButton} onClick={handleLogout}>
-              Logout
-            </button>
-          )}
         </nav>
       </header>
-      {status === 'authenticated' && (
-        <>
-          <ConnectionStatus />
-          <IncomingTransferWatcher />
-        </>
-      )}
       <main className={styles.main}>
         <Outlet />
       </main>

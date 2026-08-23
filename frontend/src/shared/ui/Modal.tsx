@@ -15,8 +15,8 @@ interface ModalProps {
 }
 
 // Hand-rolled — no Radix/react-aria/headless-ui in this project, consistent
-// with the rest of shared/ui (icons.tsx, Sparkline, etc. are all hand-rolled
-// too). Not wired into any screen yet; this is the primitive, not a feature.
+// with the rest of shared/ui (icons.tsx, etc. are all hand-rolled too). Not
+// wired into any screen yet; this is the primitive, not a feature.
 export function Modal({ isOpen, onClose, title, children, className }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)

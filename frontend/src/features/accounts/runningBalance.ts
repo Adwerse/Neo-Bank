@@ -21,10 +21,11 @@ export interface RunningBalanceResult {
 }
 
 // GET /accounts/me gives the current, live balance. GET /transfers gives the
-// last N raw operations, newest-first. There is no running-balance field and
-// no history endpoint anywhere in the API, so this is the one place that
-// derives "balance after each row" — by walking backward from the current
-// balance and only undoing entries that actually posted to the ledger.
+// last N raw operations, newest-first. Neither carries a per-row balance
+// (GET /accounts/me/balance-history is day-aggregated, for charting — not
+// this), so this is the one place that derives "balance after each row" —
+// by walking backward from the current balance and only undoing entries
+// that actually posted to the ledger.
 export function computeRunningBalances(
   currentBalanceMinorUnits: number,
   entries: OperationHistoryEntry[],

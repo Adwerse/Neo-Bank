@@ -38,6 +38,11 @@
   color: var(--color-text);
 }
 
+.infoValueSkeleton {
+  height: 12px;
+  width: 60%;
+}
+
 .statusActive {
   color: var(--money-in);
 }
@@ -65,6 +70,16 @@
   display: flex;
   align-items: baseline;
   --money-hero-size: 40px;
+}
+
+.balanceSkeleton {
+  height: 40px;
+  width: 160px;
+}
+
+.ibanSkeleton {
+  height: 12px;
+  width: 70%;
 }
 
 @keyframes blueprint-balance-flash {
