@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useToast } from '../../shared/ui/toast/ToastProvider'
-import { formatMoney } from '../accounts/money'
+import { formatMoney } from '../../shared/money'
 import { useOperationHistory } from './useOperationHistory'
 import type { OperationHistoryEntry } from './api'
 
@@ -30,7 +30,7 @@ export function IncomingTransferWatcher() {
           // No counterparty detail beyond what OperationHistory itself
           // already shows (see TransfersPage) — this is a "something
           // happened, go look" nudge, not a second place to read details.
-          showToast(`Входящий перевод: +${formatMoney(entry.amount, 'EUR')}`)
+          showToast(`Входящий перевод: +${formatMoney(entry.amount, 'EUR')}`, 'success')
         }
       }
     }

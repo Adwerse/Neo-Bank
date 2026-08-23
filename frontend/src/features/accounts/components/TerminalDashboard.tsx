@@ -1,13 +1,13 @@
 import { getAccessTokenEmail } from '../../../shared/api-client/jwt'
 import { BellIcon } from '../../../shared/ui/icons'
 import { CopyButton } from '../../../shared/ui/CopyButton'
+import { Money } from '../../../shared/ui/Money'
 import { Sparkline } from '../../../shared/ui/Sparkline'
 import { Tag } from '../../../shared/ui/Tag'
 import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
 import { LiveIndicator } from '../../../shared/ws-client/LiveIndicator'
 import type { MeResponse } from '../api'
 import { getDisplayName } from '../displayName'
-import { formatMoney } from '../money'
 import { computeBalanceDelta } from '../runningBalance'
 import { ACCOUNT_STATUS_LABELS } from '../statusLabels'
 import type { useDashboardOperations } from '../useDashboardOperations'
@@ -53,16 +53,22 @@ export function TerminalDashboard({ account, operations }: TerminalDashboardProp
         <div>
           <div className={styles.balanceLabel}>Баланс</div>
           <div className={styles.balanceValueRow}>
-            <span className={[styles.balanceValue, balanceFlash && styles.balanceFlash].filter(Boolean).join(' ')}>
-              {formatMoney(account.balance, account.currency)}
-            </span>
+            <Money
+              value={account.balance}
+              currency={account.currency}
+              showSign={false}
+              size="hero"
+              className={balanceFlash ? styles.balanceFlash : undefined}
+            />
           </div>
           {delta.periodLabel && (
             <div className={delta.direction === 'down' ? styles.deltaDown : styles.deltaUp}>
               <span>{delta.direction === 'down' ? '▼' : '▲'}</span>
-              {delta.pct !== null
-                ? `${delta.pct >= 0 ? '+' : ''}${delta.pct.toFixed(1)}%`
-                : formatMoney(delta.absoluteMinorUnits, account.currency)}{' '}
+              {delta.pct !== null ? (
+                `${delta.pct >= 0 ? '+' : ''}${delta.pct.toFixed(1)}%`
+              ) : (
+                <Money value={delta.absoluteMinorUnits} currency={account.currency} size="compact" />
+              )}{' '}
               за {delta.periodLabel}
             </div>
           )}

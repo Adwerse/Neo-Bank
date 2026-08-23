@@ -1,0 +1,54 @@
+/* The one place tabular-nums is declared — a WebSocket-driven balance
+   update must never change the number's width, and a proportional font
+   can't guarantee that. font-mono (IBM Plex Mono) already has true
+   tabular figures, so this holds even without the property, but it's set
+   explicitly per spec and to protect against a future font swap. */
+.money {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hero {
+  font-size: var(--money-hero-size, 32px);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+
+/* No font-size rule here on purpose: font-size already inherits from the
+   ambient context when nothing sets it, and every real "compact" call site
+   passes its own size via className — an explicit inherit here would be a
+   second, order-fragile declaration competing with that className for the
+   same property. */
+
+/* Bold marks a *directional* amount (something moved, or would). A plain
+   neutral display — balance, running-balance column, category total —
+   stays regular weight even at compact size, matching how those read
+   before this component existed: the number that moved is the one that
+   should draw the eye. */
+.in,
+.out,
+.pending {
+  font-weight: 600;
+}
+
+.neutral {
+  color: var(--color-text);
+}
+
+.faint {
+  color: var(--color-text-faint);
+}
+
+.in {
+  color: var(--money-in);
+}
+
+.out {
+  color: var(--money-out);
+}
+
+.pending {
+  color: var(--money-pending);
+}

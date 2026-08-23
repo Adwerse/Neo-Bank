@@ -16,7 +16,7 @@
   font-family: var(--font-heading);
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 45%, transparent);
+  color: var(--color-text-faint);
 }
 
 .topRow {
@@ -48,7 +48,7 @@
 .greetingSmall {
   font-size: 10.5px;
   line-height: 1.3;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-text-muted);
 }
 
 .greetingName {
@@ -84,24 +84,18 @@
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 
 .balanceValueRow {
   display: flex;
   align-items: baseline;
-}
-
-.balanceValue {
-  font: 600 30px/1 var(--font-mono);
-  letter-spacing: -0.01em;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text);
+  --money-hero-size: 30px;
 }
 
 @keyframes terminal-balance-flash {
   0% {
-    color: var(--color-accent);
+    color: var(--color-accent-text);
   }
   100% {
     color: var(--color-text);
@@ -109,7 +103,7 @@
 }
 
 .balanceFlash {
-  animation: terminal-balance-flash 1.5s ease-out;
+  animation: terminal-balance-flash var(--duration-flash) ease-out;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -152,7 +146,7 @@
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0.02em;
-  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  color: var(--color-text-muted);
 }
 
 .section {
@@ -165,5 +159,5 @@
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }

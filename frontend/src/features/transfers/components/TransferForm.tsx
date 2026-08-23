@@ -7,8 +7,8 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Banner } from '../../../shared/ui/Banner'
+import { Money } from '../../../shared/ui/Money'
 import { isApiError } from '../../../shared/api-client/ApiError'
-import { formatMoney } from '../../accounts/money'
 import { createTransfer, type TransferResult } from '../api'
 import { parseAmountToCents } from '../money'
 import { transferSchema, type TransferFormValues } from '../schemas'
@@ -162,15 +162,17 @@ export function TransferForm() {
           {errors.amount && <ErrorText>{errors.amount.message}</ErrorText>}
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? 'Отправка...' : 'Отправить'}
+        <Button type="submit" loading={isSubmitting}>
+          Отправить
         </Button>
       </form>
 
       {result && (
         <div className={styles.result}>
           {result.status === 'completed' && (
-            <Banner variant="success">Перевод выполнен: {formatMoney(result.amount, 'EUR')}.</Banner>
+            <Banner variant="success">
+              Перевод выполнен: <Money value={result.amount} currency="EUR" showSign={false} />.
+            </Banner>
           )}
           {result.status === 'failed' && <Banner variant="danger">{failureReasonMessage(result.failure_reason)}</Banner>}
           {result.status === 'rejected' && (

@@ -1,5 +1,5 @@
+import { Money } from '../../../shared/ui/Money'
 import { computeMoneyFlowBreakdown, type MoneyFlowCategory } from '../moneyFlow'
-import { formatMoney } from '../money'
 import type { OperationHistoryEntry } from '../../transfers/api'
 import styles from './MoneyFlowBar.module.css'
 
@@ -37,7 +37,7 @@ export function MoneyFlowBar({ entries }: MoneyFlowBarProps) {
           <div key={bucket.category} className={styles.legendItem}>
             <span className={styles.dot} style={{ background: CATEGORY_COLOR_VAR[bucket.category] }} />
             <span>{bucket.label}</span>
-            <span className={styles.amount}>{formatMoney(bucket.amountMinorUnits, 'EUR')}</span>
+            <Money value={bucket.amountMinorUnits} currency="EUR" showSign={false} />
           </div>
         ))}
       </div>

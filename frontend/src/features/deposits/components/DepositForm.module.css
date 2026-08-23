@@ -37,16 +37,11 @@
   font-size: 0.875rem;
 }
 
-.currentBalanceValue {
-  font-weight: 600;
-  color: var(--color-text);
-}
-
 /* Same pulse as DashboardPage's balance-flash — kept as a separate
    declaration since CSS Modules scope class names per file. */
 @keyframes deposit-balance-flash {
   0% {
-    color: var(--color-accent);
+    color: var(--color-accent-text);
   }
   100% {
     color: var(--color-text);
@@ -54,7 +49,7 @@
 }
 
 .balanceChanged {
-  animation: deposit-balance-flash 1.5s ease-out;
+  animation: deposit-balance-flash var(--duration-flash) ease-out;
 }
 
 @media (prefers-reduced-motion: reduce) {

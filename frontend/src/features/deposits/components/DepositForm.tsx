@@ -8,9 +8,9 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Banner } from '../../../shared/ui/Banner'
+import { Money } from '../../../shared/ui/Money'
 import { isApiError } from '../../../shared/api-client/ApiError'
 import { useMe } from '../../accounts/useMe'
-import { formatMoney } from '../../accounts/money'
 import { parseAmountToCents } from '../../transfers/money'
 import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
 import { depositSchema, type DepositFormValues } from '../schemas'
@@ -105,8 +105,8 @@ export function DepositForm() {
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
         {step.declineMessage && <Banner variant="danger">{step.declineMessage}</Banner>}
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? 'Создание платежа...' : 'Продолжить'}
+        <Button type="submit" loading={isSubmitting}>
+          Продолжить
         </Button>
       </form>
     </Card>
@@ -168,8 +168,8 @@ function PaymentStep({ onDeclined, onConfirmed, onCancel }: PaymentStepProps) {
       <form className={styles.form} onSubmit={handleConfirm}>
         <PaymentElement />
         <div className={styles.paymentActions}>
-          <Button type="submit" disabled={!stripe || isConfirming}>
-            {isConfirming ? 'Обработка...' : 'Оплатить'}
+          <Button type="submit" disabled={!stripe} loading={isConfirming}>
+            Оплатить
           </Button>
           <Button type="button" variant="secondary" disabled={isConfirming} onClick={onCancel}>
             Изменить сумму
@@ -205,16 +205,18 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
         )}
         {outcome === 'credited' && deposit && (
           <>
-            <Banner variant="success">Баланс пополнен на {formatMoney(deposit.amount, 'EUR')}.</Banner>
+            <Banner variant="success">
+              Баланс пополнен на <Money value={deposit.amount} currency="EUR" showSign={false} />.
+            </Banner>
             {account && (
               <div className={styles.currentBalance}>
                 Текущий баланс:{' '}
-                <span className={[styles.currentBalanceValue, balanceFlash && styles.balanceChanged]
-                  .filter(Boolean)
-                  .join(' ')}
-                >
-                  {formatMoney(account.balance, account.currency)}
-                </span>
+                <Money
+                  value={account.balance}
+                  currency={account.currency}
+                  showSign={false}
+                  className={balanceFlash ? styles.balanceChanged : undefined}
+                />
               </div>
             )}
           </>

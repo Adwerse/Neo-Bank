@@ -1,9 +1,9 @@
 import { CopyButton } from '../../../shared/ui/CopyButton'
 import { CornerBracketPanel } from '../../../shared/ui/CornerBracketPanel'
+import { Money } from '../../../shared/ui/Money'
 import { NumberedBadge } from '../../../shared/ui/NumberedBadge'
 import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
 import type { MeResponse } from '../api'
-import { formatMoney } from '../money'
 import { computeBalanceDelta } from '../runningBalance'
 import { ACCOUNT_STATUS_LABELS } from '../statusLabels'
 import type { useDashboardOperations } from '../useDashboardOperations'
@@ -62,9 +62,13 @@ export function BlueprintDashboard({ account, operations }: BlueprintDashboardPr
         <div className={styles.balancePanel}>
           <NumberedBadge n={1} label="Баланс" />
           <div className={styles.balanceValueRow}>
-            <span className={[styles.balanceValue, balanceFlash && styles.balanceFlash].filter(Boolean).join(' ')}>
-              {formatMoney(account.balance, account.currency)}
-            </span>
+            <Money
+              value={account.balance}
+              currency={account.currency}
+              showSign={false}
+              size="hero"
+              className={balanceFlash ? styles.balanceFlash : undefined}
+            />
           </div>
           <svg className={styles.dimensionLine} viewBox="0 0 220 14" preserveAspectRatio="none" aria-hidden="true">
             <line x1="1" y1="7" x2="219" y2="7" stroke="var(--color-accent)" strokeWidth="1" />
@@ -74,9 +78,11 @@ export function BlueprintDashboard({ account, operations }: BlueprintDashboardPr
           {delta.periodLabel && (
             <div className={delta.direction === 'down' ? styles.deltaDown : styles.deltaUp}>
               <span>{delta.direction === 'down' ? '▼' : '▲'}</span>
-              {delta.pct !== null
-                ? `${delta.pct >= 0 ? '+' : ''}${delta.pct.toFixed(1)}%`
-                : formatMoney(delta.absoluteMinorUnits, account.currency)}{' '}
+              {delta.pct !== null ? (
+                `${delta.pct >= 0 ? '+' : ''}${delta.pct.toFixed(1)}%`
+              ) : (
+                <Money value={delta.absoluteMinorUnits} currency={account.currency} size="compact" />
+              )}{' '}
               за {delta.periodLabel}
             </div>
           )}
