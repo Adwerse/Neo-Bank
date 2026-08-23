@@ -1,11 +1,12 @@
+import { Badge } from '../../../shared/ui/Badge'
 import { Banner } from '../../../shared/ui/Banner'
 import { Button } from '../../../shared/ui/Button'
+import { Money } from '../../../shared/ui/Money'
 import { NumberedBadge } from '../../../shared/ui/NumberedBadge'
 import { Skeleton } from '../../../shared/ui/Skeleton'
 import { Tag } from '../../../shared/ui/Tag'
 import { useChangedRowKeys } from '../../../shared/ui/useChangedRowKeys'
-import { isOutgoing, isPosted, rowKey, STATUS_LABELS, TYPE_LABELS } from '../../transfers/operationLabels'
-import { formatMoney } from '../money'
+import { isOutgoing, isPosted, rowKey, STATUS_LABELS, statusBadgeVariant, TYPE_LABELS } from '../../transfers/operationLabels'
 import type { AnnotatedOperation } from '../runningBalance'
 import styles from './BlueprintOperationTable.module.css'
 
@@ -70,21 +71,27 @@ export function BlueprintOperationTable({ entries, isLoading, isError, onRetry }
                     )}
                   </td>
                   <td className={styles.mono}>{new Date(entry.created_at).toLocaleString('ru-RU')}</td>
-                  <td className={entry.status === 'rejected' || entry.status === 'failed' ? styles.statusBad : styles.status}>
-                    {STATUS_LABELS[entry.status] ?? entry.status}
+                  <td>
+                    <Badge variant={statusBadgeVariant(entry)}>{STATUS_LABELS[entry.status] ?? entry.status}</Badge>
                   </td>
-                  <td
-                    className={[
-                      styles.right,
-                      styles.mono,
-                      posted ? (outgoing ? styles.amountOut : styles.amountIn) : styles.amountPending,
-                    ].join(' ')}
-                  >
-                    {outgoing ? '−' : '+'}
-                    {formatMoney(entry.amount, 'EUR')}
+                  <td className={styles.right}>
+                    <Money
+                      value={outgoing ? -entry.amount : entry.amount}
+                      currency="EUR"
+                      tone={posted ? 'auto' : 'pending'}
+                      size="compact"
+                      className={styles.mono}
+                    />
                   </td>
-                  <td className={[styles.right, styles.mono, styles.balance].join(' ')}>
-                    {formatMoney(entry.balanceAfter, 'EUR')}
+                  <td className={styles.right}>
+                    <Money
+                      value={entry.balanceAfter}
+                      currency="EUR"
+                      showSign={false}
+                      tone="faint"
+                      size="compact"
+                      className={styles.mono}
+                    />
                   </td>
                 </tr>
               )

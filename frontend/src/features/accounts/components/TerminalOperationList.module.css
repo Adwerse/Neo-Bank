@@ -9,7 +9,7 @@
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 
 .columnHeader {
@@ -18,7 +18,7 @@
   font-size: 9.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 45%, transparent);
+  color: var(--color-text-faint);
 }
 
 .colOp {
@@ -29,14 +29,13 @@
 .colAmt {
   flex: 1.2;
   text-align: right;
-  font: 600 12px var(--font-mono);
+  font-size: 12px;
 }
 
 .colBal {
   flex: 1.5;
   text-align: right;
-  font: 11px var(--font-mono);
-  color: color-mix(in srgb, var(--color-text) 50%, transparent);
+  font-size: 11px;
 }
 
 .rows {
@@ -57,7 +56,7 @@
       transparent
     )
     no-repeat bottom / 100% 1px;
-  transition: background-color 0.3s ease;
+  transition: background-color var(--duration-base) ease;
 }
 
 .rowChanged {
@@ -77,25 +76,23 @@
 }
 
 .opMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-top: 2px;
+}
+
+.opMetaText {
   font-size: 9.5px;
   font-family: var(--font-mono);
-  color: color-mix(in srgb, var(--color-text) 50%, transparent);
+  color: var(--color-text-faint);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.amountIn {
-  color: var(--money-in);
-}
-
-.amountOut {
-  color: var(--money-out);
-}
-
-.amountPending {
-  color: var(--money-pending);
+.statusBadge {
+  flex: none;
 }
 
 .skeletons {

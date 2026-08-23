@@ -1,12 +1,13 @@
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { Badge } from '../../../shared/ui/Badge'
 import { Card } from '../../../shared/ui/Card'
 import { Banner } from '../../../shared/ui/Banner'
 import { Button } from '../../../shared/ui/Button'
+import { Money } from '../../../shared/ui/Money'
 import { Skeleton } from '../../../shared/ui/Skeleton'
 import { useChangedRowKeys } from '../../../shared/ui/useChangedRowKeys'
-import { formatMoney } from '../../accounts/money'
 import { useOperationHistory } from '../useOperationHistory'
-import { TYPE_LABELS, STATUS_LABELS, isOutgoing, rowKey } from '../operationLabels'
+import { TYPE_LABELS, STATUS_LABELS, isOutgoing, isPosted, rowKey, statusBadgeVariant } from '../operationLabels'
 import styles from './OperationHistory.module.css'
 
 export function OperationHistory() {
@@ -51,6 +52,7 @@ export function OperationHistory() {
         <ul className={styles.list}>
           {entries.map((entry) => {
             const outgoing = isOutgoing(entry)
+            const posted = isPosted(entry)
             const key = rowKey(entry)
             return (
               <li
@@ -61,14 +63,14 @@ export function OperationHistory() {
                   {TYPE_LABELS[entry.type] ?? entry.type}
                   {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · симуляция</span>}
                 </span>
-                <span className={outgoing ? styles.amountOut : styles.amountIn}>
-                  {outgoing ? '−' : '+'}
-                  {formatMoney(entry.amount, 'EUR')}
-                </span>
+                <Money
+                  value={outgoing ? -entry.amount : entry.amount}
+                  currency="EUR"
+                  tone={posted ? 'auto' : 'pending'}
+                  size="compact"
+                />
                 <span className={styles.counterparty}>{entry.type === 'transfer' ? entry.counterparty_iban : '—'}</span>
-                <span className={[styles.status, entry.status === 'rejected' ? styles.rejected : ''].filter(Boolean).join(' ')}>
-                  {STATUS_LABELS[entry.status] ?? entry.status}
-                </span>
+                <Badge variant={statusBadgeVariant(entry)}>{STATUS_LABELS[entry.status] ?? entry.status}</Badge>
                 <span className={styles.date}>{new Date(entry.created_at).toLocaleString('ru-RU')}</span>
               </li>
             )

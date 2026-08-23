@@ -51,3 +51,25 @@ export function isPosted(entry: OperationHistoryEntry): boolean {
 export function rowKey(entry: OperationHistoryEntry): string {
   return `${entry.type}-${entry.id}`
 }
+
+export type StatusBadgeVariant = 'success' | 'warning' | 'danger' | 'pending'
+
+// Exhaustive over every STATUS_LABELS key. 'succeeded' (a deposit Stripe
+// confirmed but the ledger hasn't credited yet) maps to 'pending', not
+// 'success' — see isPosted's doc comment for why that status isn't done
+// yet. 'refunded' maps to 'warning': it's a reversal, not a failure, but
+// also not the entry's original success outcome.
+const STATUS_BADGE_VARIANT: Record<string, StatusBadgeVariant> = {
+  pending: 'pending',
+  completed: 'success',
+  failed: 'danger',
+  rejected: 'danger',
+  succeeded: 'pending',
+  credited: 'success',
+  refunded: 'warning',
+  payout_simulated: 'success',
+}
+
+export function statusBadgeVariant(entry: OperationHistoryEntry): StatusBadgeVariant {
+  return STATUS_BADGE_VARIANT[entry.status] ?? 'pending'
+}

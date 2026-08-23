@@ -29,7 +29,7 @@
   font: 9px var(--font-mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-text-muted);
 }
 
 .table th:last-child {
@@ -48,7 +48,7 @@
 }
 
 .table tbody tr {
-  transition: background-color 0.3s ease;
+  transition: background-color var(--duration-base) ease;
 }
 
 .rowChanged td {
@@ -59,7 +59,7 @@
   width: 36px;
   font-family: var(--font-mono);
   font-size: 11px;
-  color: color-mix(in srgb, var(--color-text) 45%, transparent);
+  color: var(--color-text-faint);
 }
 
 .right {
@@ -72,36 +72,7 @@
 }
 
 .counterparty {
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
-}
-
-.status {
-  font-size: 11px;
-  color: color-mix(in srgb, var(--color-text) 65%, transparent);
-}
-
-.statusBad {
-  font-size: 11px;
-  color: var(--money-out);
-}
-
-.amountIn {
-  color: var(--money-in);
-  font-weight: 600;
-}
-
-.amountOut {
-  color: var(--money-out);
-  font-weight: 600;
-}
-
-.amountPending {
-  color: var(--money-pending);
-  font-weight: 600;
-}
-
-.balance {
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-text-muted);
 }
 
 .skeletons {

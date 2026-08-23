@@ -1,11 +1,12 @@
+import { Badge } from '../../../shared/ui/Badge'
 import { Banner } from '../../../shared/ui/Banner'
 import { Button } from '../../../shared/ui/Button'
+import { Money } from '../../../shared/ui/Money'
 import { Skeleton } from '../../../shared/ui/Skeleton'
 import { Tag } from '../../../shared/ui/Tag'
 import { useChangedRowKeys } from '../../../shared/ui/useChangedRowKeys'
-import { isOutgoing, isPosted, rowKey, STATUS_LABELS, TYPE_LABELS } from '../../transfers/operationLabels'
+import { isOutgoing, isPosted, rowKey, STATUS_LABELS, statusBadgeVariant, TYPE_LABELS } from '../../transfers/operationLabels'
 import { formatRelativeTime } from '../../transfers/relativeTime'
-import { formatMoney } from '../money'
 import type { AnnotatedOperation } from '../runningBalance'
 import styles from './TerminalOperationList.module.css'
 
@@ -59,7 +60,6 @@ export function TerminalOperationList({ entries, isLoading, isError, onRetry }: 
               const key = rowKey(entry)
               const metaParts = [
                 entry.type === 'transfer' ? entry.counterparty_iban : undefined,
-                posted ? undefined : STATUS_LABELS[entry.status] ?? entry.status,
                 formatRelativeTime(entry.created_at),
               ].filter(Boolean)
 
@@ -73,17 +73,30 @@ export function TerminalOperationList({ entries, isLoading, isError, onRetry }: 
                       {TYPE_LABELS[entry.type] ?? entry.type}
                       {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · симуляция</span>}
                     </div>
-                    <div className={styles.opMeta}>{metaParts.join(' · ')}</div>
+                    <div className={styles.opMeta}>
+                      <span className={styles.opMetaText}>{metaParts.join(' · ')}</span>
+                      {!posted && (
+                        <Badge variant={statusBadgeVariant(entry)} className={styles.statusBadge}>
+                          {STATUS_LABELS[entry.status] ?? entry.status}
+                        </Badge>
+                      )}
+                    </div>
                   </div>
-                  <div
-                    className={[styles.colAmt, posted ? (outgoing ? styles.amountOut : styles.amountIn) : styles.amountPending].join(
-                      ' ',
-                    )}
-                  >
-                    {outgoing ? '−' : '+'}
-                    {formatMoney(entry.amount, 'EUR')}
-                  </div>
-                  <div className={styles.colBal}>{formatMoney(entry.balanceAfter, 'EUR')}</div>
+                  <Money
+                    value={outgoing ? -entry.amount : entry.amount}
+                    currency="EUR"
+                    tone={posted ? 'auto' : 'pending'}
+                    size="compact"
+                    className={styles.colAmt}
+                  />
+                  <Money
+                    value={entry.balanceAfter}
+                    currency="EUR"
+                    showSign={false}
+                    tone="faint"
+                    size="compact"
+                    className={styles.colBal}
+                  />
                 </li>
               )
             })}
