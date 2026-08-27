@@ -4,6 +4,7 @@ import { getAccessTokenEmail } from '../shared/api-client/jwt'
 import { getDisplayName } from '../features/accounts/displayName'
 import { ArrowUpRightIcon, BellIcon, HomeIcon, PlusCircleIcon } from '../shared/ui/icons'
 import { LiveIndicator } from '../shared/ws-client/LiveIndicator'
+import { PageTransition } from '../shared/ui/PageTransition'
 import styles from './MobileShell.module.css'
 
 // Same three destinations as Sidebar.tsx's persistent nav — Реквизиты is
@@ -54,7 +55,9 @@ export function MobileShell() {
       <LiveIndicator />
 
       <div className={styles.body}>
-        <Outlet />
+        <PageTransition>
+          <Outlet />
+        </PageTransition>
       </div>
 
       <nav className={styles.tabBar}>

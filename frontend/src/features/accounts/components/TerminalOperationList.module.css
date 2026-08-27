@@ -56,11 +56,26 @@
       transparent
     )
     no-repeat bottom / 100% 1px;
-  transition: background-color var(--duration-base) ease;
+}
+
+@keyframes terminal-row-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
 }
 
 .rowChanged {
-  background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  animation: terminal-row-flash var(--duration-flash) ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rowChanged {
+    animation: none;
+    background-color: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
 }
 
 .opName {

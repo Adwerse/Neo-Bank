@@ -2,6 +2,7 @@ import { Outlet } from 'react-router'
 import { getAccessTokenEmail } from '../shared/api-client/jwt'
 import { getDisplayName } from '../features/accounts/displayName'
 import { LiveIndicator } from '../shared/ws-client/LiveIndicator'
+import { PageTransition } from '../shared/ui/PageTransition'
 import { Sidebar } from './Sidebar'
 import styles from './DesktopShell.module.css'
 
@@ -30,7 +31,9 @@ export function DesktopShell() {
             (and self-centers past its own 1400px cap on very wide
             screens). */}
         <div className={styles.body}>
-          <Outlet />
+          <PageTransition>
+            <Outlet />
+          </PageTransition>
         </div>
       </div>
     </div>

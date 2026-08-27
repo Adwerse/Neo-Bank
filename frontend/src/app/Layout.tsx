@@ -4,6 +4,7 @@ import { useAuth } from '../features/auth/AuthContext'
 import { ConnectionStatus } from '../shared/ws-client/ConnectionStatus'
 import { IncomingTransferWatcher } from '../features/transfers/IncomingTransferWatcher'
 import { useIsDesktop } from '../shared/ui/useIsDesktop'
+import { PageTransition } from '../shared/ui/PageTransition'
 import { DesktopShell } from './DesktopShell'
 import { MobileShell } from './MobileShell'
 import styles from './Layout.module.css'
@@ -72,7 +73,9 @@ export function Layout() {
         </nav>
       </header>
       <main className={styles.main}>
-        <Outlet />
+        <PageTransition>
+          <Outlet />
+        </PageTransition>
       </main>
     </div>
   )

@@ -50,6 +50,7 @@
 @media (prefers-reduced-motion: reduce) {
   .balanceFlash {
     animation: none;
+    color: var(--color-accent-text);
   }
 }
 

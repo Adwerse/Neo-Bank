@@ -47,12 +47,24 @@
   border-right: none;
 }
 
-.table tbody tr {
-  transition: background-color var(--duration-base) ease;
+@keyframes blueprint-row-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
 }
 
 .rowChanged td {
-  background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  animation: blueprint-row-flash var(--duration-flash) ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rowChanged td {
+    animation: none;
+    background-color: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
 }
 
 .colNo {

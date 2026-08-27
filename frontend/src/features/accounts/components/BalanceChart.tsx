@@ -4,6 +4,7 @@ import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'rec
 import { Link } from 'react-router'
 import buttonStyles from '../../../shared/ui/Button.module.css'
 import { Skeleton } from '../../../shared/ui/Skeleton'
+import { usePrefersReducedMotion } from '../../../shared/ui/usePrefersReducedMotion'
 import { formatMoney } from '../../../shared/money'
 import type { BalanceHistoryRange, BalanceHistoryResponse, MeResponse } from '../api'
 import { useBalanceHistory } from '../useBalanceHistory'
@@ -59,6 +60,7 @@ interface BalanceChartProps {
 export function BalanceChart({ account, header }: BalanceChartProps) {
   const [range, setRange] = useState<BalanceHistoryRange>('week')
   const { data, isLoading, isError, refetch } = useBalanceHistory(range)
+  const reducedMotion = usePrefersReducedMotion()
 
   const points = useMemo(() => extendToToday(data?.points ?? []), [data])
   // A window where every visible point is 0 reads as an empty chart to the
@@ -91,6 +93,7 @@ export function BalanceChart({ account, header }: BalanceChartProps) {
         onRetry={refetch}
         points={points}
         isEmpty={isEmpty}
+        reducedMotion={reducedMotion}
       />
     </div>
   )
@@ -103,9 +106,10 @@ interface BalanceChartBodyProps {
   onRetry: () => void
   points: BalancePoint[]
   isEmpty: boolean
+  reducedMotion: boolean
 }
 
-function BalanceChartBody({ account, isLoading, isError, onRetry, points, isEmpty }: BalanceChartBodyProps) {
+function BalanceChartBody({ account, isLoading, isError, onRetry, points, isEmpty, reducedMotion }: BalanceChartBodyProps) {
   if (!account || isLoading) {
     return <Skeleton className={styles.skeletonChart} />
   }
@@ -179,6 +183,7 @@ function BalanceChartBody({ account, isLoading, isError, onRetry, points, isEmpt
           stroke="var(--color-accent)"
           strokeWidth={2}
           fill="url(#balance-chart-fill)"
+          isAnimationActive={!reducedMotion}
         />
       </AreaChart>
     </ResponsiveContainer>

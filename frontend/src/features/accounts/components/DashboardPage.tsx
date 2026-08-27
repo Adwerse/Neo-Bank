@@ -1,6 +1,7 @@
 import { Banner } from '../../../shared/ui/Banner'
 import { Button } from '../../../shared/ui/Button'
 import { Card } from '../../../shared/ui/Card'
+import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { useIsDesktop } from '../../../shared/ui/useIsDesktop'
 import { useScrollToHash } from '../../../shared/ui/useScrollToHash'
 import { getAccountErrorMessage } from '../errorMessages'
@@ -11,6 +12,7 @@ import styles from './DashboardPage.module.css'
 import { TerminalDashboard } from './TerminalDashboard'
 
 export function DashboardPage() {
+  useDocumentTitle('Главная')
   const { data, isError, error, refetch } = useMe()
   const isDesktop = useIsDesktop()
   // Called unconditionally (before the isError early return below) per the

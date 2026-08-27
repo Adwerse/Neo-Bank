@@ -95,6 +95,7 @@ export function TerminalOperationList({ entries, isLoading, isError, onRetry }: 
                     showSign={false}
                     tone="faint"
                     size="compact"
+                    label="Баланс после операции"
                     className={styles.colBal}
                   />
                 </li>

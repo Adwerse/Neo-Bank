@@ -37,7 +37,7 @@ export function MoneyFlowBar({ entries }: MoneyFlowBarProps) {
           <div key={bucket.category} className={styles.legendItem}>
             <span className={styles.dot} style={{ background: CATEGORY_COLOR_VAR[bucket.category] }} />
             <span>{bucket.label}</span>
-            <Money value={bucket.amountMinorUnits} currency="EUR" showSign={false} />
+            <Money value={bucket.amountMinorUnits} currency="EUR" showSign={false} label={bucket.label} />
           </div>
         ))}
       </div>

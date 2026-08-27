@@ -90,6 +90,7 @@ export function BlueprintOperationTable({ entries, isLoading, isError, onRetry }
                       showSign={false}
                       tone="faint"
                       size="compact"
+                      label="Баланс после операции"
                       className={styles.mono}
                     />
                   </td>

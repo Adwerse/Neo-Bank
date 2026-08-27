@@ -146,6 +146,7 @@ function BlueprintBalanceValue({ account }: { account: MeResponse }) {
       currency={account.currency}
       showSign={false}
       size="hero"
+      label="Баланс"
       className={balanceFlash ? styles.balanceFlash : undefined}
     />
   )

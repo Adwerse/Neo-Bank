@@ -9,7 +9,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-4);
+  padding: calc(var(--space-4) + env(safe-area-inset-top, 0px)) var(--space-4) var(--space-4);
 }
 
 .identity {
@@ -59,6 +59,11 @@
   background: var(--color-surface-hover);
 }
 
+.bellButton:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
 .headerActions {
   display: flex;
   align-items: center;
@@ -77,6 +82,11 @@
 
 .logoutButton:hover {
   color: var(--color-text);
+}
+
+.logoutButton:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 /* 60px is the bottom tab bar's own rendered height (padding + icon + label);
@@ -100,6 +110,8 @@
   border-top: 1px solid var(--color-divider);
   background: var(--color-surface);
   padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
 .tab {
@@ -111,6 +123,11 @@
   padding: 8px 0 10px;
   color: var(--color-text-muted);
   text-decoration: none;
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 
 .tabActive {
