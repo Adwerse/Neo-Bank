@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQueryClient } from '@tanstack/react-query'
@@ -103,6 +103,23 @@ export function TransferForm() {
   // the API is actually called (still only from handleConfirm/Повторить).
   const [reviewValues, setReviewValues] = useState<TransferFormValues | null>(null)
 
+  // The review and result "steps" are different JSX trees rendered by the
+  // same component instance, not separate routes — a browser drops focus
+  // to <body> when the previously-focused element (the "Продолжить"/
+  // "Подтвердить" button) is removed from the DOM by that swap, which
+  // would strand a keyboard user back at the top of the page. These two
+  // effects re-land focus on the new step's primary element instead.
+  const reviewButtonRef = useRef<HTMLButtonElement>(null)
+  const resultRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (reviewValues && !result) reviewButtonRef.current?.focus()
+  }, [reviewValues, result])
+
+  useEffect(() => {
+    if (result) resultRef.current?.focus()
+  }, [result])
+
   const {
     control,
     register,
@@ -178,17 +195,23 @@ export function TransferForm() {
           </div>
           <div className={styles.reviewRow}>
             <span className={styles.reviewLabel}>Отправится</span>
-            <Money value={-amountCents} currency="EUR" size="hero" />
+            <Money value={-amountCents} currency="EUR" size="hero" label="Отправится" />
           </div>
           {account && (
             <div className={styles.reviewRow}>
               <span className={styles.reviewLabel}>Останется на счёте</span>
-              <Money value={account.balance - amountCents} currency={account.currency} showSign={false} tone="neutral" />
+              <Money
+                value={account.balance - amountCents}
+                currency={account.currency}
+                showSign={false}
+                tone="neutral"
+                label="Останется на счёте"
+              />
             </div>
           )}
           {serverError && <ErrorText>{serverError}</ErrorText>}
           <div className={styles.reviewActions}>
-            <Button type="button" loading={isSubmitting} onClick={() => onSubmit(reviewValues)}>
+            <Button ref={reviewButtonRef} type="button" loading={isSubmitting} onClick={() => onSubmit(reviewValues)}>
               Подтвердить и отправить
             </Button>
             <Button type="button" variant="secondary" disabled={isSubmitting} onClick={handleBackToForm}>
@@ -218,7 +241,8 @@ export function TransferForm() {
               </label>
               {!accountLoading && !accountError && account && (
                 <span className={styles.available}>
-                  Доступно: <Money value={account.balance} currency={account.currency} showSign={false} tone="faint" />
+                  Доступно:{' '}
+                  <Money value={account.balance} currency={account.currency} showSign={false} tone="faint" label="Доступно" />
                 </span>
               )}
               {accountError && <span className={styles.available}>Баланс временно недоступен</span>}
@@ -228,9 +252,11 @@ export function TransferForm() {
               inputMode="decimal"
               placeholder="0.00"
               className={styles.amountInput}
+              error={Boolean(errors.amount)}
+              aria-describedby={errors.amount ? 'amount-error' : undefined}
               {...register('amount')}
             />
-            {errors.amount && <ErrorText>{errors.amount.message}</ErrorText>}
+            {errors.amount && <ErrorText id="amount-error">{errors.amount.message}</ErrorText>}
           </div>
           {serverError && <ErrorText>{serverError}</ErrorText>}
           <Button type="submit" loading={isSubmitting}>
@@ -240,10 +266,11 @@ export function TransferForm() {
       )}
 
       {result && (
-        <div className={styles.result}>
+        <div className={styles.result} ref={resultRef} tabIndex={-1}>
           {result.status === 'completed' && (
             <Banner variant="success">
-              Перевод выполнен: <Money value={result.amount} currency="EUR" showSign={false} />.
+              Перевод выполнен:{' '}
+              <Money value={result.amount} currency="EUR" showSign={false} label="Сумма перевода" />.
             </Banner>
           )}
           {result.status === 'failed' && <Banner variant="danger">{failureReasonMessage(result.failure_reason)}</Banner>}
@@ -267,7 +294,7 @@ export function TransferForm() {
             <Button
               variant="secondary"
               type="button"
-              disabled={isSubmitting}
+              loading={isSubmitting}
               className={styles.newTransferButton}
               onClick={() => reviewValues && onSubmit(reviewValues)}
             >

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { isApiError } from '../../../shared/api-client/ApiError'
 import { Badge } from '../../../shared/ui/Badge'
 import { Card } from '../../../shared/ui/Card'
@@ -8,6 +8,7 @@ import { Money } from '../../../shared/ui/Money'
 import { Skeleton } from '../../../shared/ui/Skeleton'
 import { useChangedRowKeys } from '../../../shared/ui/useChangedRowKeys'
 import { useOperationHistory } from '../useOperationHistory'
+import type { OperationHistoryEntry } from '../api'
 import { TYPE_LABELS, STATUS_LABELS, isOutgoing, isPosted, rowKey, statusBadgeVariant } from '../operationLabels'
 import {
   applyFilters,
@@ -66,8 +67,37 @@ function FilterGroup<T extends string>({
   )
 }
 
+// Memoized on (entry, changed) alone, deliberately not the whole
+// changedKeys Set — React Query's structural sharing keeps an unaffected
+// entry's object reference stable across a WS-driven refetch, so a row
+// whose data and changed-flag are both unchanged skips re-rendering
+// entirely instead of the whole list repainting on every push.
+const OperationRow = memo(function OperationRow({ entry, changed }: { entry: OperationHistoryEntry; changed: boolean }) {
+  const outgoing = isOutgoing(entry)
+  const posted = isPosted(entry)
+  return (
+    <li className={[styles.row, changed && styles.rowChanged].filter(Boolean).join(' ')}>
+      <span className={styles.typeBadge}>
+        {TYPE_LABELS[entry.type] ?? entry.type}
+        {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · симуляция</span>}
+      </span>
+      <Money
+        value={outgoing ? -entry.amount : entry.amount}
+        currency="EUR"
+        tone={posted ? 'auto' : 'pending'}
+        size="compact"
+      />
+      <span className={styles.counterparty}>{entry.type === 'transfer' ? entry.counterparty_iban : '—'}</span>
+      <Badge variant={statusBadgeVariant(entry)}>{STATUS_LABELS[entry.status] ?? entry.status}</Badge>
+      <span className={styles.date}>
+        {new Date(entry.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+      </span>
+    </li>
+  )
+})
+
 export function OperationHistory() {
-  const { data, isLoading, isError, error, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, error, refetch, isRefetching, fetchNextPage, hasNextPage, isFetchingNextPage } =
     useOperationHistory()
   const [filters, setFilters] = useState<OperationFilters>(DEFAULT_FILTERS)
   const [nextPageError, setNextPageError] = useState(false)
@@ -132,7 +162,7 @@ export function OperationHistory() {
       <Card>
         <h2>История операций</h2>
         <Banner variant="warning">{message}</Banner>
-        <Button className={styles.retryButton} onClick={() => refetch()}>
+        <Button className={styles.retryButton} loading={isRefetching} onClick={() => refetch()}>
           Повторить
         </Button>
       </Card>
@@ -175,33 +205,8 @@ export function OperationHistory() {
               <h3 className={styles.groupLabel}>{group.label}</h3>
               <ul className={styles.list}>
                 {group.entries.map((entry) => {
-                  const outgoing = isOutgoing(entry)
-                  const posted = isPosted(entry)
                   const key = rowKey(entry)
-                  return (
-                    <li
-                      key={key}
-                      className={[styles.row, changedKeys.has(key) && styles.rowChanged].filter(Boolean).join(' ')}
-                    >
-                      <span className={styles.typeBadge}>
-                        {TYPE_LABELS[entry.type] ?? entry.type}
-                        {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · симуляция</span>}
-                      </span>
-                      <Money
-                        value={outgoing ? -entry.amount : entry.amount}
-                        currency="EUR"
-                        tone={posted ? 'auto' : 'pending'}
-                        size="compact"
-                      />
-                      <span className={styles.counterparty}>
-                        {entry.type === 'transfer' ? entry.counterparty_iban : '—'}
-                      </span>
-                      <Badge variant={statusBadgeVariant(entry)}>{STATUS_LABELS[entry.status] ?? entry.status}</Badge>
-                      <span className={styles.date}>
-                        {new Date(entry.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </li>
-                  )
+                  return <OperationRow key={key} entry={entry} changed={changedKeys.has(key)} />
                 })}
               </ul>
             </section>

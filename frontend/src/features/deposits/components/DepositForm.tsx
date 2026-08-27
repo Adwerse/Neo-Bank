@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js'
@@ -112,9 +113,12 @@ export function DepositForm() {
             inputMode="decimal"
             placeholder="0.00"
             className={styles.amountInput}
+            autoFocus
+            error={Boolean(errors.amount)}
+            aria-describedby={errors.amount ? 'amount-error' : undefined}
             {...register('amount')}
           />
-          {errors.amount && <ErrorText>{errors.amount.message}</ErrorText>}
+          {errors.amount && <ErrorText id="amount-error">{errors.amount.message}</ErrorText>}
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
         {step.declineMessage && <Banner variant="danger">{step.declineMessage}</Banner>}
@@ -139,6 +143,14 @@ function PaymentStep({ onDeclined, onConfirmed, onCancel }: PaymentStepProps) {
   const stripe = useStripe()
   const elements = useElements()
   const [isConfirming, setIsConfirming] = useState(false)
+  // This step is a genuinely separate component instance each time it
+  // mounts (DepositForm swaps its whole return value between steps), so a
+  // plain mount-effect lands focus here exactly once per entry — same
+  // reasoning as TransferForm's step-transition focus management.
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    headingRef.current?.focus()
+  }, [])
 
   async function handleConfirm(e: FormEvent) {
     e.preventDefault()
@@ -177,7 +189,9 @@ function PaymentStep({ onDeclined, onConfirmed, onCancel }: PaymentStepProps) {
 
   return (
     <Card>
-      <h2>Оплата картой</h2>
+      <h2 ref={headingRef} tabIndex={-1} className={styles.focusableHeading}>
+        Оплата картой
+      </h2>
       <form className={styles.form} onSubmit={handleConfirm}>
         <PaymentElement />
         <div className={styles.paymentActions}>
@@ -220,11 +234,30 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
   const { data: account, isError: accountError } = useMe()
   const balanceFlash = useFlashOnChange(account?.balance)
 
+  // Same step-transition focus problem as PaymentStep, plus a second
+  // case unique to this step: it stays mounted for the whole
+  // polling -> credited/failed/timed_out span, so reaching a terminal
+  // outcome doesn't remount anything — without this second effect a
+  // keyboard/screen-reader user would never be told the wait is over.
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const resultRef = useRef<HTMLDivElement>(null)
+  const isResolved = outcome === 'credited' || outcome === 'failed' || outcome === 'timed_out'
+
+  useEffect(() => {
+    headingRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    if (isResolved) resultRef.current?.focus()
+  }, [isResolved])
+
   return (
     <Card>
-      <h2>Пополнение счёта</h2>
+      <h2 ref={headingRef} tabIndex={-1} className={styles.focusableHeading}>
+        Пополнение счёта
+      </h2>
       <DepositProgress outcome={outcome} />
-      <div className={styles.result}>
+      <div className={styles.result} ref={resultRef} tabIndex={-1}>
         {outcome === 'polling' && (
           <Banner variant="warning">Платёж принят, зачисление в течение минуты…</Banner>
         )}
@@ -237,7 +270,8 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
         {outcome === 'credited' && deposit && (
           <>
             <Banner variant="success">
-              Баланс пополнен на <Money value={deposit.amount} currency="EUR" showSign={false} />.
+              Баланс пополнен на{' '}
+              <Money value={deposit.amount} currency="EUR" showSign={false} label="Сумма пополнения" />.
             </Banner>
             {account && (
               <div className={styles.currentBalance}>
@@ -246,6 +280,7 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
                   value={account.balance}
                   currency={account.currency}
                   showSign={false}
+                  label="Текущий баланс"
                   className={balanceFlash ? styles.balanceChanged : undefined}
                 />
               </div>

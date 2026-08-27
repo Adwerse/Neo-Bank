@@ -60,6 +60,11 @@ export function IbanField({ control }: IbanFieldProps) {
   // still fires regardless, this is just the live-typing hint on top.
   const showLiveError = isTouched && trimmed.length > 0 && liveError !== null && !error
 
+  // Exactly one of these three is ever shown at a time, so a single
+  // aria-describedby always points at whichever message is currently
+  // rendered (or nothing, if the field is untouched and empty).
+  const describedBy = error ? 'recipientIban-error' : showLiveError ? 'recipientIban-live-error' : showValid ? 'recipientIban-valid' : undefined
+
   return (
     <div className={styles.wrapper}>
       <Input
@@ -70,19 +75,21 @@ export function IbanField({ control }: IbanFieldProps) {
         spellCheck={false}
         inputMode="text"
         placeholder="IE29 AIBK 9311 5212 3456 78"
+        autoFocus
         value={value}
         onChange={handleChange}
         onBlur={onBlur}
         error={Boolean(error) || showLiveError}
+        aria-describedby={describedBy}
         className={showValid ? styles.inputValid : undefined}
       />
       {showValid && (
-        <span className={styles.validHint}>
+        <span id="recipientIban-valid" className={styles.validHint}>
           <CheckIcon size={13} /> Реквизиты корректны
         </span>
       )}
-      {error && <ErrorText>{error.message}</ErrorText>}
-      {!error && showLiveError && <ErrorText>{liveError}</ErrorText>}
+      {error && <ErrorText id="recipientIban-error">{error.message}</ErrorText>}
+      {!error && showLiveError && <ErrorText id="recipientIban-live-error">{liveError}</ErrorText>}
     </div>
   )
 }

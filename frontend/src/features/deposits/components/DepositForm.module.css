@@ -23,6 +23,13 @@
   margin-top: var(--space-4);
 }
 
+/* Both are programmatic-only focus landing spots (see DepositForm.tsx's
+   headingRef/resultRef) — never reached by Tab, so no ring to show. */
+.focusableHeading:focus-visible,
+.result:focus-visible {
+  outline: none;
+}
+
 .amountInput {
   font-family: var(--font-mono);
   font-size: 1.75rem;
@@ -98,5 +105,6 @@
 @media (prefers-reduced-motion: reduce) {
   .balanceChanged {
     animation: none;
+    color: var(--color-accent-text);
   }
 }

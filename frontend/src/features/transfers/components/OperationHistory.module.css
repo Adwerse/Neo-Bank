@@ -40,6 +40,7 @@
 @media (prefers-reduced-motion: reduce) {
   .rowChanged {
     animation: none;
+    background-color: color-mix(in srgb, var(--color-accent) 12%, transparent);
   }
 }
 
@@ -54,6 +55,10 @@
 }
 
 .counterparty {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--color-text-muted);
   font-size: 0.875rem;
 }
