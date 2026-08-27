@@ -23,7 +23,8 @@ export function IncomingTransferWatcher() {
   useEffect(() => {
     if (!data) return
     const seen = seenRef.current
-    const currentlyIncoming = data.filter(isIncomingCompleted)
+    const entries = data.pages.flatMap((page) => page.transfers)
+    const currentlyIncoming = entries.filter(isIncomingCompleted)
     if (seen) {
       for (const entry of currentlyIncoming) {
         if (!seen.has(entry.id)) {

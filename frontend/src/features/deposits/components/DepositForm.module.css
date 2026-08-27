@@ -23,9 +23,52 @@
   margin-top: var(--space-4);
 }
 
+.amountInput {
+  font-family: var(--font-mono);
+  font-size: 1.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+
 .paymentActions {
   display: flex;
   gap: var(--space-3);
+}
+
+.progress {
+  display: flex;
+  list-style: none;
+  counter-reset: step;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  gap: var(--space-2);
+}
+
+.progress li {
+  flex: 1;
+  position: relative;
+  padding-top: var(--space-3);
+  font-size: 0.75rem;
+  color: var(--color-text-faint);
+  border-top: 2px solid var(--color-border);
+  transition: border-color var(--duration-base) ease, color var(--duration-base) ease;
+}
+
+.progress li.progressActive {
+  color: var(--color-text);
+  border-top-color: var(--color-accent);
+}
+
+.progress li.progressDone {
+  color: var(--color-text-muted);
+  border-top-color: var(--color-success);
+}
+
+.progress li.progressFailed {
+  color: var(--color-danger);
+  border-top-color: var(--color-danger);
 }
 
 .newDepositButton {

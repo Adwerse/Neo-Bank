@@ -10,13 +10,15 @@ import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Banner } from '../../../shared/ui/Banner'
 import { Money } from '../../../shared/ui/Money'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { useIsDesktop } from '../../../shared/ui/useIsDesktop'
 import { useMe } from '../../accounts/useMe'
 import { parseAmountToCents } from '../../transfers/money'
 import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
 import { depositSchema, type DepositFormValues } from '../schemas'
 import { createDeposit } from '../api'
 import { stripePromise } from '../stripe'
-import { useDepositStatusPolling } from '../useDepositStatusPolling'
+import { getStripeAppearance } from '../stripeAppearance'
+import { useDepositStatusPolling, type DepositPollOutcome } from '../useDepositStatusPolling'
 import styles from './DepositForm.module.css'
 
 const API_ERROR_LABELS: Record<string, string> = {
@@ -76,9 +78,14 @@ export function DepositForm() {
     }
   }
 
+  const isDesktop = useIsDesktop()
+
   if (step.kind === 'payment') {
     return (
-      <Elements stripe={stripePromise} options={{ clientSecret: step.clientSecret }}>
+      <Elements
+        stripe={stripePromise}
+        options={{ clientSecret: step.clientSecret, appearance: getStripeAppearance(isDesktop) }}
+      >
         <PaymentStep
           onDeclined={(message) => setStep({ kind: 'amount', declineMessage: message })}
           onConfirmed={() => setStep({ kind: 'processing', depositId: step.depositId })}
@@ -100,7 +107,13 @@ export function DepositForm() {
           <label className={styles.label} htmlFor="amount">
             Сумма пополнения
           </label>
-          <Input id="amount" inputMode="decimal" placeholder="100.00" {...register('amount')} />
+          <Input
+            id="amount"
+            inputMode="decimal"
+            placeholder="0.00"
+            className={styles.amountInput}
+            {...register('amount')}
+          />
           {errors.amount && <ErrorText>{errors.amount.message}</ErrorText>}
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
@@ -180,6 +193,23 @@ function PaymentStep({ onDeclined, onConfirmed, onCancel }: PaymentStepProps) {
   )
 }
 
+// Purely presentational — the honest "accepted -> processing -> credited"
+// sequence itself still comes entirely from useDepositStatusPolling's
+// outcome below; this just gives it a visible spine.
+function DepositProgress({ outcome }: { outcome: DepositPollOutcome }) {
+  const resolved = outcome === 'credited' || outcome === 'failed'
+  const failed = outcome === 'failed'
+  return (
+    <ol className={styles.progress}>
+      <li className={styles.progressDone}>Платёж принят</li>
+      <li className={resolved ? styles.progressDone : styles.progressActive}>Обработка</li>
+      <li className={resolved ? (failed ? styles.progressFailed : styles.progressDone) : undefined}>
+        {failed ? 'Не зачислено' : 'Зачислено'}
+      </li>
+    </ol>
+  )
+}
+
 function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStartOver: () => void }) {
   const { deposit, outcome } = useDepositStatusPolling(depositId)
   // The credited branch below wants the account's current total balance,
@@ -187,12 +217,13 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
   // this same ['accounts','me'] query (see WebSocketProvider), so by the
   // time outcome flips to 'credited' this is the fresh number, no extra
   // fetch triggered here.
-  const { data: account } = useMe()
+  const { data: account, isError: accountError } = useMe()
   const balanceFlash = useFlashOnChange(account?.balance)
 
   return (
     <Card>
       <h2>Пополнение счёта</h2>
+      <DepositProgress outcome={outcome} />
       <div className={styles.result}>
         {outcome === 'polling' && (
           <Banner variant="warning">Платёж принят, зачисление в течение минуты…</Banner>
@@ -218,6 +249,9 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
                   className={balanceFlash ? styles.balanceChanged : undefined}
                 />
               </div>
+            )}
+            {!account && accountError && (
+              <div className={styles.currentBalance}>Баланс временно недоступен — обновите страницу позже.</div>
             )}
           </>
         )}

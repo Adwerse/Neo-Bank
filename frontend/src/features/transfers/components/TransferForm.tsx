@@ -9,9 +9,11 @@ import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Banner } from '../../../shared/ui/Banner'
 import { Money } from '../../../shared/ui/Money'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { useMe } from '../../accounts/useMe'
 import { createTransfer, type TransferResult } from '../api'
 import { parseAmountToCents } from '../money'
 import { transferSchema, type TransferFormValues } from '../schemas'
+import { IbanField } from './IbanField'
 import styles from './TransferForm.module.css'
 
 const FAILURE_REASON_LABELS: Record<string, string> = {
@@ -73,6 +75,7 @@ const FRAUD_CHECK_UNAVAILABLE_MESSAGE = 'fraud check unavailable, transfer still
 
 export function TransferForm() {
   const queryClient = useQueryClient()
+  const { data: account, isLoading: accountLoading, isError: accountError } = useMe()
 
   // Generated once when the form mounts ("form open"), not inside the
   // submit handler — a retry of the same in-flight attempt (double-click,
@@ -94,8 +97,14 @@ export function TransferForm() {
   // fraud-unavailable banner/button and fall back to "Новый перевод",
   // even though nothing was actually resolved.
   const [fraudUnavailable, setFraudUnavailable] = useState(false)
+  // Purely a presentational gate in front of the real submit — a review
+  // step the user must confirm before onSubmit ever runs. Doesn't change
+  // when the idempotency key is generated (still at mount, above) or when
+  // the API is actually called (still only from handleConfirm/Повторить).
+  const [reviewValues, setReviewValues] = useState<TransferFormValues | null>(null)
 
   const {
+    control,
     register,
     handleSubmit,
     reset,
@@ -135,37 +144,100 @@ export function TransferForm() {
     }
   }
 
+  function handleReview(values: TransferFormValues) {
+    setServerError(null)
+    setReviewValues(values)
+  }
+
+  function handleBackToForm() {
+    setServerError(null)
+    setReviewValues(null)
+  }
+
   function handleNewTransfer() {
     idempotencyKeyRef.current = crypto.randomUUID()
     setResult(null)
     setFraudUnavailable(false)
     setServerError(null)
+    setReviewValues(null)
     reset()
+  }
+
+  // Review step: values are already schema-valid (react-hook-form only
+  // calls handleReview once validation passes) — this is a confirmation
+  // screen, not a second validation pass.
+  if (reviewValues && !result) {
+    const amountCents = parseAmountToCents(reviewValues.amount) ?? 0
+    return (
+      <Card>
+        <h2>Подтверждение перевода</h2>
+        <div className={styles.review}>
+          <div className={styles.reviewRow}>
+            <span className={styles.reviewLabel}>Получатель</span>
+            <span className={styles.reviewIban}>{reviewValues.recipientIban}</span>
+          </div>
+          <div className={styles.reviewRow}>
+            <span className={styles.reviewLabel}>Отправится</span>
+            <Money value={-amountCents} currency="EUR" size="hero" />
+          </div>
+          {account && (
+            <div className={styles.reviewRow}>
+              <span className={styles.reviewLabel}>Останется на счёте</span>
+              <Money value={account.balance - amountCents} currency={account.currency} showSign={false} tone="neutral" />
+            </div>
+          )}
+          {serverError && <ErrorText>{serverError}</ErrorText>}
+          <div className={styles.reviewActions}>
+            <Button type="button" loading={isSubmitting} onClick={() => onSubmit(reviewValues)}>
+              Подтвердить и отправить
+            </Button>
+            <Button type="button" variant="secondary" disabled={isSubmitting} onClick={handleBackToForm}>
+              Изменить
+            </Button>
+          </div>
+        </div>
+      </Card>
+    )
   }
 
   return (
     <Card>
       <h2>Перевод</h2>
-      <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
-        <div className={styles.field}>
-          <label className={styles.label} htmlFor="recipientIban">
-            IBAN получателя
-          </label>
-          <Input id="recipientIban" autoComplete="off" {...register('recipientIban')} />
-          {errors.recipientIban && <ErrorText>{errors.recipientIban.message}</ErrorText>}
-        </div>
-        <div className={styles.field}>
-          <label className={styles.label} htmlFor="amount">
-            Сумма
-          </label>
-          <Input id="amount" inputMode="decimal" placeholder="100.00" {...register('amount')} />
-          {errors.amount && <ErrorText>{errors.amount.message}</ErrorText>}
-        </div>
-        {serverError && <ErrorText>{serverError}</ErrorText>}
-        <Button type="submit" loading={isSubmitting}>
-          Отправить
-        </Button>
-      </form>
+      {!result && (
+        <form className={styles.form} onSubmit={handleSubmit(handleReview)} noValidate>
+          <div className={styles.field}>
+            <label className={styles.label} htmlFor="recipientIban">
+              IBAN получателя
+            </label>
+            <IbanField control={control} />
+          </div>
+          <div className={styles.field}>
+            <div className={styles.amountLabelRow}>
+              <label className={styles.label} htmlFor="amount">
+                Сумма
+              </label>
+              {!accountLoading && !accountError && account && (
+                <span className={styles.available}>
+                  Доступно: <Money value={account.balance} currency={account.currency} showSign={false} tone="faint" />
+                </span>
+              )}
+              {accountError && <span className={styles.available}>Баланс временно недоступен</span>}
+            </div>
+            <Input
+              id="amount"
+              inputMode="decimal"
+              placeholder="0.00"
+              className={styles.amountInput}
+              {...register('amount')}
+            />
+            {errors.amount && <ErrorText>{errors.amount.message}</ErrorText>}
+          </div>
+          {serverError && <ErrorText>{serverError}</ErrorText>}
+          <Button type="submit" loading={isSubmitting}>
+            Продолжить
+          </Button>
+        </form>
+      )}
 
       {result && (
         <div className={styles.result}>
@@ -197,7 +269,7 @@ export function TransferForm() {
               type="button"
               disabled={isSubmitting}
               className={styles.newTransferButton}
-              onClick={handleSubmit(onSubmit)}
+              onClick={() => reviewValues && onSubmit(reviewValues)}
             >
               Повторить
             </Button>

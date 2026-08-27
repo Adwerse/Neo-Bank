@@ -26,3 +26,61 @@
 .newTransferButton {
   align-self: flex-start;
 }
+
+.amountLabelRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.available {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.amountInput {
+  font-family: var(--font-mono);
+  font-size: 1.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+
+.review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.reviewRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.reviewRow:last-of-type {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.reviewLabel {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.reviewIban {
+  font-family: var(--font-mono);
+  font-size: 0.9375rem;
+}
+
+.reviewActions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}

@@ -31,18 +31,23 @@ export function createTransfer(body: CreateTransferBody, idempotencyKey: string)
   })
 }
 
-// listTransfers unwraps the {transfers, next_cursor} envelope into a bare
-// array — no "load more" UI consumes next_cursor yet (this repo's history
-// view only ever fetches the first page), so it's dropped here rather
-// than plumbed through unused. cursor (not offset — the backend only ever
-// supported cursor-based pagination; there never was a working `offset`
-// query param) is accepted for that same future "load more" case.
-export function listTransfers(params?: { limit?: number; cursor?: string }): Promise<OperationHistoryEntry[]> {
+// listOperationHistoryPage returns the raw {transfers, next_cursor} page —
+// the "load more" / infinite-scroll case, which needs next_cursor to fetch
+// the following page. cursor is opaque, from a previous page's next_cursor;
+// omit for the first page.
+export function listOperationHistoryPage(params?: { limit?: number; cursor?: string }): Promise<TransferHistoryPage> {
   const query = new URLSearchParams()
   if (params?.limit) query.set('limit', String(params.limit))
   if (params?.cursor) query.set('cursor', params.cursor)
   const qs = query.toString()
-  return request<TransferHistoryPage>(`/transfers/${qs ? `?${qs}` : ''}`).then((page) => page.transfers)
+  return request<TransferHistoryPage>(`/transfers/${qs ? `?${qs}` : ''}`)
 }
 
-export type { TransferResult, OperationHistoryEntry }
+// listTransfers unwraps the {transfers, next_cursor} envelope into a bare
+// array, for callers that only ever want the first page (dashboard
+// previews) and have no use for next_cursor.
+export function listTransfers(params?: { limit?: number; cursor?: string }): Promise<OperationHistoryEntry[]> {
+  return listOperationHistoryPage(params).then((page) => page.transfers)
+}
+
+export type { TransferResult, OperationHistoryEntry, TransferHistoryPage }
