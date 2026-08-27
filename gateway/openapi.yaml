@@ -343,6 +343,154 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /profile:
+    get:
+      operationId: getProfile
+      summary: The caller's own profile — display name and avatar.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No user found for this token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      operationId: updateProfile
+      summary: >
+        Set the caller's display name. An empty string or omitted
+        display_name clears it (falls back to the client's own
+        email-derived name).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Updated profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          description: >
+            display_name is longer than 50 characters (counted in runes,
+            after trimming) or contains control/text-direction-override
+            characters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No user found for this token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /profile/avatar/upload-url:
+    post:
+      operationId: createAvatarUploadURL
+      summary: >
+        A presigned object-storage POST policy for uploading a new avatar
+        directly from the browser — the Gateway/auth-svc never sees the
+        file bytes. The client POSTs multipart/form-data straight to
+        `url`, with every entry of `fields` included as form fields ahead
+        of the file itself (field name "file"), then calls POST
+        /profile/avatar/confirm with the returned `key`. The policy
+        expires 5 minutes after issue and caps the object at 8 MiB
+        (enforced by storage itself via the policy's content-length
+        range, independent of the same check repeated in confirm).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Presigned upload target.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadAvatarURLResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /profile/avatar/confirm:
+    post:
+      operationId: confirmAvatarUpload
+      summary: >
+        Validates a previously presigned-uploaded object by its actual
+        sniffed content (never file extension or client-declared
+        Content-Type) — allowed types are image/jpeg and image/png only,
+        at most 8 MiB and 20 megapixels — then crops it to a centered
+        square, generates 64px and 256px thumbnails, and makes it the
+        caller's avatar. The raw upload is deleted afterward either way;
+        a rejected file is not silently left as the avatar.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmAvatarRequest'
+      responses:
+        '200':
+          description: >
+            Validation passed — this is now the caller's avatar. Same
+            Profile shape as GET /profile, with avatar_url_64/
+            avatar_url_256 now present.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          description: >
+            The uploaded object failed validation — unsupported image
+            type, too many pixels, too large, or not a decodable image.
+            The `error` message states the specific reason (e.g.
+            'unsupported image type "image/gif"'); the object itself was
+            actually uploaded, so this must never be shown to the user as
+            a generic "upload failed".
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No object exists at `key` — the presigned policy expired
+            before the upload happened, or confirm was called without
+            uploading first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /transfers:
     post:
       operationId: createTransfer
@@ -746,6 +894,74 @@ components:
         currency:
           type: string
           example: EUR
+
+    Profile:
+      type: object
+      required: [user_id, display_name, avatar_key, avatar_updated_at]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+          nullable: true
+          description: >
+            Null when never set (or cleared) — the client falls back to
+            an email-derived name in that case, same as before this
+            feature existed.
+        avatar_key:
+          type: string
+          nullable: true
+          description: Internal object-storage key. Opaque to the client.
+        avatar_updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        avatar_url_64:
+          type: string
+          description: >
+            Presigned GET URL for the 64px thumbnail, valid for 1 hour.
+            Absent (not null) when no avatar is set — present only
+            together with avatar_url_256.
+        avatar_url_256:
+          type: string
+          description: Presigned GET URL for the 256px thumbnail, valid for 1 hour.
+
+    UpdateProfileRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+          description: >
+            Max 50 characters (after trimming whitespace), no control or
+            text-direction-override characters. Omit or send "" to clear.
+
+    UploadAvatarURLResponse:
+      type: object
+      required: [url, fields, key]
+      properties:
+        url:
+          type: string
+          description: Absolute object-storage URL to POST the multipart form to.
+        fields:
+          type: object
+          description: >
+            Every one of these must be included as its own form field,
+            ahead of the file field, exactly as given — this is a
+            presigned POST policy, not a bare PUT URL.
+          additionalProperties:
+            type: string
+        key:
+          type: string
+          description: Pass back unchanged to POST /profile/avatar/confirm.
+
+    ConfirmAvatarRequest:
+      type: object
+      required: [key]
+      properties:
+        key:
+          type: string
+          description: The key returned by POST /profile/avatar/upload-url.
 
     BalanceHistoryPoint:
       type: object

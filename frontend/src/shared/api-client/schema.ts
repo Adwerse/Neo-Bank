@@ -174,6 +174,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The caller's own profile — display name and avatar. */
+        get: operations["getProfile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Set the caller's display name. An empty string or omitted display_name clears it (falls back to the client's own email-derived name). */
+        patch: operations["updateProfile"];
+        trace?: never;
+    };
+    "/profile/avatar/upload-url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A presigned object-storage POST policy for uploading a new avatar directly from the browser — the Gateway/auth-svc never sees the file bytes. The client POSTs multipart/form-data straight to `url`, with every entry of `fields` included as form fields ahead of the file itself (field name "file"), then calls POST /profile/avatar/confirm with the returned `key`. The policy expires 5 minutes after issue and caps the object at 8 MiB (enforced by storage itself via the policy's content-length range, independent of the same check repeated in confirm). */
+        post: operations["createAvatarUploadURL"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/profile/avatar/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validates a previously presigned-uploaded object by its actual sniffed content (never file extension or client-declared Content-Type) — allowed types are image/jpeg and image/png only, at most 8 MiB and 20 megapixels — then crops it to a centered square, generates 64px and 256px thumbnails, and makes it the caller's avatar. The raw upload is deleted afterward either way; a rejected file is not silently left as the avatar. */
+        post: operations["confirmAvatarUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/transfers": {
         parameters: {
             query?: never;
@@ -310,6 +362,38 @@ export interface components {
             balance: number;
             /** @example EUR */
             currency: string;
+        };
+        Profile: {
+            /** Format: uuid */
+            user_id: string;
+            /** @description Null when never set (or cleared) — the client falls back to an email-derived name in that case, same as before this feature existed. */
+            display_name: string | null;
+            /** @description Internal object-storage key. Opaque to the client. */
+            avatar_key: string | null;
+            /** Format: date-time */
+            avatar_updated_at: string | null;
+            /** @description Presigned GET URL for the 64px thumbnail, valid for 1 hour. Absent (not null) when no avatar is set — present only together with avatar_url_256. */
+            avatar_url_64?: string;
+            /** @description Presigned GET URL for the 256px thumbnail, valid for 1 hour. */
+            avatar_url_256?: string;
+        };
+        UpdateProfileRequest: {
+            /** @description Max 50 characters (after trimming whitespace), no control or text-direction-override characters. Omit or send "" to clear. */
+            display_name?: string;
+        };
+        UploadAvatarURLResponse: {
+            /** @description Absolute object-storage URL to POST the multipart form to. */
+            url: string;
+            /** @description Every one of these must be included as its own form field, ahead of the file field, exactly as given — this is a presigned POST policy, not a bare PUT URL. */
+            fields: {
+                [key: string]: string;
+            };
+            /** @description Pass back unchanged to POST /profile/avatar/confirm. */
+            key: string;
+        };
+        ConfirmAvatarRequest: {
+            /** @description The key returned by POST /profile/avatar/upload-url. */
+            key: string;
         };
         BalanceHistoryPoint: {
             /** Format: date */
@@ -821,6 +905,148 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+        };
+    };
+    getProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Profile. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Profile"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No user found for this token. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateProfileRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated profile. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Profile"];
+                };
+            };
+            /** @description display_name is longer than 50 characters (counted in runes, after trimming) or contains control/text-direction-override characters. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No user found for this token. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createAvatarUploadURL: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Presigned upload target. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadAvatarURLResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    confirmAvatarUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmAvatarRequest"];
+            };
+        };
+        responses: {
+            /** @description Validation passed — this is now the caller's avatar. Same Profile shape as GET /profile, with avatar_url_64/ avatar_url_256 now present. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Profile"];
+                };
+            };
+            /** @description The uploaded object failed validation — unsupported image type, too many pixels, too large, or not a decodable image. The `error` message states the specific reason (e.g. 'unsupported image type "image/gif"'); the object itself was actually uploaded, so this must never be shown to the user as a generic "upload failed". */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No object exists at `key` — the presigned policy expired before the upload happened, or confirm was called without uploading first. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
         };
     };
     listTransfers: {
