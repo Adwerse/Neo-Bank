@@ -7,6 +7,7 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { forgotPassword } from '../api'
 import { forgotPasswordSchema, type ForgotPasswordFormValues } from '../schemas'
 import styles from './ForgotPasswordPage.module.css'
@@ -17,6 +18,7 @@ import styles from './ForgotPasswordPage.module.css'
 const NEUTRAL_MESSAGE = 'Если такой email зарегистрирован, на него отправлен код для сброса пароля.'
 
 export function ForgotPasswordPage() {
+  useDocumentTitle('Восстановление пароля')
   const [submitted, setSubmitted] = useState(false)
   const [serverError, setServerError] = useState<string | null>(null)
 
@@ -60,12 +62,20 @@ export function ForgotPasswordPage() {
           <label className={styles.label} htmlFor="email">
             Email
           </label>
-          <Input id="email" type="email" autoComplete="email" {...register('email')} />
-          {errors.email && <ErrorText>{errors.email.message}</ErrorText>}
+          <Input
+            id="email"
+            type="email"
+            autoComplete="email"
+            autoFocus
+            error={Boolean(errors.email)}
+            aria-describedby={errors.email ? 'email-error' : undefined}
+            {...register('email')}
+          />
+          {errors.email && <ErrorText id="email-error">{errors.email.message}</ErrorText>}
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? 'Отправка...' : 'Отправить код'}
+        <Button type="submit" loading={isSubmitting}>
+          Отправить код
         </Button>
       </form>
       <p className={styles.footerLink}>

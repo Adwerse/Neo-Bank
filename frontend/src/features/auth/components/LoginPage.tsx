@@ -7,6 +7,7 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { useAuth } from '../AuthContext'
 import { resendVerification } from '../api'
 import { loginSchema, type LoginFormValues } from '../schemas'
@@ -19,6 +20,7 @@ const INVALID_CREDENTIALS = 'invalid credentials'
 const EMAIL_NOT_VERIFIED = 'email not verified'
 
 export function LoginPage() {
+  useDocumentTitle('Вход')
   const location = useLocation()
   const navigate = useNavigate()
   const { login } = useAuth()
@@ -74,15 +76,30 @@ export function LoginPage() {
           <label className={styles.label} htmlFor="email">
             Email
           </label>
-          <Input id="email" type="email" autoComplete="email" {...register('email')} />
-          {errors.email && <ErrorText>{errors.email.message}</ErrorText>}
+          <Input
+            id="email"
+            type="email"
+            autoComplete="email"
+            autoFocus
+            error={Boolean(errors.email)}
+            aria-describedby={errors.email ? 'email-error' : undefined}
+            {...register('email')}
+          />
+          {errors.email && <ErrorText id="email-error">{errors.email.message}</ErrorText>}
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="password">
             Пароль
           </label>
-          <Input id="password" type="password" autoComplete="current-password" {...register('password')} />
-          {errors.password && <ErrorText>{errors.password.message}</ErrorText>}
+          <Input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            error={Boolean(errors.password)}
+            aria-describedby={errors.password ? 'password-error' : undefined}
+            {...register('password')}
+          />
+          {errors.password && <ErrorText id="password-error">{errors.password.message}</ErrorText>}
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
         {unverifiedEmail && (
@@ -93,8 +110,8 @@ export function LoginPage() {
             </button>
           </ErrorText>
         )}
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? 'Вход...' : 'Войти'}
+        <Button type="submit" loading={isSubmitting}>
+          Войти
         </Button>
       </form>
       <p className={styles.footerLink}>

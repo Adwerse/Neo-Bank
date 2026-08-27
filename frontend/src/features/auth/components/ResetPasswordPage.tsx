@@ -7,6 +7,7 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { resetPassword } from '../api'
 import { useAuth } from '../AuthContext'
 import { resetPasswordSchema, type ResetPasswordFormValues } from '../schemas'
@@ -21,6 +22,7 @@ const TOO_MANY_ATTEMPTS = 'too many failed attempts, request a new code'
 const WRONG_CODE = 'invalid verification code'
 
 export function ResetPasswordPage() {
+  useDocumentTitle('Новый пароль')
   const navigate = useNavigate()
   const { clearSession } = useAuth()
   const [serverError, setServerError] = useState<string | null>(null)
@@ -72,22 +74,45 @@ export function ResetPasswordPage() {
           <label className={styles.label} htmlFor="email">
             Email
           </label>
-          <Input id="email" type="email" autoComplete="email" {...register('email')} />
-          {errors.email && <ErrorText>{errors.email.message}</ErrorText>}
+          <Input
+            id="email"
+            type="email"
+            autoComplete="email"
+            autoFocus
+            error={Boolean(errors.email)}
+            aria-describedby={errors.email ? 'email-error' : undefined}
+            {...register('email')}
+          />
+          {errors.email && <ErrorText id="email-error">{errors.email.message}</ErrorText>}
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="code">
             Код из письма
           </label>
-          <Input id="code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} {...register('code')} />
-          {errors.code && <ErrorText>{errors.code.message}</ErrorText>}
+          <Input
+            id="code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            error={Boolean(errors.code)}
+            aria-describedby={errors.code ? 'code-error' : undefined}
+            {...register('code')}
+          />
+          {errors.code && <ErrorText id="code-error">{errors.code.message}</ErrorText>}
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="newPassword">
             Новый пароль
           </label>
-          <Input id="newPassword" type="password" autoComplete="new-password" {...register('newPassword')} />
-          {errors.newPassword && <ErrorText>{errors.newPassword.message}</ErrorText>}
+          <Input
+            id="newPassword"
+            type="password"
+            autoComplete="new-password"
+            error={Boolean(errors.newPassword)}
+            aria-describedby={errors.newPassword ? 'newPassword-error' : undefined}
+            {...register('newPassword')}
+          />
+          {errors.newPassword && <ErrorText id="newPassword-error">{errors.newPassword.message}</ErrorText>}
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="confirmNewPassword">
@@ -97,13 +122,17 @@ export function ResetPasswordPage() {
             id="confirmNewPassword"
             type="password"
             autoComplete="new-password"
+            error={Boolean(errors.confirmNewPassword)}
+            aria-describedby={errors.confirmNewPassword ? 'confirmNewPassword-error' : undefined}
             {...register('confirmNewPassword')}
           />
-          {errors.confirmNewPassword && <ErrorText>{errors.confirmNewPassword.message}</ErrorText>}
+          {errors.confirmNewPassword && (
+            <ErrorText id="confirmNewPassword-error">{errors.confirmNewPassword.message}</ErrorText>
+          )}
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? 'Сохранение...' : 'Сохранить новый пароль'}
+        <Button type="submit" loading={isSubmitting}>
+          Сохранить новый пароль
         </Button>
       </form>
       <p className={styles.footerLink}>

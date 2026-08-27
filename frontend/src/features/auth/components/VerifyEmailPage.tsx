@@ -7,6 +7,7 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { resendVerification, verifyEmail } from '../api'
 import { verifyCodeSchema, type VerifyCodeFormValues } from '../schemas'
 import type { paths } from '../../../shared/api-client/schema'
@@ -38,6 +39,7 @@ export function VerifyEmailPage() {
 }
 
 function VerifyEmailForm({ email }: { email: string }) {
+  useDocumentTitle('Подтверждение email')
   const navigate = useNavigate()
 
   const [verifyError, setVerifyError] = useState<string | null>(null)
@@ -45,6 +47,7 @@ function VerifyEmailForm({ email }: { email: string }) {
   const [resendError, setResendError] = useState<string | null>(null)
   const [resendNotice, setResendNotice] = useState<string | null>(null)
   const [secondsLeft, setSecondsLeft] = useState(RESEND_COOLDOWN_SECONDS)
+  const [isResending, setIsResending] = useState(false)
 
   const {
     register,
@@ -100,6 +103,7 @@ function VerifyEmailForm({ email }: { email: string }) {
   async function onResend() {
     setResendError(null)
     setResendNotice(null)
+    setIsResending(true)
     try {
       await resendVerification({ email })
       setResendNotice('Новый код отправлен на почту')
@@ -113,6 +117,7 @@ function VerifyEmailForm({ email }: { email: string }) {
         setResendError(err.message)
       }
     } finally {
+      setIsResending(false)
       setSecondsLeft(RESEND_COOLDOWN_SECONDS)
     }
   }
@@ -131,18 +136,21 @@ function VerifyEmailForm({ email }: { email: string }) {
             inputMode="numeric"
             autoComplete="one-time-code"
             maxLength={6}
+            autoFocus
             disabled={mustResend}
+            error={Boolean(errors.code)}
+            aria-describedby={errors.code ? 'code-error' : undefined}
             {...register('code')}
           />
-          {errors.code && <ErrorText>{errors.code.message}</ErrorText>}
+          {errors.code && <ErrorText id="code-error">{errors.code.message}</ErrorText>}
         </div>
         {verifyError && <ErrorText>{verifyError}</ErrorText>}
-        <Button type="submit" disabled={isSubmitting || mustResend}>
-          {isSubmitting ? 'Проверка...' : 'Подтвердить'}
+        <Button type="submit" loading={isSubmitting} disabled={mustResend}>
+          Подтвердить
         </Button>
       </form>
       <div className={styles.resend}>
-        <Button type="button" variant="secondary" disabled={secondsLeft > 0} onClick={onResend}>
+        <Button type="button" variant="secondary" loading={isResending} disabled={secondsLeft > 0} onClick={onResend}>
           {secondsLeft > 0 ? `Отправить код заново (${secondsLeft})` : 'Отправить код заново'}
         </Button>
         {resendNotice && <p className={styles.notice}>{resendNotice}</p>}
