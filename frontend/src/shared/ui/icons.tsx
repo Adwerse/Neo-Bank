@@ -108,3 +108,55 @@ export function CheckIcon({ size = 14 }: IconProps) {
     </svg>
   )
 }
+
+export function CameraIcon({ size = 16 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path
+        d="M4 8.5A1.5 1.5 0 015.5 7h2l1-2h7l1 2h2A1.5 1.5 0 0120 8.5V18a1.5 1.5 0 01-1.5 1.5h-13A1.5 1.5 0 014 18V8.5z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="13" r="3.4" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  )
+}
+
+export function PencilIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path
+        d="M15.5 4.5l4 4L8 20H4v-4L15.5 4.5z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M13.5 6.5l4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+export function LogoutIcon({ size = 16 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path
+        d="M9 4.5H6.5A1.5 1.5 0 005 6v12a1.5 1.5 0 001.5 1.5H9"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M13 8l4 4-4 4M9 12h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function CloseIcon({ size = 16 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  )
+}

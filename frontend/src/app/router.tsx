@@ -9,6 +9,7 @@ import { RequireAuth, RequireGuest } from '../features/auth/components/RouteGuar
 import { DashboardPage } from '../features/accounts/components/DashboardPage'
 import { TransfersPage } from '../features/transfers/components/TransfersPage'
 import { DepositPage } from '../features/deposits/components/DepositPage'
+import { ProfilePage } from '../features/profile/components/ProfilePage'
 
 export const router = createBrowserRouter([
   {
@@ -55,6 +56,14 @@ export const router = createBrowserRouter([
         element: (
           <RequireAuth>
             <DepositPage />
+          </RequireAuth>
+        ),
+      },
+      {
+        path: 'profile',
+        element: (
+          <RequireAuth>
+            <ProfilePage />
           </RequireAuth>
         ),
       },

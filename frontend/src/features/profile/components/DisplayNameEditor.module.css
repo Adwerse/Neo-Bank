@@ -1,0 +1,58 @@
+.display {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.name {
+  font: 600 1.125rem var(--font-heading);
+  color: var(--color-text);
+}
+
+.editButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.editButton:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.editButton:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.editRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  max-width: 320px;
+}
+
+.editField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.editActions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.actionButton {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+  font-size: 0.8125rem;
+}

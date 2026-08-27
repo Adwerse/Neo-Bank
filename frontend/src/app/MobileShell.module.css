@@ -18,18 +18,15 @@
   gap: var(--space-3);
 }
 
-.avatar {
+.avatarLink {
   flex: none;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
   border-radius: 50%;
-  border: 1.5px solid var(--color-accent-600);
-  background: var(--color-accent-800);
-  color: var(--color-accent-100);
-  font: 600 14px var(--font-heading);
+}
+
+.avatarLink:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 .greetingSmall {

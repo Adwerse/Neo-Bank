@@ -1,7 +1,9 @@
 import { Link, NavLink } from 'react-router'
 import { getAccessTokenEmail } from '../shared/api-client/jwt'
 import { ArrowUpRightIcon, CardIcon, HomeIcon, PlusCircleIcon } from '../shared/ui/icons'
+import { Avatar } from '../shared/ui/Avatar'
 import { getDisplayName } from '../features/accounts/displayName'
+import { useProfile } from '../features/profile/useProfile'
 import styles from './Sidebar.module.css'
 
 const navItems = [
@@ -16,7 +18,10 @@ const navItems = [
 // highlight (which would otherwise also light up whenever Главная is
 // active, since both resolve to the same /dashboard pathname).
 export function Sidebar() {
-  const { name, initial } = getDisplayName(getAccessTokenEmail())
+  const fallback = getDisplayName(getAccessTokenEmail())
+  const { data: profile } = useProfile()
+  const name = profile?.display_name?.trim() || fallback.name
+  const initial = name[0]?.toUpperCase() ?? fallback.initial
 
   return (
     <aside className={styles.sidebar}>
@@ -44,8 +49,8 @@ export function Sidebar() {
 
       <div className={styles.spacer} />
 
-      <div className={styles.footer}>
-        <div className={styles.avatar}>{initial}</div>
+      <Link to="/profile" className={styles.footer} aria-label="Профиль">
+        <Avatar imageUrl={profile?.avatar_url_64} seed={profile?.user_id ?? fallback.name} initial={initial} size={32} />
         <div className={styles.footerText}>
           <div className={styles.name}>{name}</div>
           {/* Session presence (always true while this is mounted — Sidebar
@@ -54,7 +59,7 @@ export function Sidebar() {
               separately on the dashboard. */}
           <div className={styles.sessionStatus}>● Активен</div>
         </div>
-      </div>
+      </Link>
     </aside>
   )
 }

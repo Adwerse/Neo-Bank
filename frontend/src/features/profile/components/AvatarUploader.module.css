@@ -1,0 +1,80 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.avatarBox {
+  position: relative;
+  flex: none;
+}
+
+.hiddenInput {
+  display: none;
+}
+
+.cameraButton {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid var(--color-surface);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  cursor: pointer;
+}
+
+.cameraButton:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.cameraButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cameraButton:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  max-width: 220px;
+}
+
+.progressTrack {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-accent);
+  transition: width var(--duration-fast) linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progressFill {
+    transition: none;
+  }
+}
+
+.progressLabel {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}

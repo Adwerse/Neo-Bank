@@ -1,0 +1,58 @@
+.viewport {
+  position: relative;
+  margin: 0 auto;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--color-bg);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.viewport:active {
+  cursor: grabbing;
+}
+
+.image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  pointer-events: none;
+}
+
+/* A circular vignette over the square capture region — every avatar
+   renders round (shared/ui/Avatar), so this previews that without
+   changing what's actually captured (the full square). */
+.mask {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 9999px color-mix(in srgb, black 55%, transparent);
+  pointer-events: none;
+}
+
+.zoomRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.zoomLabel {
+  flex: none;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.zoomSlider {
+  flex: 1;
+  accent-color: var(--color-accent);
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}

@@ -1,8 +1,10 @@
-import { NavLink, Outlet, useNavigate } from 'react-router'
+import { Link, NavLink, Outlet, useNavigate } from 'react-router'
 import { useAuth } from '../features/auth/AuthContext'
 import { getAccessTokenEmail } from '../shared/api-client/jwt'
 import { getDisplayName } from '../features/accounts/displayName'
+import { useProfile } from '../features/profile/useProfile'
 import { ArrowUpRightIcon, BellIcon, HomeIcon, PlusCircleIcon } from '../shared/ui/icons'
+import { Avatar } from '../shared/ui/Avatar'
 import { LiveIndicator } from '../shared/ws-client/LiveIndicator'
 import { PageTransition } from '../shared/ui/PageTransition'
 import styles from './MobileShell.module.css'
@@ -23,7 +25,10 @@ const tabItems = [
 // /transfers, and /deposit instead of being dashboard-only, mirroring how
 // DesktopShell's header isn't BlueprintDashboard's to own either.
 export function MobileShell() {
-  const { name, initial } = getDisplayName(getAccessTokenEmail())
+  const fallback = getDisplayName(getAccessTokenEmail())
+  const { data: profile } = useProfile()
+  const name = profile?.display_name?.trim() || fallback.name
+  const initial = name[0]?.toUpperCase() ?? fallback.initial
   const { logout } = useAuth()
   const navigate = useNavigate()
 
@@ -36,7 +41,9 @@ export function MobileShell() {
     <div className={styles.shell}>
       <header className={styles.header}>
         <div className={styles.identity}>
-          <div className={styles.avatar}>{initial}</div>
+          <Link to="/profile" className={styles.avatarLink} aria-label="Профиль">
+            <Avatar imageUrl={profile?.avatar_url_64} seed={profile?.user_id ?? fallback.name} initial={initial} size={38} />
+          </Link>
           <div>
             <div className={styles.greetingSmall}>С возвращением,</div>
             <div className={styles.greetingName}>{name}</div>
