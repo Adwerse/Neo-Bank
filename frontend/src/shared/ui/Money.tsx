@@ -1,4 +1,4 @@
-import { formatMoney } from '../money'
+import { formatMoney, formatMoneySpoken } from '../money'
 import styles from './Money.module.css'
 
 interface MoneyProps {
@@ -23,9 +23,17 @@ interface MoneyProps {
   tone?: 'auto' | 'neutral' | 'faint' | 'pending'
   size?: 'hero' | 'compact'
   className?: string
+  // Context word/phrase spoken before the amount ("Доступно",
+  // "Останется на счёте", "Текущий баланс") — supersedes the automatic
+  // "Приход"/"Расход" direction word, since a caller-given label is always
+  // more specific. Without it, a signed nonzero amount still gets the
+  // direction word; a neutral/zero amount gets no prefix, just the amount.
+  // Either way the amount itself is always announced — there is no case
+  // where this component has no accessible name at all.
+  label?: string
 }
 
-export function Money({ value, currency, showSign = true, tone, size = 'compact', className }: MoneyProps) {
+export function Money({ value, currency, showSign = true, tone, size = 'compact', className, label }: MoneyProps) {
   const resolvedTone = tone ?? (showSign ? 'auto' : 'neutral')
   // Unicode minus (U+2212), not formatMoney's ASCII '-' — matches what
   // every hand-rolled call site already used. Zero never gets a sign: it
@@ -43,14 +51,21 @@ export function Money({ value, currency, showSign = true, tone, size = 'compact'
     else if (value < 0) toneClass = styles.out
   }
 
-  // aria-label replaces the announced content outright, so a screen reader
-  // never depends on how it happens to read the '+'/'−' glyph.
-  const label = showSign && value !== 0 ? `${value > 0 ? 'Приход' : 'Расход'} ${body}` : undefined
+  // aria-label replaces the announced content outright — a screen reader
+  // never depends on how it happens to read the '+'/'−' glyph or the '€'
+  // symbol. Always set, never undefined: a caller-given label wins, a
+  // signed nonzero amount falls back to its direction word, and a neutral
+  // or zero amount still gets the spoken amount + currency name on its
+  // own rather than going unlabeled.
+  const direction = showSign && value > 0 ? 'Приход' : showSign && value < 0 ? 'Расход' : null
+  const prefix = label ?? direction
+  const spokenAmount = formatMoneySpoken(Math.abs(value), currency)
+  const accessibleLabel = prefix ? `${prefix}: ${spokenAmount}` : spokenAmount
 
   const classes = [styles.money, styles[size], toneClass, className].filter(Boolean).join(' ')
 
   return (
-    <span className={classes} aria-label={label}>
+    <span className={classes} aria-label={accessibleLabel}>
       {sign}
       {body}
     </span>

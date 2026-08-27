@@ -1,7 +1,21 @@
 .skeleton {
   background: var(--color-surface-hover);
   border-radius: var(--radius);
-  animation: pulse var(--duration-loop) ease-in-out infinite;
+  /* Two independent animations on one element, deliberately on disjoint
+     properties (transform vs. opacity) rather than both on opacity — the
+     CSS animation model doesn't blend two animations fighting over the
+     same property, the later-listed one just wins outright for its whole
+     run, which would make the fade-in invisible. skeleton-settle plays
+     once on mount, pulse loops for as long as the skeleton is shown. */
+  animation:
+    skeleton-settle var(--duration-base) ease-out,
+    pulse var(--duration-loop) ease-in-out infinite;
+}
+
+@keyframes skeleton-settle {
+  from {
+    transform: translateY(2px);
+  }
 }
 
 @keyframes pulse {
