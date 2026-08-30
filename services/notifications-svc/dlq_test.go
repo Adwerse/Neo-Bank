@@ -52,9 +52,9 @@ func TestTransferRetryDelay_ExponentialWithCap(t *testing.T) {
 }
 
 // TestSendToDLQ_PreservesPayloadAndRecordsReason is the audit-trail
-// contract the DoD leans on ("DLQ можно разобрать руками"): the original
-// key, value and headers must survive verbatim, with the failure reason
-// and source coordinates added, not substituted.
+// contract the DoD leans on ("the DLQ can be picked apart by hand"): the
+// original key, value and headers must survive verbatim, with the
+// failure reason and source coordinates added, not substituted.
 func TestSendToDLQ_PreservesPayloadAndRecordsReason(t *testing.T) {
 	writer := &fakeDLQWriter{}
 	msg := kafka.Message{

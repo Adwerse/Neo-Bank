@@ -574,7 +574,7 @@ paths:
           description: >
             Too many recipient-resolve attempts for this caller recently —
             see accounts-svc's per-user rate limit on resolving an IBAN
-            (README, "Честные ограничения"). Distinct from a generic
+            (README, "Honest limitations"). Distinct from a generic
             TooManyRequests: this specific limit exists because an
             endpoint that answers "this account exists"/"it doesn't" is an
             enumeration oracle, and a checksum-valid IBAN narrows the space
@@ -750,13 +750,20 @@ components:
       properties:
         error:
           type: string
+          description: >
+            A stable, machine-readable snake_case code (e.g.
+            "insufficient_funds", "invalid_iban", "recipient_not_found") —
+            never a human-readable sentence. The backend deliberately
+            doesn't own display copy or its language; translating a code
+            into a message for the signed-in user's locale is the
+            frontend's job.
         attempts_remaining:
           type: integer
           description: >
             Only present on /auth/verify-email wrong-code responses — the
             number of guesses left before the code is locked out.
       example:
-        error: invalid credentials
+        error: invalid_credentials
 
     StatusResponse:
       type: object
@@ -874,7 +881,7 @@ components:
           description: >
             A checksum-valid IE IBAN, deterministically derived from
             account_number. The bank code is a fictitious institution —
-            see README, "Честные ограничения".
+            see README, "Honest limitations".
           example: IE34ZZZZ00004234567890
         status:
           type: string
@@ -997,7 +1004,7 @@ components:
             bank's own code are resolvable; a structurally valid IBAN for
             another institution is rejected (400), not silently treated as
             "not found" (also 400, but a distinct message) — see README,
-            "Честные ограничения".
+            "Honest limitations".
           example: IE34ZZZZ00004234567890
         amount:
           type: integer

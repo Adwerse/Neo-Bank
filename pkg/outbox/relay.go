@@ -172,7 +172,7 @@ func RelayBatch(ctx context.Context, pool *pgxpool.Pool, table string, writer Ka
 		// and would corrupt every duration statistic computed over the
 		// request span. A link states the true relationship — separate
 		// work, caused by that trace — and Jaeger makes it navigable from
-		// both ends. See README, "Связь спанов".
+		// both ends. See README, "Span links: a link, not a parent".
 		publishCtx, span := tracing.StartLinkedRoot(ctx, tracerScope, "outbox publish "+r.EventType, r.TraceContext,
 			attribute.String("messaging.system", "kafka"),
 			attribute.String("messaging.operation", "publish"),

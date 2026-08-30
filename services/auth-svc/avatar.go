@@ -58,6 +58,35 @@ var allowedAvatarContentTypes = map[string]struct{}{
 	"image/png":  {},
 }
 
+// Sentinel errors decodeAvatarImage wraps its detailed (English, log-only)
+// messages around via %w — confirmAvatarHandler classifies on these with
+// errors.Is to pick the stable code it sends the client, while the
+// detailed message still reaches the server log. The client was never
+// meant to see the exact byte/pixel counts anyway: it already knows its
+// own copy of these limits (see frontend's client-side pre-check) well
+// enough to phrase its own message without them.
+var (
+	errAvatarTooLarge        = errors.New("avatar too large")
+	errAvatarUnsupportedType = errors.New("avatar unsupported type")
+	errAvatarTooManyPixels   = errors.New("avatar too many pixels")
+	errAvatarDecodeFailed    = errors.New("avatar decode failed")
+)
+
+// avatarErrorCode maps a decodeAvatarImage failure to the stable code the
+// client receives — never the wrapped detail, which is log-only.
+func avatarErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errAvatarTooLarge):
+		return "avatar_too_large"
+	case errors.Is(err, errAvatarUnsupportedType):
+		return "avatar_unsupported_type"
+	case errors.Is(err, errAvatarTooManyPixels):
+		return "avatar_too_many_pixels"
+	default:
+		return "avatar_decode_failed"
+	}
+}
+
 // avatarKeyOwnedBy reports whether key is exactly the shape this service
 // itself generates for userID via avatarStorage.presignedUploadURL:
 // "avatars/{userID}/{uploadID}", no more and no fewer path segments. This
@@ -87,7 +116,7 @@ func avatarThumbnailKey(base string, size int) string {
 // for more than it needs to reject.
 func decodeAvatarImage(data []byte) (image.Image, error) {
 	if len(data) > maxAvatarUploadBytes {
-		return nil, fmt.Errorf("image is %d bytes, want %d or fewer", len(data), maxAvatarUploadBytes)
+		return nil, fmt.Errorf("%w: image is %d bytes, want %d or fewer", errAvatarTooLarge, len(data), maxAvatarUploadBytes)
 	}
 
 	sniffLen := len(data)
@@ -96,20 +125,20 @@ func decodeAvatarImage(data []byte) (image.Image, error) {
 	}
 	contentType := http.DetectContentType(data[:sniffLen])
 	if _, ok := allowedAvatarContentTypes[contentType]; !ok {
-		return nil, fmt.Errorf("unsupported image type %q", contentType)
+		return nil, fmt.Errorf("%w: unsupported image type %q", errAvatarUnsupportedType, contentType)
 	}
 
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("decode image header: %w", err)
+		return nil, fmt.Errorf("%w: decode image header: %v", errAvatarDecodeFailed, err)
 	}
 	if pixels := cfg.Width * cfg.Height; pixels > maxAvatarPixels {
-		return nil, fmt.Errorf("image is %dx%d (%d pixels), want %d or fewer", cfg.Width, cfg.Height, pixels, maxAvatarPixels)
+		return nil, fmt.Errorf("%w: image is %dx%d (%d pixels), want %d or fewer", errAvatarTooManyPixels, cfg.Width, cfg.Height, pixels, maxAvatarPixels)
 	}
 
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("decode image: %w", err)
+		return nil, fmt.Errorf("%w: decode image: %v", errAvatarDecodeFailed, err)
 	}
 	return img, nil
 }
@@ -167,25 +196,25 @@ func uploadAvatarURLHandler(pool *pgxpool.Pool, storage *avatarStorage, rateLimi
 
 		userID := r.Header.Get("X-User-Id")
 		if userID == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing X-User-Id header")
+			writeJSONError(w, http.StatusBadRequest, "missing_user_id_header")
 			return
 		}
 
 		allowed, err := recordAvatarUploadAttempt(r.Context(), pool, userID, rateLimit, rateWindow)
 		if err != nil {
 			log.Printf("auth-svc: uploadAvatarURL: rate limit check: %v", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !allowed {
-			writeJSONError(w, http.StatusTooManyRequests, "too many avatar upload requests, try again later")
+			writeJSONError(w, http.StatusTooManyRequests, "avatar_upload_rate_limited")
 			return
 		}
 
 		uploadURL, fields, key, err := storage.presignedUploadURL(r.Context(), userID, maxAvatarUploadBytes)
 		if err != nil {
 			log.Printf("auth-svc: uploadAvatarURL: %v", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
@@ -211,17 +240,17 @@ func confirmAvatarHandler(pool *pgxpool.Pool, storage *avatarStorage) http.Handl
 
 		userID := r.Header.Get("X-User-Id")
 		if userID == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing X-User-Id header")
+			writeJSONError(w, http.StatusBadRequest, "missing_user_id_header")
 			return
 		}
 
 		var req confirmAvatarRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 		if !avatarKeyOwnedBy(req.Key, userID) {
-			writeJSONError(w, http.StatusBadRequest, "invalid key")
+			writeJSONError(w, http.StatusBadRequest, "invalid_key")
 			return
 		}
 
@@ -229,48 +258,50 @@ func confirmAvatarHandler(pool *pgxpool.Pool, storage *avatarStorage) http.Handl
 
 		info, err := storage.statObject(ctx, req.Key)
 		if err != nil {
-			writeJSONError(w, http.StatusNotFound, "avatar upload not found")
+			writeJSONError(w, http.StatusNotFound, "avatar_upload_not_found")
 			return
 		}
 		if info.Size > maxAvatarUploadBytes {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("image is %d bytes, want %d or fewer", info.Size, maxAvatarUploadBytes))
+			log.Printf("auth-svc: confirmAvatar: %s is %d bytes, want %d or fewer", req.Key, info.Size, maxAvatarUploadBytes)
+			writeJSONError(w, http.StatusBadRequest, "avatar_too_large")
 			return
 		}
 
 		data, err := storage.getObject(ctx, req.Key)
 		if err != nil {
 			log.Printf("auth-svc: confirmAvatar: get object %s: %v", req.Key, err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		img, err := decodeAvatarImage(data)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
+			log.Printf("auth-svc: confirmAvatar: decode %s: %v", req.Key, err)
+			writeJSONError(w, http.StatusBadRequest, avatarErrorCode(err))
 			return
 		}
 
 		thumb64, err := encodeJPEG(cropAndResize(img, avatarThumbnailSize), avatarJPEGQuality)
 		if err != nil {
 			log.Printf("auth-svc: confirmAvatar: encode %dpx: %v", avatarThumbnailSize, err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		thumb256, err := encodeJPEG(cropAndResize(img, avatarStandardSize), avatarJPEGQuality)
 		if err != nil {
 			log.Printf("auth-svc: confirmAvatar: encode %dpx: %v", avatarStandardSize, err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		if err := storage.putObject(ctx, avatarThumbnailKey(req.Key, avatarThumbnailSize), thumb64, "image/jpeg"); err != nil {
 			log.Printf("auth-svc: confirmAvatar: %v", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if err := storage.putObject(ctx, avatarThumbnailKey(req.Key, avatarStandardSize), thumb256, "image/jpeg"); err != nil {
 			log.Printf("auth-svc: confirmAvatar: %v", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
@@ -285,11 +316,11 @@ func confirmAvatarHandler(pool *pgxpool.Pool, storage *avatarStorage) http.Handl
 		oldKey, found, err := swapAvatarKey(ctx, pool, userID, req.Key)
 		if err != nil {
 			log.Printf("auth-svc: confirmAvatar: swap avatar_key: %v", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !found {
-			writeJSONError(w, http.StatusNotFound, "user not found")
+			writeJSONError(w, http.StatusNotFound, "user_not_found")
 			return
 		}
 		if oldKey != nil && *oldKey != req.Key {
@@ -307,7 +338,7 @@ func confirmAvatarHandler(pool *pgxpool.Pool, storage *avatarStorage) http.Handl
 
 		profile, found, err := getProfile(ctx, pool, userID)
 		if err != nil || !found {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		w.WriteHeader(http.StatusOK)

@@ -96,7 +96,7 @@ func (s *accountsServer) ResolveAccountByIban(ctx context.Context, req *accounts
 		return nil, status.Error(codes.Internal, "internal error")
 	}
 	if !found {
-		return nil, status.Error(codes.NotFound, "account not found")
+		return nil, status.Error(codes.NotFound, "account_not_found")
 	}
 	return &accountsv1.ResolveAccountByIbanResponse{AccountId: acc.ID, Status: acc.Status}, nil
 }
@@ -108,7 +108,7 @@ func (s *accountsServer) GetAccountByID(ctx context.Context, req *accountsv1.Get
 		return nil, status.Error(codes.Internal, "internal error")
 	}
 	if !found {
-		return nil, status.Error(codes.NotFound, "account not found")
+		return nil, status.Error(codes.NotFound, "account_not_found")
 	}
 	return &accountsv1.GetAccountByIDResponse{AccountId: acc.ID, Status: acc.Status, AccountNumber: acc.AccountNumber}, nil
 }
@@ -120,7 +120,7 @@ func (s *accountsServer) GetAccountByUserID(ctx context.Context, req *accountsv1
 		return nil, status.Error(codes.Internal, "internal error")
 	}
 	if !found {
-		return nil, status.Error(codes.NotFound, "account not found")
+		return nil, status.Error(codes.NotFound, "account_not_found")
 	}
 	return &accountsv1.GetAccountByUserIDResponse{AccountId: acc.ID, Status: acc.Status}, nil
 }

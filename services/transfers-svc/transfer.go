@@ -401,10 +401,10 @@ const (
 // but the response was lost on the way back. Marking the transfer failed
 // there could contradict a real debit; marking it completed without a
 // transaction_id would be a lie. So it stays pending, unchanged. See
-// README's "Перевод денег через ledger" section for the full boundary this
-// leaves — real resolution needs reconciliation against ledger-svc (e.g. via
-// GetHistory, or a request id ledger-svc doesn't yet accept), out of scope
-// here.
+// README's "Money transfer through the ledger" section for the full
+// boundary this leaves — real resolution needs reconciliation against
+// ledger-svc (e.g. via GetHistory, or a request id ledger-svc doesn't
+// yet accept), out of scope here.
 func settleTransfer(ctx context.Context, pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceClient, transfer Transfer) (Transfer, settlementOutcome, error) {
 	ctx, cancel := context.WithTimeout(ctx, ledgerCallTimeout)
 	defer cancel()

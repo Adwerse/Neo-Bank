@@ -4,5 +4,6 @@ package common.v1;
 
 option go_package = "neobank/proto/gen/go/common/v1;commonv1";
 
-// Empty — заглушка, чтобы было на чём проверить пайплайн buf generate.
+// Empty — a placeholder, just something to verify the buf generate
+// pipeline against.
 message Empty {}

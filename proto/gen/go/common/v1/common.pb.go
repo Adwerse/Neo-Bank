@@ -21,7 +21,8 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Empty — заглушка, чтобы было на чём проверить пайплайн buf generate.
+// Empty — a placeholder, just something to verify the buf generate
+// pipeline against.
 type Empty struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields

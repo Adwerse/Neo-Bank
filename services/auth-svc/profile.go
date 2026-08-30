@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -61,14 +60,14 @@ var bidiControlChars = map[rune]struct{}{
 // that would actually be stored.
 func validateDisplayName(s string) error {
 	if utf8.RuneCountInString(s) > maxDisplayNameLength {
-		return fmt.Errorf("display_name must be %d characters or fewer", maxDisplayNameLength)
+		return errors.New("display_name_too_long")
 	}
 	for _, r := range s {
 		if unicode.IsControl(r) {
-			return errors.New("display_name must not contain control characters")
+			return errors.New("display_name_invalid_characters")
 		}
 		if _, ok := bidiControlChars[r]; ok {
-			return errors.New("display_name must not contain text-direction control characters")
+			return errors.New("display_name_invalid_characters")
 		}
 	}
 	return nil
@@ -96,17 +95,17 @@ func getProfileHandler(pool *pgxpool.Pool, storage *avatarStorage) http.HandlerF
 
 		userID := r.Header.Get("X-User-Id")
 		if userID == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing X-User-Id header")
+			writeJSONError(w, http.StatusBadRequest, "missing_user_id_header")
 			return
 		}
 
 		profile, found, err := getProfile(r.Context(), pool, userID)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !found {
-			writeJSONError(w, http.StatusNotFound, "user not found")
+			writeJSONError(w, http.StatusNotFound, "user_not_found")
 			return
 		}
 
@@ -130,13 +129,13 @@ func updateProfileHandler(pool *pgxpool.Pool, storage *avatarStorage) http.Handl
 
 		userID := r.Header.Get("X-User-Id")
 		if userID == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing X-User-Id header")
+			writeJSONError(w, http.StatusBadRequest, "missing_user_id_header")
 			return
 		}
 
 		var req updateProfileRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
@@ -155,11 +154,11 @@ func updateProfileHandler(pool *pgxpool.Pool, storage *avatarStorage) http.Handl
 
 		profile, found, err := updateProfile(r.Context(), pool, userID, displayName)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !found {
-			writeJSONError(w, http.StatusNotFound, "user not found")
+			writeJSONError(w, http.StatusNotFound, "user_not_found")
 			return
 		}
 

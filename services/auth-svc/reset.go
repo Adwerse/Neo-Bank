@@ -26,11 +26,11 @@ func forgotPasswordHandler(pool *pgxpool.Pool, rdb *redis.Client, smtpAddr, smtp
 			Email string `json:"email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 		if _, err := mail.ParseAddress(req.Email); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid email")
+			writeJSONError(w, http.StatusBadRequest, "invalid_email")
 			return
 		}
 
@@ -38,23 +38,23 @@ func forgotPasswordHandler(pool *pgxpool.Pool, rdb *redis.Client, smtpAddr, smtp
 
 		allowed, err := rdb.SetNX(ctx, "forgot-password:"+req.Email, "1", forgotPasswordCooldown).Result()
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !allowed {
-			writeJSONError(w, http.StatusTooManyRequests, "please wait before requesting another code")
+			writeJSONError(w, http.StatusTooManyRequests, "verification_code_cooldown")
 			return
 		}
 
 		code, err := generateCode()
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		issued, err := issuePasswordResetCode(ctx, pool, req.Email, hashCode(code))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
@@ -114,18 +114,18 @@ func resetPasswordHandler(pool *pgxpool.Pool, rdb *redis.Client) http.HandlerFun
 			NewPassword string `json:"new_password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 		if len(req.NewPassword) < 8 {
-			writeJSONError(w, http.StatusBadRequest, "password must be at least 8 characters")
+			writeJSONError(w, http.StatusBadRequest, "password_too_short")
 			return
 		}
 
 		ctx := r.Context()
 		outcome, userID, err := resetPassword(ctx, pool, req.Email, req.Code, req.NewPassword)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
@@ -137,16 +137,16 @@ func resetPasswordHandler(pool *pgxpool.Pool, rdb *redis.Client) http.HandlerFun
 			// a guessed code for any email. Distinguishing "no such user"
 			// from "no code was ever requested" would reopen the exact
 			// enumeration hole /forgot-password's uniform response closes.
-			writeJSONError(w, http.StatusBadRequest, "invalid or expired reset code")
+			writeJSONError(w, http.StatusBadRequest, "invalid_reset_code")
 			return
 		case verifyCodeExpired:
-			writeJSONError(w, http.StatusBadRequest, "verification code has expired")
+			writeJSONError(w, http.StatusBadRequest, "verification_code_expired")
 			return
 		case verifyTooManyAttempts:
-			writeJSONError(w, http.StatusBadRequest, "too many failed attempts, request a new code")
+			writeJSONError(w, http.StatusBadRequest, "too_many_verification_attempts")
 			return
 		case verifyWrongCode:
-			writeJSONError(w, http.StatusBadRequest, "invalid verification code")
+			writeJSONError(w, http.StatusBadRequest, "invalid_verification_code")
 			return
 		}
 

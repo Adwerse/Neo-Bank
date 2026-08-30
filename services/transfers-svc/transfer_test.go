@@ -293,7 +293,7 @@ func TestCreateTransfer_RecipientNotFound(t *testing.T) {
 
 	accountsClient := &fakeAccountsClient{
 		resolveFunc: func(ctx context.Context, req *accountsv1.ResolveAccountByIbanRequest) (*accountsv1.ResolveAccountByIbanResponse, error) {
-			return nil, status.Error(codes.NotFound, "account not found")
+			return nil, status.Error(codes.NotFound, "account_not_found")
 		},
 	}
 

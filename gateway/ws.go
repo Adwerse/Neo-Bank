@@ -163,7 +163,7 @@ func (s *wsServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	claims, err := parseAccessToken(msg.Token, s.secret)
 	if err != nil {
-		conn.Close(websocket.StatusPolicyViolation, "invalid or expired token")
+		conn.Close(websocket.StatusPolicyViolation, "invalid_token")
 		log.Printf("gateway: ws closed — auth failed: %v", err)
 		return
 	}

@@ -41,44 +41,44 @@ func registerHandler(pool *pgxpool.Pool, smtpAddr, smtpFrom string) http.Handler
 
 		var req registerRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
 		if _, err := mail.ParseAddress(req.Email); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid email")
+			writeJSONError(w, http.StatusBadRequest, "invalid_email")
 			return
 		}
 		if len(req.Password) < 8 {
-			writeJSONError(w, http.StatusBadRequest, "password must be at least 8 characters")
+			writeJSONError(w, http.StatusBadRequest, "password_too_short")
 			return
 		}
 
 		passwordHash, err := hashPassword(req.Password)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		code, err := generateCode()
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		ctx := r.Context()
 		conflict, err := registerUserAndIssueCode(ctx, pool, req.Email, passwordHash, hashCode(code))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if conflict {
-			writeJSONError(w, http.StatusConflict, "email already registered")
+			writeJSONError(w, http.StatusConflict, "email_already_registered")
 			return
 		}
 
 		if err := sendVerificationEmail(smtpAddr, smtpFrom, req.Email, code); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to send verification email")
+			writeJSONError(w, http.StatusInternalServerError, "verification_email_send_failed")
 			return
 		}
 

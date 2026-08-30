@@ -16,7 +16,7 @@ import (
 // response, not a casual default like the old offset — silently falling
 // back to page 1 would return 200 with a different (wrong) page and mask
 // that from the client.
-var errInvalidCursor = errors.New("invalid cursor")
+var errInvalidCursor = errors.New("invalid_cursor")
 
 // pageCursor identifies the last row of a previously returned page, by the
 // same (created_at, id) tie-break getTransferHistoryPage's ORDER BY uses.

@@ -37,7 +37,7 @@ const (
 // STRIPE_SECRET_KEY (see main()). It is package-level rather than a
 // main()-local variable because no HTTP handler in transfers-svc consumes
 // it yet — PaymentIntent creation and webhook handling are future work
-// (see README, "Stripe-фондированные депозиты"). Go only rejects unused
+// (see README, "Stripe-funded deposits"). Go only rejects unused
 // *local* variables, so this compiles cleanly without a fabricated
 // consumer, while the client is still fully constructed and validated
 // (secret key present) before the service starts serving traffic.
@@ -102,7 +102,7 @@ func main() {
 	// Separate from STRIPE_SECRET_KEY by design: this signs webhook
 	// deliveries, not API requests, and is the one thing standing between
 	// stripeWebhookHandler and anyone on the internet claiming a payment
-	// succeeded (see README, "Локальная разработка" for how to obtain a
+	// succeeded (see README, "Local webhook development" for how to obtain a
 	// local value via the Stripe CLI).
 	stripeWebhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
 	if stripeWebhookSecret == "" {

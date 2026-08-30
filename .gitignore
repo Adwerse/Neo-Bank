@@ -5,7 +5,7 @@
 /services/*/server
 
 # Local secrets (real third-party credentials, e.g. STRIPE_SECRET_KEY —
-# never commit these; see .env.example and README "Stripe-фондированные
-# депозиты" for why this is treated differently from JWT_SECRET's harmless
+# never commit these; see .env.example and README "Stripe-funded deposits"
+# for why this is treated differently from JWT_SECRET's harmless
 # hardcoded dev value in docker-compose.yml).
 .env

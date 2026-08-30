@@ -44,14 +44,14 @@ func verifyEmailHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			Code  string `json:"code"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
 		ctx := r.Context()
 		outcome, _, attemptsRemaining, err := verifyEmailCode(ctx, pool, req.Email, req.Code)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
@@ -65,17 +65,17 @@ func verifyEmailHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"status": "active"})
 		case verifyUserNotFound:
-			writeJSONError(w, http.StatusBadRequest, "user not found")
+			writeJSONError(w, http.StatusBadRequest, "user_not_found")
 		case verifyNoActiveCode:
-			writeJSONError(w, http.StatusBadRequest, "no active verification code, request a new one")
+			writeJSONError(w, http.StatusBadRequest, "no_active_verification_code")
 		case verifyCodeExpired:
-			writeJSONError(w, http.StatusBadRequest, "verification code has expired")
+			writeJSONError(w, http.StatusBadRequest, "verification_code_expired")
 		case verifyTooManyAttempts:
-			writeJSONError(w, http.StatusBadRequest, "too many failed attempts, request a new code")
+			writeJSONError(w, http.StatusBadRequest, "too_many_verification_attempts")
 		case verifyWrongCode:
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]any{
-				"error":              "invalid verification code",
+				"error":              "invalid_verification_code",
 				"attempts_remaining": attemptsRemaining,
 			})
 		}
@@ -204,11 +204,11 @@ func resendVerificationHandler(pool *pgxpool.Pool, rdb *redis.Client, smtpAddr, 
 			Email string `json:"email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 		if _, err := mail.ParseAddress(req.Email); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid email")
+			writeJSONError(w, http.StatusBadRequest, "invalid_email")
 			return
 		}
 
@@ -216,36 +216,36 @@ func resendVerificationHandler(pool *pgxpool.Pool, rdb *redis.Client, smtpAddr, 
 
 		allowed, err := rdb.SetNX(ctx, "resend-verification:"+req.Email, "1", resendCooldown).Result()
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !allowed {
-			writeJSONError(w, http.StatusTooManyRequests, "please wait before requesting another code")
+			writeJSONError(w, http.StatusTooManyRequests, "verification_code_cooldown")
 			return
 		}
 
 		code, err := generateCode()
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		outcome, err := resendVerificationCode(ctx, pool, req.Email, hashCode(code))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		switch outcome {
 		case resendUserNotFound:
-			writeJSONError(w, http.StatusBadRequest, "user not found")
+			writeJSONError(w, http.StatusBadRequest, "user_not_found")
 			return
 		case resendNotPending:
-			writeJSONError(w, http.StatusBadRequest, "email is already verified")
+			writeJSONError(w, http.StatusBadRequest, "email_already_verified")
 			return
 		}
 
 		if err := sendVerificationEmail(smtpAddr, smtpFrom, req.Email, code); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to send verification email")
+			writeJSONError(w, http.StatusInternalServerError, "verification_email_send_failed")
 			return
 		}
 

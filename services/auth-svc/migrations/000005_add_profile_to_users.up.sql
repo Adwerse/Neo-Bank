@@ -1,7 +1,7 @@
 -- Profile attributes live on users, not a separate table or service:
 -- auth-svc already owns the user entity, and a display name/avatar are
 -- attributes of the user, not of any one account — see README's mini-ADR
--- "Профиль — в auth-svc, не в отдельном profile-svc".
+-- "Profile — in auth-svc, not a separate profile-svc".
 --
 -- display_name is nullable and NOT unique: namesakes are normal, and NULL
 -- (not empty string) is how "no display name set" is represented — PATCH

@@ -16,5 +16,5 @@
 -- barrier row for each of those AccountCreated events and every replay
 -- short-circuits on it. The consumers of this column therefore treat
 -- NULL as "omit the account line from the email" rather than as an
--- error; see README's "Проверка вручную" for the dev-only reset.
+-- error; see README's "Manual verification" for the dev-only reset.
 ALTER TABLE user_contacts ADD COLUMN account_number TEXT;

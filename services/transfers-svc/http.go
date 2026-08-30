@@ -62,24 +62,24 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 
 		idempotencyKey := r.Header.Get("Idempotency-Key")
 		if idempotencyKey == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing Idempotency-Key header")
+			writeJSONError(w, http.StatusBadRequest, "missing_idempotency_key_header")
 			return
 		}
 
 		userID := r.Header.Get("X-User-Id")
 		senderAccountID, err := resolveSenderAccountID(r.Context(), accountsClient, userID)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if senderAccountID == "" {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
 		var req createTransferRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
@@ -97,7 +97,7 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		transfer, outcome, err := createTransfer(ctx, pool, accountsClient, idempotencyKey, senderAccountID, userID, req.RecipientIban, req.Amount)
 		if err != nil {
 			tracing.Fail(ctx, "create_transfer_failed", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		tracing.SetAttributes(ctx,
@@ -106,31 +106,31 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		)
 		switch outcome {
 		case createTransferInvalidAmount:
-			writeJSONError(w, http.StatusBadRequest, "invalid amount")
+			writeJSONError(w, http.StatusBadRequest, "invalid_amount")
 			return
 		case createTransferInvalidRecipientIban:
-			writeJSONError(w, http.StatusBadRequest, "invalid IBAN")
+			writeJSONError(w, http.StatusBadRequest, "invalid_iban")
 			return
 		case createTransferUnsupportedBank:
-			writeJSONError(w, http.StatusBadRequest, "only transfers within this bank are supported")
+			writeJSONError(w, http.StatusBadRequest, "unsupported_bank")
 			return
 		case createTransferRecipientNotFound:
-			writeJSONError(w, http.StatusNotFound, "recipient not found")
+			writeJSONError(w, http.StatusNotFound, "recipient_not_found")
 			return
 		case createTransferSelfTransfer:
-			writeJSONError(w, http.StatusBadRequest, "cannot transfer to your own account")
+			writeJSONError(w, http.StatusBadRequest, "self_transfer_not_allowed")
 			return
 		case createTransferRecipientClosed:
-			writeJSONError(w, http.StatusConflict, "recipient account is closed")
+			writeJSONError(w, http.StatusConflict, "recipient_account_closed")
 			return
 		case createTransferSenderNotActive:
-			writeJSONError(w, http.StatusConflict, "sender account is not active")
+			writeJSONError(w, http.StatusConflict, "sender_account_not_active")
 			return
 		case createTransferResolveRateLimited:
-			writeJSONError(w, http.StatusTooManyRequests, "too many resolve attempts, try again later")
+			writeJSONError(w, http.StatusTooManyRequests, "too_many_resolve_attempts")
 			return
 		case createTransferKeyReused:
-			writeJSONError(w, http.StatusUnprocessableEntity, "idempotency key already used with different parameters")
+			writeJSONError(w, http.StatusUnprocessableEntity, "idempotency_key_conflict")
 			return
 		case createTransferReplayed:
 			// A prior request with this exact key already ran — return its
@@ -149,7 +149,7 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		transfer, fraudOutcome, err := checkTransferFraud(ctx, pool, fraudClient, transfer)
 		if err != nil {
 			tracing.Fail(ctx, "fraud_check_failed", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		tracing.SetAttributes(ctx, tracing.FraudDecision(fraudOutcome.String()))
@@ -195,7 +195,7 @@ func createTransferHandler(pool *pgxpool.Pool, accountsClient accountsv1.Account
 		settled, settleOutcome, err := settleTransfer(ctx, pool, ledgerClient, transfer)
 		if err != nil {
 			tracing.Fail(ctx, "settlement_failed", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		tracing.SetAttributes(ctx, tracing.TransferStatus(settled.Status))
@@ -247,17 +247,17 @@ func createDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 
 		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if accountID == "" {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
 		var req createDepositRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
@@ -269,7 +269,7 @@ func createDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 		deposit, clientSecret, outcome, err := createDeposit(r.Context(), pool, accountsClient, paymentIntents, accountID, req.Amount)
 		if err != nil {
 			tracing.Fail(r.Context(), "create_deposit_failed", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		// deposit.ID only. clientSecret is deliberately absent from the
@@ -279,10 +279,10 @@ func createDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accounts
 		tracing.SetAttributes(r.Context(), tracing.DepositID(deposit.ID))
 		switch outcome {
 		case createDepositInvalidAmount:
-			writeJSONError(w, http.StatusBadRequest, "invalid amount")
+			writeJSONError(w, http.StatusBadRequest, "invalid_amount")
 			return
 		case createDepositAccountNotActive:
-			writeJSONError(w, http.StatusConflict, "account is not active")
+			writeJSONError(w, http.StatusConflict, "account_not_active")
 			return
 		}
 
@@ -309,21 +309,21 @@ func getDepositHandler(pool *pgxpool.Pool, accountsClient accountsv1.AccountsSer
 
 		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if accountID == "" {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
 		deposit, found, err := getDepositByID(r.Context(), pool, r.PathValue("id"))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !found || deposit.AccountID != accountID {
-			writeJSONError(w, http.StatusNotFound, "deposit not found")
+			writeJSONError(w, http.StatusNotFound, "deposit_not_found")
 			return
 		}
 
@@ -347,31 +347,31 @@ func createWithdrawalHandler(pool *pgxpool.Pool, accountsClient accountsv1.Accou
 
 		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if accountID == "" {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
 		var req createWithdrawalRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
 		withdrawal, outcome, err := createWithdrawal(r.Context(), pool, accountsClient, ledgerClient, accountID, req.Amount)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		switch outcome {
 		case createWithdrawalInvalidAmount:
-			writeJSONError(w, http.StatusBadRequest, "invalid amount")
+			writeJSONError(w, http.StatusBadRequest, "invalid_amount")
 			return
 		case createWithdrawalAccountNotActive:
-			writeJSONError(w, http.StatusConflict, "account is not active")
+			writeJSONError(w, http.StatusConflict, "account_not_active")
 			return
 		}
 
@@ -421,17 +421,17 @@ func listTransfersHandler(writePool, readPool *pgxpool.Pool, accountsClient acco
 
 		accountID, err := resolveSenderAccountID(r.Context(), accountsClient, r.Header.Get("X-User-Id"))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if accountID == "" {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
 		limit, cursor, err := parseHistoryQuery(r)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid cursor")
+			writeJSONError(w, http.StatusBadRequest, "invalid_cursor")
 			return
 		}
 
@@ -443,10 +443,10 @@ func listTransfersHandler(writePool, readPool *pgxpool.Pool, accountsClient acco
 		entries, hasMore, err := getOperationHistoryPage(r.Context(), pool, accountsClient, accountID, limit, cursor)
 		if err != nil {
 			if errors.Is(err, errInvalidCursor) {
-				writeJSONError(w, http.StatusBadRequest, "invalid cursor")
+				writeJSONError(w, http.StatusBadRequest, "invalid_cursor")
 				return
 			}
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 

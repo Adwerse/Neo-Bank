@@ -1,7 +1,7 @@
 -- Run on the LEADER (pg_stat_replication only exists there, listing every
 -- streaming standby the leader currently sees). See README's "Postgres:
--- автоматический failover (Patroni + etcd)" for what a healthy vs lagging
--- row looks like.
+-- replication and automatic failover (Patroni + etcd)" for what a
+-- healthy vs lagging row looks like.
 --
 --   psql "postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
 --     -f infra/postgres/check_replication_lag.sql

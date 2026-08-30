@@ -1,298 +1,318 @@
-# Демо-сценарий (5–10 минут)
+# Demo script (5–10 minutes)
 
-Последовательность, которую можно показать вживую: от регистрации до
-убийства primary Postgres. Каждый шаг — что показать, что сказать и что
-должно произойти. У каждого шага есть запасной вариант через `curl` на
-случай, если что-то в UI подвисло или закапризничал браузер — демо,
-которое ломается вживую, хуже отсутствия демо, поэтому лучше заранее знать,
-чем закрыть паузу.
+A sequence you can walk through live: from registration to killing the
+primary Postgres. Each step covers what to show, what to say, and what
+should happen. Every step has a `curl` fallback in case the UI hangs or
+the browser misbehaves — a demo that breaks live is worse than no demo at
+all, so it's better to know in advance what you'll fill the gap with.
 
-Сценарий рассчитан на английские/латинские данные (email, суммы в EUR) —
-ничего специфичного для локали в UI нет.
+The script is built around English/Latin data (email, amounts in EUR) —
+there's nothing locale-specific in the UI.
 
-## Подготовка (за 10–15 минут до показа)
+## Setup (10–15 minutes before the demo)
 
-1. `docker compose up -d`, дождаться, пока `docker compose ps` покажет все
-   контейнеры `Up`/`healthy` (см. «Быстрый старт» в README).
-2. `cd frontend && npm run dev` — фронтенд на http://localhost:5173.
-3. Если будете показывать депозит по-настоящему: реальные тестовые ключи
-   Stripe в `.env` (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` от `stripe
-   listen`) — плейсхолдеры из `.env.example` стек поднимают, но депозит
-   через них не пройдёт. `docker compose up -d transfers-svc` после смены
-   `.env`, и `stripe listen --forward-to localhost:8080/webhooks/stripe` в
-   отдельном терминале, оставить работать. Если ключей нет — пропустите шаг 2
-   и покажите депозит на цифрах из README («Нагрузочное тестирование» уже
-   доказывает, что деньги двигаются по-настоящему; для этого демо-шага можно
-   ограничиться рассказом + кодом).
-4. **Два разных браузерных профиля (или один обычный + один инкогнито)** —
-   не две вкладки одного профиля. Refresh-токен лежит в `localStorage`,
-   общем для всех вкладок одного origin: залогинившись как Bob во второй
-   вкладке того же профиля, вы молча затрёте токен Alice. Два профиля —
-   единственный способ держать Alice и Bob залогиненными одновременно и
-   показать обновление у обоих без F5.
-5. Открыть заранее и оставить фоновыми вкладками: http://localhost:8025
-   (Mailpit), http://localhost:16686 (Jaeger). Держать под рукой терминал с
-   `docker compose ps` для последнего шага.
-6. Прогнать сценарий целиком хотя бы один раз до показа — именно так и
-   писался этот файл (см. «Как это проверено» в конце).
+1. `docker compose up -d`, wait until `docker compose ps` shows all
+   containers as `Up`/`healthy` (see "Quick start" in the README).
+2. `cd frontend && npm run dev` — frontend at http://localhost:5173.
+3. If you're going to show a real deposit: real Stripe test keys in
+   `.env` (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` from `stripe
+   listen`) — the placeholders from `.env.example` will bring the stack
+   up, but a deposit won't go through with them. `docker compose up -d
+   transfers-svc` after changing `.env`, and `stripe listen
+   --forward-to localhost:8080/webhooks/stripe` in a separate terminal,
+   left running. If you don't have keys — skip step 2 and show the
+   deposit using the numbers from the README ("Load test" already proves
+   that money moves for real; for this demo step you can settle for
+   narration + code).
+4. **Two separate browser profiles (or one regular + one incognito)** —
+   not two tabs in the same profile. The refresh token lives in
+   `localStorage`, which is shared across all tabs of the same origin:
+   logging in as Bob in a second tab of the same profile will silently
+   overwrite Alice's token. Two profiles are the only way to keep Alice
+   and Bob logged in at the same time and show both updating without F5.
+5. Open ahead of time and leave as background tabs: http://localhost:8025
+   (Mailpit), http://localhost:16686 (Jaeger). Keep a terminal with
+   `docker compose ps` handy for the last step.
+6. Run through the whole script at least once before the demo — that's
+   exactly how this file was written (see "How this was verified" at the
+   end).
 
-## 1. Регистрация → код на email → логин (~1.5 мин)
+## 1. Registration → email code → login (~1.5 min)
 
-**Показать:** на http://localhost:5173/register завести пользователя Alice
-(email + пароль от 8 символов). Переключиться на вкладку Mailpit — письмо
-с шестизначным кодом приходит за секунды. Ввести код на `/verify-email`,
-залогиниться.
+**Show:** create a user Alice at http://localhost:5173/register (email +
+password of 8+ characters). Switch to the Mailpit tab — the email with
+the six-digit code arrives within seconds. Enter the code at
+`/verify-email`, log in.
 
-**Сказать:** код подтверждения — это доказательство владения почтой, не
-проверка личности; в проекте нет KYC, и это осознанное ограничение (см.
-README, «Честные ограничения»). Письмо реально отправлено по SMTP — просто
-приёмник (`mailpit`) локальный, а не настоящий провайдер.
+**Say:** the verification code proves ownership of the mailbox, not
+identity; the project has no KYC, and that's a deliberate limitation (see
+the README, "Honest limitations"). The email is genuinely sent over SMTP
+— it's just that the receiver (`mailpit`) is local instead of a real
+provider.
 
-**Ожидаемый результат:** после логина — дашборд с балансом `0.00 EUR`.
-Повторить для Bob во втором профиле браузера.
+**Expected result:** after logging in — a dashboard with a balance of
+`0.00 EUR`. Repeat for Bob in the second browser profile.
 
-**Запасной вариант (curl):**
+**Fallback (curl):**
 ```bash
 curl -s -X POST http://localhost:8080/auth/register -H "Content-Type: application/json" \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}'
-# код — в Mailpit: http://localhost:8025/api/v1/search?query=to%3Aalice@example.com
+# the code is in Mailpit: http://localhost:8025/api/v1/search?query=to%3Aalice@example.com
 curl -s -X POST http://localhost:8080/auth/verify-email -H "Content-Type: application/json" \
-  -d '{"email":"alice@example.com","code":"<код из письма>"}'
+  -d '{"email":"alice@example.com","code":"<code from the email>"}'
 curl -s -X POST http://localhost:8080/auth/login -H "Content-Type: application/json" \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}'
-# {"access_token":"...", "refresh_token":"..."} — сохраните access_token в
-# переменную (ALICE_TOKEN / BOB_TOKEN), все запасные curl-команды ниже её
-# используют: export ALICE_TOKEN="<значение access_token>"
+# {"access_token":"...", "refresh_token":"..."} — save the access_token
+# into a variable (ALICE_TOKEN / BOB_TOKEN); all the fallback curl commands
+# below use it: export ALICE_TOKEN="<access_token value>"
 ```
 
-## 2. Депозит тестовой картой Stripe → баланс вырос (~1.5 мин)
+## 2. Deposit with a Stripe test card → balance goes up (~1.5 min)
 
-**Показать:** на дашборде Alice — «Пополнить», сумма (например, 500.00),
-карта `4242 4242 4242 4242`, любой будущий срок, любой CVC. После оплаты
-экран говорит «платёж принят, зачисление в течение минуты» — **не**
-«баланс пополнен» сразу. Баланс обновляется сам, без F5, когда фоновый
-воркер доводит депозит до `credited` (обычно секунды, не минуту).
+**Show:** on Alice's dashboard — "Deposit", an amount (e.g. 500.00), the
+card `4242 4242 4242 4242`, any future expiry, any CVC. After payment the
+screen says "payment accepted, funds will be credited within a minute" —
+**not** "balance topped up" right away. The balance updates itself,
+without F5, once the background worker moves the deposit to `credited`
+(usually seconds, not a minute).
 
-**Сказать:** это два разных факта в разное время — Stripe подтвердил
-списание с карты, банк начислил деньги на баланс — и экран об этом не
-врёт ни секунды из этого промежутка. Разбор — README, «`succeeded` и
-`credited`» в разделе мини-ADR.
+**Say:** these are two separate facts at two separate times — Stripe
+confirmed the card charge, the bank credited the money to the balance —
+and the screen doesn't lie about that for a single second of the gap in
+between. Full breakdown — README, "`succeeded` and `credited`" in the
+mini-ADR section.
 
-**Ожидаемый результат:** баланс Alice — `500.00 EUR` без перезагрузки
-страницы.
+**Expected result:** Alice's balance is `500.00 EUR` without reloading
+the page.
 
-**Запасной вариант:** если реальных ключей Stripe нет, зачислить деньги
-дев-инструментом (не проходит через Stripe, но по тому же коду `ledger-svc`,
-что и любой перевод — см. README, `cmd/devtopup`) и рассказать про
-`succeeded → credited` по коду:
+**Fallback:** if you don't have real Stripe keys, credit the money with
+the dev tool instead (it doesn't go through Stripe, but runs through the
+same `ledger-svc` code as any transfer — see the README, `cmd/devtopup`)
+and narrate the `succeeded → credited` flow from the code:
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
 LEDGER_GRPC_ADDR="localhost:8083" \
-  go run ./services/ledger-svc/cmd/devtopup --account-id <accounts.id из /accounts/me> --amount 50000
+  go run ./services/ledger-svc/cmd/devtopup --account-id <accounts.id from /accounts/me> --amount 50000
 ```
 
-## 3. Перевод второму пользователю → оба обновились без F5 (~1.5 мин)
+## 3. Transfer to a second user → both update without F5 (~1.5 min)
 
-**Показать:** у Alice — «Перевести», IBAN Bob (виден на его
-дашборде, `IE...`), сумма (например, 25.00). Отправить. Переключиться на
-профиль Bob — баланс и лента операций уже обновились сами (WebSocket-пуш
-→ фронтенд перезапрашивает `/accounts/me`).
+**Show:** on Alice's side — "Transfer", Bob's IBAN (visible on his
+dashboard, `IE...`), an amount (e.g. 25.00). Send it. Switch to Bob's
+profile — the balance and the activity feed have already updated
+themselves (a WebSocket push → the frontend re-fetches `/accounts/me`).
 
-**Сказать:** по WebSocket идёт не баланс, а сигнал «у тебя что-то
-изменилось» — клиент сам перезапрашивает авторитетное значение по HTTP.
-Причина — недоставленный или переупорядоченный WS-пуш не может оставить
-устаревшее число на экране, потому что числа в нём и не было (README,
-мини-ADR «Сигнал, а не данные»).
+**Say:** what travels over the WebSocket isn't the balance, it's a
+"something changed for you" signal — the client itself re-fetches the
+authoritative value over HTTP. The reason: an undelivered or reordered WS
+push can never leave a stale number on screen, because there was never a
+number in it to begin with (README, the "Signal, not data" mini-ADR).
 
-**Ожидаемый результат:** у Alice баланс уменьшился, у Bob увеличился —
-оба без нажатия F5.
+**Expected result:** Alice's balance goes down, Bob's goes up — both
+without pressing F5.
 
-**Запасной вариант:**
+**Fallback:**
 ```bash
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-transfer-1" \
-  -d '{"recipient_iban":"<IBAN Bob>","amount":2500}'
+  -d '{"recipient_iban":"<Bob's IBAN>","amount":2500}'
 ```
 
-## 4. Перевод, срабатывающий на fraud-правило → блокировка с причиной (~1 мин)
+## 4. Transfer that trips a fraud rule → blocked with a reason (~1 min)
 
-**Показать:** перевод от Alice на сумму больше 5000.00 EUR (например,
-6000.00). Ответ — отказ с указанием причины, деньги не двигаются.
+**Show:** a transfer from Alice for an amount over 5000.00 EUR (e.g.
+6000.00). The response is a rejection with a stated reason, and the money
+doesn't move.
 
-**Сказать:** решение fraud-svc объяснимо: `triggered_rule` всегда называет
-ровно одно правило (`amount_threshold`/`velocity_count`/`velocity_sum`), не
-«какую-то комбинацию». Bob не получает вообще никакого сигнала об этом
-переводе — получатель неуспешного перевода не резолвится даже на уровне
-поиска `user_id` (README, «Безопасность: получатель неуспешного перевода не
-резолвится вообще»).
+**Say:** fraud-svc's decision is explainable: `triggered_rule` always
+names exactly one rule
+(`amount_threshold`/`velocity_count`/`velocity_sum`), never "some
+combination." Bob gets no signal about this transfer whatsoever — the
+recipient of a failed transfer isn't resolved even at the level of
+looking up a `user_id` (README, "Security: the recipient of a failed
+transfer isn't resolved at all").
 
-**Ожидаемый результат:** статус `rejected`, `failure_reason:
-"amount_threshold"`, баланс Alice не изменился.
+**Expected result:** status `rejected`, `failure_reason:
+"amount_threshold"`, Alice's balance unchanged.
 
-**Запасной вариант:**
+**Fallback:**
 ```bash
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-fraud-1" \
-  -d '{"recipient_iban":"<IBAN Bob>","amount":600000}'
+  -d '{"recipient_iban":"<Bob's IBAN>","amount":600000}'
 # {"status":"rejected","failure_reason":"amount_threshold"}
 ```
 
-## 5. Jaeger: трейс одного перевода через 4 сервиса (~1.5 мин)
+## 5. Jaeger: tracing one transfer across 4 services (~1.5 min)
 
-**Показать:** http://localhost:16686 → Service = `gateway`, Operation =
-`POST /transfers/` → Find Traces → открыть самый свежий (перевод из шага 3
-или новый). Развернуть дерево спанов.
+**Show:** http://localhost:16686 → Service = `gateway`, Operation =
+`POST /transfers/` → Find Traces → open the most recent one (the transfer
+from step 3, or a new one). Expand the span tree.
 
-**Сказать:** один `trace_id` на весь путь: Gateway → transfers-svc →
-accounts-svc/fraud-svc/ledger-svc, с каждым SQL-запросом и `BEGIN`/`COMMIT`
-как отдельным спаном — это буквально DoD спринта про трейсинг. Если под
-рукой трейс медленнее обычного — можно сразу показать `pool.acquire` как
-отдельный спан и рассказать про узкое место №1 из нагрузочного теста (пул
-соединений `ledger-svc`).
+**Say:** a single `trace_id` covers the whole path: Gateway →
+transfers-svc → accounts-svc/fraud-svc/ledger-svc, with every SQL query
+and `BEGIN`/`COMMIT` as its own span — that's literally the tracing
+sprint's definition of done. If a slower-than-usual trace happens to be
+at hand, you can point straight at `pool.acquire` as its own span and
+talk through bottleneck #1 from the load test (the `ledger-svc`
+connection pool).
 
-**Ожидаемый результат:** дерево спанов с именами всех участвовавших
-сервисов, время каждого хопа видно на глаз.
+**Expected result:** a span tree with the names of every service
+involved, with the duration of each hop visible at a glance.
 
-## 6. Трейс зависшего перевода, разрешённого reconciliation (~1.5–2 мин)
+## 6. Trace of a stuck transfer resolved by reconciliation (~1.5–2 min)
 
-**Показать:**
+**Show:**
 ```bash
 docker compose stop fraud-svc
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-stuck-1" \
-  -d '{"recipient_iban":"<IBAN Bob>","amount":1000}'
+  -d '{"recipient_iban":"<Bob's IBAN>","amount":1000}'
 # 202 {"status":"pending","message":"fraud check unavailable, transfer still pending"}
 docker compose start fraud-svc
 ```
-Подождать ~20–30 секунд (`RECONCILE_STALE_AFTER=20s` в `.env` — специально
-укорочено под демо, боевое значение — 2 минуты), обновить ленту операций у
-Alice: перевод сам ушёл из `pending` — здесь в `failed`/`timeout_unresolved`,
-**и это правильный исход**, не сбой демо.
+Wait ~20–30 seconds (`RECONCILE_STALE_AFTER=20s` in `.env` — deliberately
+shortened for the demo; the production value is 2 minutes), refresh
+Alice's activity feed: the transfer has moved out of `pending` on its own
+— here into `failed`/`timeout_unresolved`, **and that's the correct
+outcome**, not a demo malfunction.
 
-**Сказать (важно не перепутать с «деньги пришли поздно»):** воркер не
-угадывает — он спрашивает `ledger-svc.GetTransactionByReference` напрямую,
-что произошло на самом деле, и отвечает честно, по факту. В этом сценарии
-fraud-svc был недоступен ДО вызова `ledger-svc` (перевод завис на fraud-
-проверке), поэтому `ledger-svc` эту транзакцию вообще не видел — реконсиляция
-находит «нет записи» и закрывает перевод как `failed`, а не выдумывает
-успех. Обратный случай — деньги ledger реально провёл, а ответ до
-`transfers-svc` не дошёл (обрыв связи после вызова, настоящая saga-проблема)
-— резолвится в `completed`; он тоже реален и задокументирован (README,
-«Как симулировался обрыв для проверки»), но воспроизводится только через
-отладочный флаг `SIMULATE_CRASH_AFTER_LEDGER_CALL`, который на живом показе
-поднимать не стоит — риск сломать демо выше, чем польза от более
-эффектной версии. Ключевая мысль одна и та же в обоих случаях: перевод
-никогда не остаётся в `pending` навсегда, потому что воркер сверяется с
-`ledger-svc`, а не молчит.
+**Say (important not to confuse this with "the money just arrived
+late"):** the worker doesn't guess — it asks
+`ledger-svc.GetTransactionByReference` directly what actually happened,
+and reports it honestly, based on the facts. In this scenario fraud-svc
+was unavailable BEFORE the call to `ledger-svc` (the transfer got stuck
+at the fraud check), so `ledger-svc` never saw this transaction at all —
+reconciliation finds "no record" and closes the transfer as `failed`,
+rather than inventing a success. The opposite case — the ledger actually
+posted the money, but the response never made it back to
+`transfers-svc` (the connection dropped after the call, a genuine saga
+problem) — resolves to `completed`; that case is also real and
+documented (README, "How the crash was simulated for testing"), but it
+only reproduces through the debug flag
+`SIMULATE_CRASH_AFTER_LEDGER_CALL`, which isn't worth enabling during a
+live demo — the risk of breaking the demo outweighs the payoff of the
+flashier version. The key point is the same in both cases: a transfer
+never stays `pending` forever, because the worker checks with
+`ledger-svc` instead of staying silent.
 
-В Jaeger у этого перевода — **два** трейса: исходный запрос и отдельный
-трейс воркера позже, связанные через span link, а не родитель-потомок
-(README, «Связь спанов: link, а не parent» — родитель не может закончиться
-раньше ребёнка, а тут между ними реальный временной разрыв).
+In Jaeger, this transfer has **two** traces: the original request and a
+separate worker trace later, linked via a span link rather than a
+parent-child relationship (README, "Span links: a link, not a parent" —
+a parent can't finish before its child, and here there's a real time gap
+between them).
 
-**Ожидаемый результат:** статус перевода — `failed`, `failure_reason:
-"timeout_unresolved"`, баланс Alice не тронут (деньги никогда не двигались);
-в Jaeger — второй трейс со `span link` на первый, атрибут
-`reconcile.trigger=stale_pending`.
+**Expected result:** transfer status `failed`, `failure_reason:
+"timeout_unresolved"`, Alice's balance untouched (the money never
+moved); in Jaeger — a second trace with a `span link` to the first,
+attribute `reconcile.trigger=stale_pending`.
 
-**Продвинутый вариант (опционально, требует отдельной репетиции заранее,
-не для импровизации на показе):** чтобы продемонстрировать именно
-`completed`-исход («деньги ledger провёл, ответ потерялся»), нужно поднять
-`transfers-svc` с `SIMULATE_CRASH_AFTER_LEDGER_CALL=true` и укороченным
-`RECONCILE_STALE_AFTER`, сделать перевод (клиент получит `502`, контейнер
-упадёт), затем перезапустить `transfers-svc` уже без переменной — воркер
-на следующем тике доведёт перевод до `completed`. Процедура и её вывод —
-README, «Как симулировался обрыв для проверки».
+**Advanced variant (optional, requires a separate rehearsal ahead of
+time, not for improvising during the show):** to demonstrate the
+`completed` outcome specifically ("the ledger posted the money, the
+response got lost"), you need to bring up `transfers-svc` with
+`SIMULATE_CRASH_AFTER_LEDGER_CALL=true` and a shortened
+`RECONCILE_STALE_AFTER`, make a transfer (the client gets a `502`, the
+container crashes), then restart `transfers-svc` without the variable —
+the worker will bring the transfer to `completed` on its next tick. The
+procedure and its output — README, "How the crash was simulated for
+testing".
 
-## 7. Убить primary Postgres → система пережила failover (~2 мин)
+## 7. Kill the primary Postgres → the system survives failover (~2 min)
 
-**Показать:**
+**Show:**
 ```bash
-# кто сейчас лидер
+# who's the current leader
 docker compose exec -T pg-node1 curl -s http://127.0.0.1:8008/cluster
-# убить его контейнер по имени (например, pg-node2, если это текущий лидер)
+# kill its container by name (e.g. pg-node2, if that's the current leader)
 docker kill neo-bank-pg-node2-1
 ```
-Сразу после — перевод в UI или curl падает/висит на несколько секунд.
-**Досказать rehearsed-цифру, пока ждёте**: в прогонах для README простой
-записи занял 23.6–25.4 секунды — это в основном (~20 с) TTL ключа лидера в
-etcd, жёсткий минимум Patroni, а не что-то, что можно подкрутить конфигом.
-Затем повторить перевод — проходит.
+Right after — a transfer in the UI or via curl fails/hangs for a few
+seconds. **While you wait, deliver the rehearsed number:** in the runs
+done for the README, write downtime took 23.6–25.4 seconds — that's
+mostly (~20 s) the leader key's TTL in etcd, a hard Patroni minimum, not
+something you can tune away in config. Then retry the transfer — it goes
+through.
 
-**Сказать:** ни одна подтверждённая транзакция не теряется — это то, что
-проверяет `infra/failover/failover_test.go` на каждый прогон: `SUM(entries)
-= 0` до и после, обе строки каждой проводки на новом лидере, старый лидер
-после перезапуска возвращается **репликой**, а не вторым лидером
-(split-brain). Простой длинный не потому, что что-то плохо сконфигурировано
-— `synchronous_mode` в Patroni гарантирует, что подтверждённая транзакция
-физически лежит на единственном узле, имеющем право стать лидером; именно
-эта гарантия и стоит ~24 секунд.
+**Say:** not a single confirmed transaction is lost — that's exactly
+what `infra/failover/failover_test.go` verifies on every run:
+`SUM(entries) = 0` before and after, both rows of every ledger entry
+present on the new leader, and the old leader comes back as a
+**replica** after restart, not as a second leader (split-brain). The
+downtime is long not because something is poorly configured — Patroni's
+`synchronous_mode` guarantees that a confirmed transaction physically
+sits on the one node eligible to become leader; that guarantee is
+exactly what costs ~24 seconds.
 
-**Ожидаемый результат:** перевод во время простоя — ошибка/таймаут;
-перевод через ~25 секунд — снова `completed`; `docker compose ps` показывает
-убитый узел вернувшимся и `Up`.
+**Expected result:** a transfer during the downtime — error/timeout; a
+transfer after ~25 seconds — `completed` again; `docker compose ps` shows
+the killed node back and `Up`.
 
-**Восстановление после демо:** упавший узел сам поднимается и
-присоединяется репликой — трогать ничего не нужно, `docker compose ps`
-покажет его `Up (healthy)` в течение ~30–40 секунд.
+**Recovery after the demo:** the crashed node comes back up and joins as
+a replica on its own — nothing needs to be touched, `docker compose ps`
+will show it `Up (healthy)` within ~30–40 seconds.
 
-## Если что-то пошло не так
+## If something goes wrong
 
-- **Шаг 2 (депозит) не проходит** — почти всегда значит placeholder-ключи
-  Stripe в `.env` вместо настоящих тестовых, или не запущен `stripe
-  listen`. Заготовленный fallback — `devtopup` — говорит то же самое про
-  `succeeded → credited` без реального Stripe.
-- **Шаг 3/6 «не обновилось без F5»** — почти всегда две вкладки одного
-  браузерного профиля (см. «Подготовка», пункт 4): последний логин
-  затирает refresh-токен предыдущего пользователя в `localStorage`.
-  Перелогиньте того, кто «слетел», в его собственном профиле.
-- **Шаг 6 не резолвится за 30 секунд** — проверить `docker compose logs
-  transfers-svc | grep reconcil`; воркер тикает раз в
-  `RECONCILE_STALE_AFTER`, так что в худшем случае это почти удвоенное
-  время. Не паниковать раньше 45 секунд.
-- **Шаг 7 «завис насовсем»** — если прошло больше ~40 секунд без
-  восстановления, проверить `docker compose exec pg-node1 curl -s
-  http://127.0.0.1:8008/cluster` на новом узле: если лидер не выбрался,
-  почти наверняка etcd (единственный узел в dev-топологии — README,
-  «Честные ограничения») сам недоступен. Это тот самый задокументированный
-  единственный SPOF топологии; `docker compose restart etcd` и заново.
+- **Step 2 (deposit) doesn't go through** — almost always means
+  placeholder Stripe keys in `.env` instead of real test ones, or
+  `stripe listen` isn't running. The prepared fallback — `devtopup` —
+  makes the same `succeeded → credited` point without real Stripe.
+- **Step 3/6 "didn't update without F5"** — almost always two tabs in
+  the same browser profile (see "Setup", item 4): the most recent login
+  overwrites the previous user's refresh token in `localStorage`. Log
+  the "dropped" user back in, in their own profile.
+- **Step 6 doesn't resolve within 30 seconds** — check `docker compose
+  logs transfers-svc | grep reconcil`; the worker ticks once every
+  `RECONCILE_STALE_AFTER`, so worst case that's almost double the time.
+  Don't panic before 45 seconds.
+- **Step 7 "stuck for good"** — if more than ~40 seconds have passed
+  with no recovery, check `docker compose exec pg-node1 curl -s
+  http://127.0.0.1:8008/cluster` on a different node: if no leader got
+  elected, it's almost certainly etcd itself (a single node in the dev
+  topology — README, "Honest limitations") that's unavailable. This is
+  exactly the documented single SPOF of the topology; `docker compose
+  restart etcd` and try again.
 
-## Как это проверено
+## How this was verified
 
-Шаги 1–4 и 6 прогнаны от начала до конца через `curl` против поднятого
-`docker compose up -d` стека (не только прочитаны в коде): регистрация →
-код из Mailpit → verify → login → провизия счёта асинхронным конвейером →
-обычный перевод (баланс на обеих сторонах точно на сумму перевода) →
-перевод на 6000.00 EUR (`rejected`/`amount_threshold`, баланс не тронут) →
-остановка fraud-svc → перевод (`202 pending`) → запуск fraud-svc → через
-~30 секунд перевод сам стал `failed`/`timeout_unresolved`. Именно этот
-последний результат и заставил переписать шаг 6: первый черновик этого
-файла утверждал, что перевод разрешится в `completed` — неправда для
-сценария «fraud-svc недоступен» (ledger-svc эту транзакцию никогда не
-видел, реконсиляции нечего находить), и только живой прогон это показал;
-код и devlog это подтверждают (`resolution=failed` в описании этого же
-сценария). Оставлено как урок в самом файле, а не молча исправлено, — ровно
-то, о чём предупреждает вступление: «демо, которое ломается вживую, хуже
-отсутствия демо», а незамеченная неточность в сценарии — то же самое, только
-до показа, а не во время него.
+Steps 1–4 and 6 were run end-to-end via `curl` against a live `docker
+compose up -d` stack (not just read out of the code): register → code
+from Mailpit → verify → login → account provisioning via the async
+pipeline → an ordinary transfer (balance on both sides changes by
+exactly the transfer amount) → a transfer for 6000.00 EUR
+(`rejected`/`amount_threshold`, balance untouched) → stop fraud-svc →
+transfer (`202 pending`) → start fraud-svc → about ~30 seconds later the
+transfer turned into `failed`/`timeout_unresolved` on its own. It was
+precisely this last result that forced a rewrite of step 6: the first
+draft of this file claimed the transfer would resolve to `completed` —
+which is false for the "fraud-svc unavailable" scenario (ledger-svc
+never saw this transaction, so reconciliation has nothing to find), and
+only a live run revealed that; the code and the devlog confirm it
+(`resolution=failed` in the write-up of this same scenario). It's left
+in as a lesson in the file itself rather than silently fixed — exactly
+what the introduction warns about: "a demo that breaks live is worse
+than no demo at all," and an unnoticed inaccuracy in the script is the
+same thing, just before the show instead of during it.
 
-UI-часть (клики, «без F5», Jaeger и Mailpit во вкладках браузера) не
-автоматизирована — в этой среде нет браузерного инструмента, которым можно
-было бы проверить её вживую; шаги 1–4 и 6 описывают тот же самый API,
-который только что был проверен curl'ом, один в один.
+The UI portion (clicks, "without F5," Jaeger and Mailpit in browser
+tabs) isn't automated — this environment has no browser tool that could
+verify it live; steps 1–4 and 6 describe exactly the same API that was
+just verified with curl, one to one.
 
-Шаг 7 тоже выполнен по-настоящему на этом стеке, не только прочитан в
-коде: `docker compose exec pg-node1 curl .../cluster` (лидер — `pg-node3`)
-→ `docker kill neo-bank-pg-node3-1` → серия `POST /transfers/` сразу
-начала отвечать `500` → кластер переизбрал лидера (`pg-node1`, новый
-`timeline` в выводе `/cluster`) → `docker compose up -d pg-node3` → перевод
-снова `completed` первым же запросом. Секундомер в этом прогоне не точен
-(скрипт-пробник опрашивал чаще, чем раз в секунду, и его собственный лог
-не годится как источник цифры простоя) — сам факт восстановления без
-вмешательства подтверждён живьём, а точное число простоя для показа стоит
-брать из README («Измеренное время переключения», три прогона строгого
-`failover_test.go`: 23.6–25.4 с) — это честнее, чем цифра с секундомера в
-этой сессии.
+Step 7 was also run for real on this stack, not just read out of the
+code: `docker compose exec pg-node1 curl .../cluster` (leader —
+`pg-node3`) → `docker kill neo-bank-pg-node3-1` → a series of
+`POST /transfers/` immediately started answering `500` → the cluster
+elected a new leader (`pg-node1`, a new `timeline` in the `/cluster`
+output) → `docker compose up -d pg-node3` → the transfer was `completed`
+again on the very first request. The stopwatch in this run isn't
+precise (the probe script polled more often than once a second, and its
+own log isn't a reliable source for the downtime figure) — the
+recovery-without-intervention itself is confirmed live, but the precise
+downtime figure for the demo should be taken from the README ("Measured
+failover time," three runs of the strict `failover_test.go`: 23.6–25.4
+s) — that's more honest than the stopwatch figure from this session.

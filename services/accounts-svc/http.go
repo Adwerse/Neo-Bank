@@ -36,17 +36,17 @@ func meAccountHandler(pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceCli
 
 		userID := r.Header.Get("X-User-Id")
 		if userID == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing X-User-Id header")
+			writeJSONError(w, http.StatusBadRequest, "missing_user_id_header")
 			return
 		}
 
 		acc, found, err := getAccountByUserID(r.Context(), pool, userID)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !found {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
@@ -59,12 +59,12 @@ func meAccountHandler(pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServiceCli
 			switch status.Code(err) {
 			case codes.Unavailable, codes.DeadlineExceeded:
 				// ledger-svc is down or slow — transient, retryable.
-				writeJSONError(w, http.StatusServiceUnavailable, "balance service temporarily unavailable")
+				writeJSONError(w, http.StatusServiceUnavailable, "balance_service_unavailable")
 			default:
 				// codes.NotFound (the ledger account should exist for any
 				// account that has an accounts row, so this is an internal
 				// inconsistency, not a client error) and anything else.
-				writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+				writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			}
 			return
 		}
@@ -99,7 +99,7 @@ func balanceHistoryHandler(pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServi
 
 		userID := r.Header.Get("X-User-Id")
 		if userID == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing X-User-Id header")
+			writeJSONError(w, http.StatusBadRequest, "missing_user_id_header")
 			return
 		}
 
@@ -112,17 +112,17 @@ func balanceHistoryHandler(pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServi
 		case "all":
 			from = nil
 		default:
-			writeJSONError(w, http.StatusBadRequest, "range must be one of: week, month, all")
+			writeJSONError(w, http.StatusBadRequest, "invalid_range")
 			return
 		}
 
 		acc, found, err := getAccountByUserID(r.Context(), pool, userID)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !found {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
@@ -130,9 +130,9 @@ func balanceHistoryHandler(pool *pgxpool.Pool, ledgerClient ledgerv1.LedgerServi
 		if err != nil {
 			switch status.Code(err) {
 			case codes.Unavailable, codes.DeadlineExceeded:
-				writeJSONError(w, http.StatusServiceUnavailable, "balance history temporarily unavailable")
+				writeJSONError(w, http.StatusServiceUnavailable, "balance_history_unavailable")
 			default:
-				writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+				writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			}
 			return
 		}
@@ -156,11 +156,11 @@ func getAccountHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		acc, found, err := getAccountByID(r.Context(), pool, r.PathValue("id"))
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if !found {
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		}
 
@@ -177,25 +177,25 @@ func updateAccountStatusHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			Status string `json:"status"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 		if _, ok := validAccountStatuses[req.Status]; !ok {
-			writeJSONError(w, http.StatusBadRequest, "invalid status value")
+			writeJSONError(w, http.StatusBadRequest, "invalid_status_value")
 			return
 		}
 
 		acc, outcome, err := updateAccountStatus(r.Context(), pool, r.PathValue("id"), req.Status)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		switch outcome {
 		case statusUpdateNotFound:
-			writeJSONError(w, http.StatusNotFound, "account not found")
+			writeJSONError(w, http.StatusNotFound, "account_not_found")
 			return
 		case statusUpdateInvalidTransition:
-			writeJSONError(w, http.StatusConflict, "invalid status transition")
+			writeJSONError(w, http.StatusConflict, "invalid_status_transition")
 			return
 		}
 

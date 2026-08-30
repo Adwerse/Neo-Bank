@@ -77,7 +77,7 @@ services:
       LEDGER_GRPC_ADDR: ledger-svc:8083
       GRPC_PORT: "9082"
       # A fictitious 4-letter institution code, not a real registered
-      # Irish bank — see README, "Честные ограничения".
+      # Irish bank — see README, "Honest limitations".
       BANK_CODE: "ZZZZ"
       # Left at their code defaults (10 attempts / 5 minutes) — present
       # here only so the rate limit is visible/tunable without a code
@@ -136,7 +136,7 @@ services:
       # Left empty by default, in which case the service uses its own
       # 2-minute default. Overridable from .env purely so the
       # reconciliation trace can be demonstrated without waiting two
-      # minutes per attempt — see README, "Reconciliation в трейсе".
+      # minutes per attempt — see README, "Reconciliation in the trace".
       RECONCILE_STALE_AFTER: ${RECONCILE_STALE_AFTER:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
@@ -175,7 +175,7 @@ services:
       - "8086:8086"
     # main() drains the in-flight message on SIGTERM before exiting — see
     # services/notifications-svc/main.go and README's "notifications-svc:
-    # устойчивость консьюмера" — and that drain is deliberately not
+    # consumer resilience" — and that drain is deliberately not
     # bounded by a timeout of its own. Docker's default 10s grace period
     # before SIGKILL is shorter than transfer.events' worst case (up to
     # transferMaxAttempts retries of a fully-down SMTP dependency, plus
@@ -395,7 +395,7 @@ services:
   # user.events/account.events get cleanup.policy=compact so a
   # late-subscribing consumer group can always read every historical
   # event for a still-live key, not just whatever survived time-based
-  # retention. See README's "Kafka: offset reset и retention" section.
+  # retention. See README's "Kafka: offset reset and retention" section.
   #
   # transfer.events gets cleanup.policy=delete — the broker default,
   # stated explicitly because the alternative is actively wrong here. Its
@@ -439,7 +439,7 @@ services:
 
   # S3-compatible object storage for avatar uploads. Provisioned this
   # sprint (bucket only — nothing uploads into it yet, that's next); see
-  # README's "Честные ограничения" for the prod-swap story: R2/S3 speak
+  # README's "Honest limitations" for the prod-swap story: R2/S3 speak
   # the same API, so going to production is an endpoint/credential change
   # here and in whichever service ends up with an S3 client, not a
   # rewrite. Dev credentials are the same "publicly a file in this repo

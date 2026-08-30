@@ -1,31 +1,32 @@
-# Чек-лист скриншотов/gif
+# Screenshot/gif checklist
 
-Не заполнено автоматически — в среде, где готовился этот коммит, не было
-браузерного инструмента для реальных скриншотов UI и Jaeger, а вставлять
-нерабочие ссылки на картинки или выдавать нарисованное за реальный экран
-не стоит. Ниже — точный список того, что снять, с шагом [DEMO.md](../../DEMO.md),
-который каждый скриншот воспроизводит, и ожидаемым именем файла. Снять
-каждый по шагам DEMO.md (стек поднят, `npm run dev` в `frontend/`), положить
-сюда рядом с этим файлом, и раскомментировать соответствующую строку в
-README (см. «Скриншоты» в самом верху, рядом с «Быстрый старт») —
-`![подпись](docs/screenshots/<файл>)`.
+Not filled in automatically — the environment this commit was prepared in
+had no browser tool for real UI/Jaeger screenshots, and it isn't worth
+inserting broken image links or passing off a mockup as a real screen.
+Below is the exact list of what to capture, with the [DEMO.md](../../DEMO.md)
+step each screenshot reproduces, and the expected filename. Capture each
+one by following DEMO.md's steps (stack up, `npm run dev` in `frontend/`),
+drop it here next to this file, and uncomment the corresponding line in
+the README (see "Screenshots" right at the top, next to "Quick start") —
+`![caption](docs/screenshots/<file>)`.
 
-| файл | шаг DEMO.md | что на экране |
+| file | DEMO.md step | what's on screen |
 |---|---|---|
-| `01-dashboard-empty.png` | 1 | Дашборд сразу после логина: баланс `0.00 EUR`, пустая лента операций |
-| `02-mailpit-code.png` | 1 | Mailpit UI с открытым письмом, виден шестизначный код |
-| `03-deposit-pending.png` | 2 | Экран депозита сразу после `confirmPayment`: «платёж принят, зачисление в течение минуты» — **до** того как баланс обновился |
-| `04-deposit-credited.png` | 2 | Тот же дашборд секундами позже: баланс уже вырос, без перезагрузки |
-| `05-transfer-both-sides.gif` | 3 | gif или два скриншота рядом: дашборды Alice и Bob до и сразу после перевода, оба обновились без F5 (два разных браузерных профиля — см. DEMO.md, «Подготовка») |
-| `06-fraud-blocked.png` | 4 | Ответ/тост с отказом и причиной (`amount_threshold`) на форме перевода |
-| `07-jaeger-transfer-trace.png` | 5 | Jaeger, развёрнутое дерево спанов одного перевода — виден gateway → transfers-svc → accounts-svc/fraud-svc/ledger-svc |
-| `08-jaeger-reconciliation-link.png` | 6 | Jaeger, спан `outbox publish` или воркера реконсиляции со ссылкой (span link) на исходный трейс |
-| `09-failover-terminal.png` | 7 | Терминал: `docker kill`, серия неудачных попыток перевода, затем успешная — это можно просто вставить как текст в README вместо картинки, см. пример ниже |
+| `01-dashboard-empty.png` | 1 | Dashboard right after login: balance `0.00 EUR`, empty operations feed |
+| `02-mailpit-code.png` | 1 | Mailpit UI with the email open, six-digit code visible |
+| `03-deposit-pending.png` | 2 | Deposit screen right after `confirmPayment`: "payment accepted, crediting within a minute" — **before** the balance updates |
+| `04-deposit-credited.png` | 2 | Same dashboard seconds later: balance already grew, no reload |
+| `05-transfer-both-sides.gif` | 3 | gif or two screenshots side by side: Alice's and Bob's dashboards before and right after the transfer, both updated without F5 (two different browser profiles — see DEMO.md, "Preparation") |
+| `06-fraud-blocked.png` | 4 | Response/toast with the rejection and reason (`amount_threshold`) on the transfer form |
+| `07-jaeger-transfer-trace.png` | 5 | Jaeger, expanded span tree for one transfer — gateway → transfers-svc → accounts-svc/fraud-svc/ledger-svc visible |
+| `08-jaeger-reconciliation-link.png` | 6 | Jaeger, the `outbox publish` span or the reconciliation worker's span with a span link back to the original trace |
+| `09-failover-terminal.png` | 7 | Terminal: `docker kill`, a run of failed transfer attempts, then a successful one — this can just be pasted as text into the README instead of an image, see the example below |
 
-Шаг 7 не обязательно снимать картинкой — реальный лог терминала честнее
-скриншота и его проще поддерживать, например `docker kill neo-bank-pg-node3-1`
-и серия попыток перевода до первого успеха. Точные цифры простоя (три
-прогона строгого автоматического теста, не ручного curl-скрипта) — уже в
-README, «Postgres: репликация и автоматический failover» → «Измеренное
-время переключения» (23.6–25.4 с); для скриншота/лога демо доверяйте этим
-числам, а не секундомеру во время презентации.
+Step 7 doesn't have to be a screenshot — a real terminal log is more
+honest than a screenshot and easier to keep up to date, e.g.
+`docker kill neo-bank-pg-node3-1` followed by a series of transfer
+attempts up to the first success. The exact downtime numbers (three runs
+of the strict automated test, not a manual curl script) are already in
+the README, "Postgres: replication and automatic failover" →
+"Measured failover time" (23.6–25.4 s); trust those numbers for the
+screenshot/log demo, not a stopwatch during the presentation.

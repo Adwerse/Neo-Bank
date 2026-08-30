@@ -94,29 +94,29 @@ func loginHandler(pool *pgxpool.Pool, rdb *redis.Client, jwtSecret string) http.
 
 		var req loginRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
 		ctx := r.Context()
 		user, outcome, err := authenticateUser(ctx, pool, req.Email, req.Password)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		switch outcome {
 		case loginInvalidCredentials:
-			writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
+			writeJSONError(w, http.StatusUnauthorized, "invalid_credentials")
 			return
 		case loginNotVerified:
-			writeJSONError(w, http.StatusForbidden, "email not verified")
+			writeJSONError(w, http.StatusForbidden, "email_not_verified")
 			return
 		}
 
 		pair, err := issueTokenPair(ctx, rdb, jwtSecret, user)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
@@ -131,29 +131,29 @@ func refreshHandler(pool *pgxpool.Pool, rdb *redis.Client, jwtSecret string) htt
 
 		var req refreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
 		ctx := r.Context()
 		user, outcome, err := consumeRefreshToken(ctx, rdb, pool, req.RefreshToken)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
 		switch outcome {
 		case refreshInvalidToken:
-			writeJSONError(w, http.StatusUnauthorized, "invalid or expired refresh token")
+			writeJSONError(w, http.StatusUnauthorized, "invalid_refresh_token")
 			return
 		case refreshAccountNotActive:
-			writeJSONError(w, http.StatusUnauthorized, "account is no longer active")
+			writeJSONError(w, http.StatusUnauthorized, "account_not_active")
 			return
 		}
 
 		pair, err := issueTokenPair(ctx, rdb, jwtSecret, user)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 
@@ -168,19 +168,19 @@ func logoutHandler(rdb *redis.Client) http.HandlerFunc {
 
 		var req logoutRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_body")
 			return
 		}
 
 		ctx := r.Context()
 		userID, err := rdb.GetDel(ctx, refreshKeyPrefix+req.RefreshToken).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
-			writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
 		if err == nil {
 			if err := rdb.SRem(ctx, userRefreshKeyPrefix+userID, req.RefreshToken).Err(); err != nil {
-				writeJSONError(w, http.StatusInternalServerError, "failed to process request")
+				writeJSONError(w, http.StatusInternalServerError, "internal_error")
 				return
 			}
 		}

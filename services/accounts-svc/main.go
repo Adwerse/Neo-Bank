@@ -36,8 +36,8 @@ const (
 
 	// defaultBankCode is a deliberately fictitious 4-letter institution
 	// code — not a near-miss of any real registered Irish bank (AIBK,
-	// BOFI, ULSB, PTSB, KBIE, NIRE, ...). See README's "Честные
-	// ограничения" for why generated IBANs must not point at a real
+	// BOFI, ULSB, PTSB, KBIE, NIRE, ...). See README's "Honest
+	// limitations" for why generated IBANs must not point at a real
 	// organization.
 	defaultBankCode = "ZZZZ"
 

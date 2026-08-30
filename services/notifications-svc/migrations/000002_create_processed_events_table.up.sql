@@ -23,7 +23,7 @@
 --                (UserActivated, AccountCreated), or a transfer event
 --                whose parties resolve to nobody we hold an address for
 -- See services/notifications-svc/contacts.go (claimEvent/finishEvent)
--- and README's «Барьер идемпотентности» for why 'processing' is treated
+-- and README's "Idempotency barrier" for why 'processing' is treated
 -- as "retry" rather than "skip".
 CREATE TABLE notifications_processed_events (
     event_id UUID PRIMARY KEY,

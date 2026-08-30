@@ -46,7 +46,8 @@ const reconcileInterval = 30 * time.Second
 // This same worker also drives deposit reconciliation (reconcileDepositsOnce,
 // deposit_reconcile.go) on every tick — including, notably, the everyday
 // crediting of Stripe-confirmed deposits, not just resolving stuck ones.
-// See README, "Депозиты: почему фоновый воркер" for why that lives here
+// See README, "Crediting: succeeded -> credited — why a background
+// worker, not a webhook handler or task queue" for why that lives here
 // rather than in the webhook handler or a separate task queue this repo
 // doesn't otherwise have.
 //

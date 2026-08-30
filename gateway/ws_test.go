@@ -179,8 +179,8 @@ func TestWSHandler_SixthConnectionRejected(t *testing.T) {
 }
 
 // TestWSRegistry_Send_DeliversOnlyToTargetUsersLocalConnections is the
-// delivery-layer half of the Kafka fan-out's DoD ("оба получают сигналы,
-// каждый свой, ни один не получил чужих данных"): notify_test.go proves
+// delivery-layer half of the Kafka fan-out's DoD ("both get their own
+// signal, neither gets the other's data"): notify_test.go proves
 // the routing DECISION never addresses the wrong user, this proves the
 // TRANSPORT that decision feeds into only ever reaches that user's own
 // connections — a user with two tabs open gets it on both, an unrelated

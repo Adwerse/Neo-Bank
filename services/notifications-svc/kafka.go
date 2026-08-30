@@ -163,7 +163,7 @@ const (
 // subscribed to user.events long after UserActivated started flowing (in
 // sprint 2), so without an explicit earliest start every user activated
 // before this service existed would never make it into the projection.
-// See README's "Kafka: offset reset и retention" for why compaction on
+// See README's "Kafka: offset reset and retention" for why compaction on
 // those two topics is the necessary other half of that.
 //
 // A notification reader (transfer.events) starts at LastOffset, and must.

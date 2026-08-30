@@ -54,14 +54,14 @@ func jwtMiddleware(next http.Handler, secret string) http.Handler {
 		token, ok := strings.CutPrefix(authHeader, "Bearer ")
 		if !ok || token == "" {
 			w.Header().Set("Content-Type", "application/json")
-			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
+			writeJSONError(w, http.StatusUnauthorized, "missing_bearer_token")
 			return
 		}
 
 		claims, err := parseAccessToken(token, secret)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
-			writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")
+			writeJSONError(w, http.StatusUnauthorized, "invalid_token")
 			return
 		}
 		r.Header.Set("X-User-Id", claims.UserID)

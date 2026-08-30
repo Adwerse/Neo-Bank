@@ -1,14 +1,14 @@
 # proto
 
-Общие gRPC-контракты сервисов необанка.
+Shared gRPC contracts for the neobank services.
 
-## Конвенция
-- Один `.proto` файл на публичный gRPC-интерфейс сервиса (например, `auth/v1/auth.proto` для auth-svc).
-- Файл добавляется в том спринте, где сервису реально нужен gRPC-контракт — не заранее.
+## Convention
+- One `.proto` file per service's public gRPC interface (e.g. `auth/v1/auth.proto` for auth-svc).
+- A file is added in the sprint where the service actually needs a gRPC contract — not ahead of time.
 
-## Генерация кода
-Сгенерированный Go-код лежит в `proto/gen/go` — руками не редактируется, перегенерируется через:
+## Code generation
+Generated Go code lives in `proto/gen/go` — never hand-edited, regenerated via:
 ```
 buf generate
 ```
-Требует локально: `buf`, `protoc-gen-go`, `protoc-gen-go-grpc`.
+Requires locally: `buf`, `protoc-gen-go`, `protoc-gen-go-grpc`.
