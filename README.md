@@ -1,624 +1,641 @@
 # Neo-Bank
 
-Мини-необанк на микросервисной архитектуре.
+A mini neobank on a microservices architecture.
 
-Neo-Bank — пет-проект необанка: можно зарегистрироваться, подтвердить почту
-шестизначным кодом, положить деньги тестовой картой, перевести их другому
-пользователю и увидеть баланс обновившимся без перезагрузки страницы. Это не
-продукт — на нём нельзя открыть настоящий счёт, и ни один перевод не выходит
-за пределы тестовой среды. Смысл проекта — по-настоящему разобраться, как
-устроена банковская система: как перевод не может увести счёт в минус даже
-под конкуренцией, что происходит, когда база данных падает посреди дня, и
-как поймать мошеннический перевод до того, как деньги ушли.
+Neo-Bank is a neobank pet project: you can register, verify your email with a
+six-digit code, top up with a test card, transfer money to another user, and
+see the balance update without reloading the page. It's not a product — you
+can't open a real account on it, and no transfer ever leaves the test
+environment. The point of the project is to genuinely understand how a
+banking system works: how a transfer can't push an account negative even
+under concurrency, what happens when the database goes down mid-day, and how
+to catch a fraudulent transfer before the money leaves.
 
-Технически это микросервисы на Go за одним Gateway (JWT, реверс-прокси,
-WebSocket-пуши), React-фронтенд и слой данных из Postgres (трёхузловой
-кластер с автоматическим failover), Kafka (связь между сервисами через
-transactional outbox) и Redis. Каждый шаг проекта отвечал на один конкретный
-инженерный вопрос и заканчивался измерением, а не предположением: «не уводит
-ли перевод счёт в минус под конкуренцией» — да, проверено конкурентным
-тестом; «переживает ли система смерть primary Postgres» — да, ~24 секунды
-простоя записи, воспроизведено несколько раз подряд; «можно ли проследить один перевод
-через четыре сервиса» — да, один `trace_id` в Jaeger; «что ломается первым
-под нагрузкой» — пул соединений `ledger-svc`, с цифрами ниже. Список того,
-что сознательно не сделано или сделано понарошку, — тоже часть проекта, а не
-послемыслие: см. «Честные ограничения» ниже.
+Technically it's Go microservices behind a single Gateway (JWT, reverse
+proxy, WebSocket pushes), a React frontend, and a data layer built on
+Postgres (a three-node cluster with automatic failover), Kafka (inter-service
+communication via a transactional outbox), and Redis. Every step of the
+project answered one concrete engineering question and ended in a
+measurement, not an assumption: "can a transfer push an account negative
+under concurrency" — no, verified with a concurrency test; "does the system
+survive the primary Postgres dying" — yes, ~24 seconds of write downtime,
+reproduced several times in a row; "can one transfer be traced across four
+services" — yes, one `trace_id` in Jaeger; "what breaks first under load" —
+the `ledger-svc` connection pool, with numbers below. The list of what was
+deliberately not done, or done as a simulation, is also part of the project,
+not an afterthought: see "Honest limitations" below.
 
-## Архитектура
+## Architecture
 
 ```
-Браузер (React SPA, :5173 в dev-режиме)
+Browser (React SPA, :5173 in dev mode)
     |
-    |  HTTP + WebSocket, JWT в Authorization / в первом сообщении WS
+    |  HTTP + WebSocket, JWT in Authorization / in the first WS message
     v
-Gateway :8080 -- единственная точка входа: терминирует JWT, проксирует по префиксу, шлёт WS-пуши
+Gateway :8080 -- the single entry point: terminates JWT, proxies by prefix, pushes WS updates
     |
     +--> auth-svc :8081            register / verify-email / login / refresh / logout
-    +--> accounts-svc :8082+9082   GET /accounts/me (баланс)
-    +--> transfers-svc :8084       transfers / deposits / withdrawals / история операций
-    +--> fraud-svc :8085+9085      только /healthz (сам сервис вызывается не через Gateway)
-    +--> notifications-svc :8086   только /healthz (публичного API у сервиса нет)
-    `--> /ws                       WebSocket: сигналы вида "у тебя что-то изменилось"
+    +--> accounts-svc :8082+9082   GET /accounts/me (balance)
+    +--> transfers-svc :8084       transfers / deposits / withdrawals / operation history
+    +--> fraud-svc :8085+9085      only /healthz (the service itself isn't called through the Gateway)
+    +--> notifications-svc :8086   only /healthz (the service has no public API)
+    `--> /ws                       WebSocket: signals like "something about you changed"
 
-Путь одного перевода (то, что измеряли все нагрузочные тесты):
+The path of a single transfer (what every load test measured):
 
-  Gateway --POST /transfers/--> transfers-svc --gRPC--> accounts-svc   (резолвинг счетов)
+  Gateway --POST /transfers/--> transfers-svc --gRPC--> accounts-svc   (resolving accounts)
                                                --gRPC--> fraud-svc      (CheckTransfer)
                                                --gRPC--> ledger-svc     (ExecuteTransfer)
-                                               --REST--> Stripe         (только депозиты)
+                                               --REST--> Stripe         (deposits only)
 
-Асинхронная сторона (outbox -> Kafka -> консьюмеры):
+The async side (outbox -> Kafka -> consumers):
 
-  auth-svc, transfers-svc --outbox--> Kafka :9092 --> accounts-svc (создание счёта)
-                                                   --> notifications-svc (письма через Mailpit)
-                                                   --> Gateway (WS-пуши в браузер)
+  auth-svc, transfers-svc --outbox--> Kafka :9092 --> accounts-svc (account creation)
+                                                   --> notifications-svc (emails via Mailpit)
+                                                   --> Gateway (WS pushes to the browser)
 
-Инфраструктура, с которой говорит почти каждый сервис:
+Infrastructure that almost every service talks to:
 
-  Postgres  -- не один узел, а кластер: pg-node1/2/3 (Patroni) + etcd (консенсус) +
-               pg-haproxy :5432/5433/5434 (единственный адрес, который знают сервисы)
-  Jaeger    -- :16686 UI, :4317 OTLP/gRPC -- трейс каждого хопа выше
-  Redis     -- :6379 -- только auth-svc (refresh-токены, rate limit)
-  Mailpit   -- :1025 SMTP / :8025 UI -- приёмник писем вместо реального провайдера
+  Postgres  -- not a single node but a cluster: pg-node1/2/3 (Patroni) + etcd (consensus) +
+               pg-haproxy :5432/5433/5434 (the single address services actually know)
+  Jaeger    -- :16686 UI, :4317 OTLP/gRPC -- traces every hop above
+  Redis     -- :6379 -- auth-svc only (refresh tokens, rate limit)
+  Mailpit   -- :1025 SMTP / :8025 UI -- an email sink instead of a real provider
 ```
 
-## Быстрый старт
+## Quick start
 
-### Требования
-Docker Desktop (с Compose v2); Go 1.25+, только если будете гонять тесты вне
-контейнеров; Node 18+ для фронтенда.
+### Requirements
+Docker Desktop (with Compose v2); Go 1.25+, only if you'll be running tests
+outside containers; Node 18+ for the frontend.
 
-### Поднять весь бэкенд одной командой
+### Bring up the whole backend with one command
 ```bash
-cp .env.example .env       # плейсхолдеры Stripe — стек стартует и без реальных ключей,
-                            # но депозиты (см. DEMO.md) без них не пройдут по-настоящему
+cp .env.example .env       # Stripe placeholders — the stack starts fine without real keys,
+                            # but deposits (see DEMO.md) won't actually go through without them
 docker compose up -d
 ```
 
-Поднимаются 17 контейнеров: 7 сервисов приложения (`gateway`, `auth-svc`,
+This brings up 17 containers: 7 application services (`gateway`, `auth-svc`,
 `accounts-svc`, `ledger-svc`, `transfers-svc`, `fraud-svc`,
-`notifications-svc`) и 10 инфраструктурных (`pg-node1/2/3` + `etcd` +
-`pg-haproxy` вместо одного Postgres, `redis`, `kafka` + `kafka-init`,
-`mailpit`, `jaeger`). На чистой машине первая сборка компилирует все
-Go-бинарники и занимает несколько минут; повторный `up` с уже собранными
-образами — меньше минуты. `docker compose ps` должен показать 16 контейнеров
-`Up` (те, у кого есть healthcheck, — `healthy`) и один, `kafka-init`,
-`Exited (0)` — это одноразовый провижининг Kafka-топиков, а не сбой.
+`notifications-svc`) and 10 infrastructure ones (`pg-node1/2/3` + `etcd` +
+`pg-haproxy` instead of a single Postgres, `redis`, `kafka` + `kafka-init`,
+`mailpit`, `jaeger`). On a clean machine the first build compiles all the Go
+binaries and takes a few minutes; a repeat `up` with images already built
+takes under a minute. `docker compose ps` should show 16 containers `Up`
+(the ones with a healthcheck as `healthy`) and one, `kafka-init`,
+`Exited (0)` — that's one-shot Kafka topic provisioning, not a failure.
 
-| порт | сервис | что это |
+| port | service | what it is |
 |---|---|---|
-| 8080 | gateway | **вход в API** — все запросы браузера идут сюда |
-| 5173 | frontend (dev) | **вход в UI** — после `npm run dev` в `frontend/` |
-| 16686 | jaeger | **Jaeger UI** — трейсы |
-| 8025 | mailpit | **Mailpit UI** — письма вместо реального почтового ящика |
-| 1025 | mailpit | SMTP-приёмник (сервисы шлют письма сюда) |
-| 5432 / 5433 / 5434 | pg-haproxy | Postgres: текущий лидер / любой стендбай / синхронный стендбай |
-| 6379 | redis | только auth-svc |
-| 9092 | kafka | только для отладки (`kafka-console-consumer` и т.п.) |
-| 8081–8086, 9082, 9085 | auth/accounts/ledger/transfers/fraud/notifications-svc | внутренние — вызываются через Gateway; открыты на хосте только для ручной проверки (см. разделы ниже) |
+| 8080 | gateway | **API entry point** — every browser request goes here |
+| 5173 | frontend (dev) | **UI entry point** — after `npm run dev` in `frontend/` |
+| 16686 | jaeger | **Jaeger UI** — traces |
+| 8025 | mailpit | **Mailpit UI** — emails instead of a real mailbox |
+| 1025 | mailpit | SMTP sink (services send emails here) |
+| 5432 / 5433 / 5434 | pg-haproxy | Postgres: current leader / any standby / synchronous standby |
+| 6379 | redis | auth-svc only |
+| 9092 | kafka | debugging only (`kafka-console-consumer` etc.) |
+| 8081–8086, 9082, 9085 | auth/accounts/ledger/transfers/fraud/notifications-svc | internal — called through the Gateway; exposed on the host only for manual inspection (see sections below) |
 
-### Поднять фронтенд
+### Bring up the frontend
 ```bash
 cd frontend
 npm install
 npm run dev     # http://localhost:5173
 ```
-Бэкенд поднимается отдельно (см. выше) — фронтенд проксирует `/api/*` на
-Gateway через dev-прокси Vite (см. «Фронтенд» ниже).
+The backend comes up separately (see above) — the frontend proxies `/api/*`
+to the Gateway through Vite's dev proxy (see "Frontend" below).
 
-### Тесты
-Юнит- и интеграционные тесты идут на реальном Postgres (конвенция репозитория:
-тест сам пропускает себя, если `DATABASE_URL` не задан) и предполагают
-поднятый `docker compose up -d`. Репозиторий — Go-воркспейс (`go.work`), но
-`./...` от корня не разворачивается по всем модулям (в корне нет своего
-`go.mod`, только `go.work`) — тем же способом, что и CI (`.github/workflows/ci.yml`),
-через `go list -m`:
+### Tests
+Unit and integration tests run against a real Postgres (repo convention: a
+test skips itself if `DATABASE_URL` isn't set) and assume
+`docker compose up -d` is running. The repo is a Go workspace (`go.work`),
+but `./...` from the root doesn't expand across all modules (there's no
+`go.mod` of its own at the root, only `go.work`) — the same way CI
+(`.github/workflows/ci.yml`) does it, via `go list -m`:
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go list -m -f '{{.Dir}}' | while IFS= read -r dir; do (cd "$dir" && go test ./...); done
 ```
-(`go test all` тоже технически работает, но разворачивает граф зависимостей
-целиком и на этом репозитории не укладывается в разумное время — не
-используйте её.) Тесты одного сервиса — как везде в README ниже, `cd
-services/<имя> && go test ./... -v` или `DATABASE_URL=... go test
-./services/<имя>/... -v` из корня.
+(`go test all` technically works too, but expands the entire dependency
+graph and doesn't finish in a reasonable time on this repo — don't use it.)
+Tests for a single service — as everywhere else in this README below, `cd
+services/<name> && go test ./... -v` or `DATABASE_URL=... go test
+./services/<name>/... -v` from the root.
 
-Отдельно, **не** входит в обычный прогон: тест автофейловера, он по-настоящему
-убивает контейнер Postgres —
+Separately, **not** part of the regular run: the failover test, which really
+does kill the Postgres container —
 ```bash
 FAILOVER_TEST=1 go test ./infra/failover/... -v -count=1 -timeout 15m
 ```
-Подробности — «Postgres: репликация и автоматический failover» ниже.
+Details — "Postgres: replication and automatic failover" below.
 
-### Нагрузочный тест
+### Load test
 ```bash
 go run ./loadtest/cmd/lt setup -users 40 -fund 100000000
 go run ./loadtest/cmd/lt fraud -mode loadtest
 ./loadtest/run.sh all
 go run ./loadtest/cmd/lt fraud -mode restore
 ```
-Три профиля (распределённый / горячий счёт / дубликаты); результаты и разбор
-узких мест — «Нагрузочное тестирование» ниже (потолок ~176 tx/s, горячий счёт
-31.5 tx/s независимо от конкуренции, узкое место — пул соединений
-`ledger-svc`).
+Three profiles (distributed / hot account / duplicates); results and a
+breakdown of the bottlenecks — "Load testing" below (ceiling ~176 tx/s, hot
+account 31.5 tx/s regardless of concurrency, the bottleneck is the
+`ledger-svc` connection pool).
 
-### Jaeger и Mailpit
-- **Jaeger** — http://localhost:16686. Сделайте перевод (через UI или curl),
-  выберите `service=gateway`, найдите трейс — внутри вложенные спаны всех
-  сервисов, через которые он прошёл.
-- **Mailpit** — http://localhost:8025. Сюда приходят все письма (код
-  подтверждения email, уведомления о переводах) вместо реального SMTP —
-  ничего не уходит за пределы docker-сети.
+### Jaeger and Mailpit
+- **Jaeger** — http://localhost:16686. Make a transfer (via the UI or curl),
+  pick `service=gateway`, find the trace — inside it are the nested spans of
+  every service it passed through.
+- **Mailpit** — http://localhost:8025. Every email (the email confirmation
+  code, transfer notifications) lands here instead of a real SMTP server —
+  nothing leaves the docker network.
 
-Пошаговый демонстрационный сценарий (5–10 минут, от регистрации до фейловера
-Postgres) — отдельно, в [DEMO.md](DEMO.md). Скриншоты/gif ключевых экранов и
-трейса Jaeger в этом README пока не вставлены — чек-лист, что снять и куда
-положить, в [docs/screenshots/CHECKLIST.md](docs/screenshots/CHECKLIST.md).
+A step-by-step demo script (5–10 minutes, from registration to a Postgres
+failover) lives separately in [DEMO.md](DEMO.md). Screenshots/gifs of the key
+screens and the Jaeger trace aren't inserted into this README yet — a
+checklist of what to capture and where to put it is in
+[docs/screenshots/CHECKLIST.md](docs/screenshots/CHECKLIST.md).
 
-## Честные ограничения
+## Honest limitations
 
-То, что в проекте сделано не по-настоящему или является осознанным
-компромиссом, а не забытой работой. Формулировка везде одна: «знаю и выбрал
-так», а не «не успел».
+compromise, not forgotten work. The framing is always the same: "I know and
+chose this," never "I didn't get to it."
 
-- **Вывод денег симулирован.** `POST /withdrawals` списывает деньги с
-  внутреннего баланса по-настоящему (тем же `ledger-svc.ExecuteTransfer`, что
-  и обычный перевод), но ни один вызов Stripe payout API никуда не уходит —
-  строка получает статус `payout_simulated`, и это видно в API и в истории
-  операций. Настоящий вывод на карту/счёт (Stripe Connect, ACH) требует
-  лицензии money transmitter — это регуляторное, а не техническое
-  ограничение, и его нельзя обойти, даже работая целиком в тестовом режиме
-  Stripe. Подробности — «`POST /withdrawals` — вывод денег, ТОЛЬКО СИМУЛЯЦИЯ»
-  ниже.
+- **Withdrawals are simulated.** `POST /withdrawals` really does debit the
+  internal balance (through the same `ledger-svc.ExecuteTransfer` as an
+  ordinary transfer), but no call to the Stripe payout API ever goes out —
+  the row gets a `payout_simulated` status, visible both in the API and in
+  the operation history. A real payout to a card/account (Stripe Connect,
+  ACH) requires a money transmitter license — that's a regulatory limit, not
+  a technical one, and it can't be worked around even running entirely in
+  Stripe test mode. Details — "`POST /withdrawals` — withdrawing money,
+  SIMULATION ONLY" below.
 
-- **Код банка в IBAN принадлежит несуществующему учреждению.**
-  `accounts-svc` генерирует каждому счёту настоящий, проходящий проверку
-  контрольных цифр (ISO 7064 mod-97-10, реализация — `pkg/iban`) ирландский
-  IBAN — но с 4-буквенным кодом банка `ZZZZ` (`BANK_CODE` в конфиге), а не
-  кодом реального ирландского учреждения (`AIBK`, `BOFI`, `PTSB` и
-  подобные). Это осознанный выбор, а не недосмотр: сгенерированные
-  банковские реквизиты не должны указывать на чужую организацию. IBAN
-  детерминирован из уже выданного `account_number` (см. `services/accounts-svc/accounts.go`,
-  `ibanPartsFromAccountNumber`) и досчитан для счетов, созданных до этого —
-  см. `services/accounts-svc/backfill.go`.
+- **The bank code in the IBAN belongs to a nonexistent institution.**
+  `accounts-svc` generates a real Irish IBAN for every account that passes
+  the check-digit validation (ISO 7064 mod-97-10, implemented in
+  `pkg/iban`) — but with the 4-letter bank code `ZZZZ` (`BANK_CODE` in
+  config), not the code of a real Irish institution (`AIBK`, `BOFI`, `PTSB`
+  and the like). This is a deliberate choice, not an oversight: generated
+  bank details must not point at someone else's real organization. The IBAN
+  is deterministic from the already-issued `account_number` (see
+  `services/accounts-svc/accounts.go`, `ibanPartsFromAccountNumber`) and is
+  backfilled for accounts created before that — see
+  `services/accounts-svc/backfill.go`.
 
-- **Переводы — только внутри банка, SEPA нет и не будет.** `POST
-  /transfers` резолвит получателя по IBAN через
-  `accounts-svc.ResolveAccountByIban`, но принимает только IBAN с
-  собственным кодом банка (`BANK_CODE`) — структурно валидный IBAN
-  другого учреждения отклоняется отдельным сообщением («переводы
-  поддерживаются только внутри банка»), а не тихо считается «получатель
-  не найден». Настоящий межбанковский перевод (SEPA Credit Transfer)
-  требует членства в клиринговой системе — не техническое ограничение,
-  архитектурное решение не строить то, что здесь не нужно демонстрировать.
-  Подробности — «Резолв получателя по IBAN» ниже.
+- **Transfers are intra-bank only — no SEPA, and never will be.** `POST
+  /transfers` resolves the recipient by IBAN via
+  `accounts-svc.ResolveAccountByIban`, but only accepts an IBAN carrying the
+  bank's own code (`BANK_CODE`) — a structurally valid IBAN from another
+  institution is rejected with its own distinct message ("transfers are only
+  supported within this bank"), not silently treated as "recipient not
+  found." A real interbank transfer (SEPA Credit Transfer) requires
+  membership in a clearing system — not a technical limitation, an
+  architectural decision not to build what there's no need to demonstrate
+  here. Details — "Resolving a recipient by IBAN" below.
 
-- **Имя получателя на подтверждении перевода не показывается.** Не
-  потому, что это не пришло в голову: в системе вообще нет поля с именем
-  пользователя — регистрация (`auth-svc`) собирает только email и пароль,
-  и это же поле было бы одним и тем же оракулом, что и сам резолв.
-  Настоящие банки показывают имя для защиты от опечатки в реквизитах —
-  здесь эта функция не реализована. Обоснование выбора среди трёх
-  вариантов (не показывать / показывать частично / показывать с жёстким
-  rate-limit) — «Резолв получателя по IBAN» ниже.
+- **The recipient's name isn't shown when confirming a transfer.** Not
+  because it didn't occur to anyone: the system has no name field for a user
+  at all — registration (`auth-svc`) only collects an email and a password,
+  and that same field would have been the exact same oracle as the resolve
+  call itself. Real banks show the name to protect against a typo in the
+  details — that feature isn't implemented here. The reasoning behind the
+  choice among three options (don't show it / show it partially / show it
+  behind a hard rate limit) — "Resolving a recipient by IBAN" below.
 
-- **KYC отсутствует.** Регистрация проверяет владение почтовым ящиком
-  (шестизначный код на email) — и всё. Проверки личности (документ, селфи-
-  сверка, санкционные списки, PEP-скрининг) в проекте нет и не планировалось:
-  это отдельная регуляторная и интеграционная область (типичные вендоры —
-  Persona, Sumsub, Onfido), не пересекающаяся с вопросами, на которые отвечает
-  этот проект — конкурентностью, отказоустойчивостью, трассируемостью,
-  нагрузкой. Email-верификация — доказательство владения почтой, а не
-  подтверждение личности; проект нигде не выдаёт одно за другое.
+- **There's no KYC.** Registration verifies ownership of a mailbox (a
+  six-digit code by email) — and that's it. Identity checks (a document,
+  a selfie match, sanctions lists, PEP screening) are absent from the
+  project and were never planned: that's a separate regulatory and
+  integration domain (typical vendors are Persona, Sumsub, Onfido) that
+  doesn't overlap with the questions this project answers — concurrency,
+  fault tolerance, traceability, load. Email verification proves mailbox
+  ownership, not identity; the project never passes one off as the other.
 
-- **Креды в `docker-compose.yml` — только для локальной разработки.** Пароль
-  Postgres и `JWT_SECRET` — читаемый хардкод в файле, который коммитится. Это
-  осознанно: секреты, которые обязаны быть настоящими (ключи Stripe),
-  вынесены в `.env` и в `.gitignore`; секреты, нужные только чтобы поднять
-  стек локально и одинаковые у всех, кто клонирует репозиторий, прятать
-  бессмысленно — они «публичны» с того момента, как стали файлом в
-  репозитории. В проде — секрет-менеджер, не `docker-compose.yml`.
+- **The credentials in `docker-compose.yml` are for local development
+  only.** The Postgres password and `JWT_SECRET` are readable hardcoded
+  values in a file that's committed. That's deliberate: secrets that must
+  be real (Stripe keys) are pulled out into `.env` and into `.gitignore`;
+  secrets only needed to bring the stack up locally, identical for everyone
+  who clones the repo, aren't worth hiding — they've been "public" from the
+  moment they became a file in the repository. In production: a secret
+  manager, not `docker-compose.yml`.
 
-- **Refresh-токен — в `localStorage`, не в httpOnly-cookie.** `localStorage`
-  читается любым JS на странице, включая инжектнутый через XSS. Правильное
-  решение — httpOnly-cookie (JS физически не может её прочитать), но оно
-  требует менять контракт `TokenPair` в `gateway/openapi.yaml`, ответы
-  `/login`/`/refresh` на `Set-Cookie`, добавлять `SameSite`/`Secure`-политику и
-  учить Gateway читать cookie, а не только заголовок `Authorization`. Текущий
-  вариант — сознательно принятый краткосрочный компромисс со своей ценой, а
-  не то, как это должно остаться. Access-токен при этом только в памяти (не в
-  `localStorage`) — половина смягчения, не полное решение. Подробности —
-  «Хранение токенов — и его цена» ниже.
+- **The refresh token lives in `localStorage`, not an httpOnly cookie.**
+  `localStorage` is readable by any JS on the page, including anything
+  injected via XSS. The correct fix is an httpOnly cookie (JS physically
+  can't read it), but that requires changing the `TokenPair` contract in
+  `gateway/openapi.yaml`, turning the `/login`/`/refresh` responses into
+  `Set-Cookie`, adding a `SameSite`/`Secure` policy, and teaching the
+  Gateway to read a cookie, not just the `Authorization` header. The current
+  setup is a deliberately accepted short-term compromise with a real cost,
+  not how it should stay. The access token, meanwhile, lives only in memory
+  (not `localStorage`) — half a mitigation, not a full fix. Details —
+  "Token storage — and its cost" below.
 
-- **Exactly-once для писем недостижим в принципе — выбран at-least-once с
-  дедупликацией.** Между «письмо отправлено» и «доставка Kafka подтверждена»
-  нет атомарной операции: либо возможен дубль письма (отправили, потом упали
-  до коммита оффсета — повтор пришлёт письмо снова), либо возможна потеря
-  (закоммитили, потом упали до отправки — письмо не уйдёт никогда). Выбран
-  первый риск: барьер идемпотентности (`processing` → отправка → `sent`)
-  минимизирует, но не устраняет окно дубля, а окно потери устраняет
-  полностью. Для банка это правильная сторона ошибки — пропущенное
-  уведомление о переводе хуже, чем повторное.
+- **Exactly-once for emails is unreachable in principle — at-least-once
+  with deduplication was chosen instead.** There's no atomic operation
+  between "the email was sent" and "Kafka delivery was confirmed": either a
+  duplicate email is possible (sent it, then crashed before committing the
+  offset — a retry sends it again), or a loss is possible (committed, then
+  crashed before sending — the email never goes out at all). The first risk
+  was chosen: an idempotency barrier (`processing` → send → `sent`)
+  minimizes but doesn't eliminate the duplicate window, while it eliminates
+  the loss window entirely. For a bank that's the right side to err on — a
+  missed transfer notification is worse than a duplicate one.
 
-- **Fail-closed при недоступном fraud-svc, не fail-open.** Если fraud-svc не
-  отвечает (упал, таймаут, ошибка Postgres на его стороне), перевод не
-  проводится — остаётся `pending`, деньги не двигаются, клиент получает `202`
-  с объяснением. Альтернатива (fail-open — пропустить перевод без проверки)
-  доступнее, но открывает дыру: тот, кто знает, что fraud-svc можно уронить
-  (или просто попадёт в окно реального сбоя), проведёт перевод вообще без
-  проверки. Цена выбора реальна: перевод не завершается, пока fraud-svc не
-  ответит, и висит в `pending`, пока его не разрешит reconciliation-воркер или
-  восстановившийся fraud-svc.
+- **Fail-closed when fraud-svc is unavailable, not fail-open.** If
+  fraud-svc doesn't respond (crashed, timed out, a Postgres error on its
+  side), the transfer doesn't go through — it stays `pending`, the money
+  doesn't move, the client gets a `202` with an explanation. The
+  alternative (fail-open — let the transfer through without a check) is
+  more available, but opens a hole: anyone who knows fraud-svc can be taken
+  down (or simply hits the window of a real outage) could push a transfer
+  through with no check at all. The cost of this choice is real: a transfer
+  doesn't complete until fraud-svc responds, and hangs in `pending` until
+  the reconciliation worker or a recovered fraud-svc resolves it.
 
-- **Горячий счёт ограничен блокировкой строки — измеренное число, не
-  гипотеза.** `SELECT ... FOR UPDATE` на счету-получателе сериализует все
-  переводы, которые его касаются: 31.5 перевода/с, и это число не меняется от
-  10 до 120 конкурентных пользователей — вместо этого линейно растёт
-  латентность. Именно эта блокировка не даёт счёту уйти в минус под
-  конкуренцией (тест из спринта 3); альтернативы (шардирование баланса,
-  оптимистичная блокировка с ретраями, неттинг) покупают пропускную
-  способность ценой либо этой гарантии, либо простоты схемы — и не сделаны
-  здесь осознанно, а не по нехватке времени. Полный разбор с трейсами —
-  «Нагрузочное тестирование» ниже.
+- **The hot account is bottlenecked by a row lock — a measured number, not
+  a hypothesis.** `SELECT ... FOR UPDATE` on the recipient account
+  serializes every transfer that touches it: 31.5 transfers/s, and that
+  number doesn't change from 10 to 120 concurrent users — latency grows
+  linearly instead. This exact lock is what keeps the account from going
+  negative under concurrency (the sprint 3 test); the alternatives (balance
+  sharding, optimistic locking with retries, netting) buy throughput at the
+  cost of either that guarantee or schema simplicity — and weren't done here
+  on purpose, not for lack of time. Full breakdown with traces — "Load
+  testing" below.
 
-- **Между сервисами нет ни mTLS, ни общего секрета.** Внутренние gRPC/HTTP-
-  вызовы (`transfers-svc` → `fraud-svc`, Gateway → `accounts-svc` и т.д.)
-  сегодня ничем не аутентифицированы — любой, кто окажется внутри
-  docker-сети, может дёрнуть `ledger-svc.ExecuteTransfer` напрямую, в обход
-  Gateway и fraud-проверки. В докере с закрытой сетью это не рабочий вектор
-  атаки, но это тот компромисс, который не переживёт переезд в среду с более
-  широким сетевым доступом.
+- **There's no mTLS or shared secret between services.** Internal
+  gRPC/HTTP calls (`transfers-svc` → `fraud-svc`, Gateway → `accounts-svc`,
+  etc.) are completely unauthenticated today — anyone who ends up inside
+  the docker network can call `ledger-svc.ExecuteTransfer` directly,
+  bypassing the Gateway and the fraud check. Inside Docker with a closed
+  network this isn't a working attack vector, but it's the kind of
+  compromise that wouldn't survive a move to an environment with broader
+  network access.
 
-- **100% семплирования трейсов — только для локальной разработки.** Не
-  предположение: `jaeger all-in-one` с in-memory storage занял 13.3 из 15.5
-  ГиБ памяти хоста после ~60 тысяч трассированных переводов во время
-  нагрузочного теста и вызвал побочные DNS-таймауты и кратковременный сбой
-  Patroni. В проде — постоянное хранилище (Cassandra/Elasticsearch) с
-  ratio-семплированием или головой с приоритетом на ошибки/медленные трейсы,
-  не 100%.
+- **100% trace sampling is for local development only.** Not an assumption:
+  `jaeger all-in-one` with in-memory storage used 13.3 of 15.5 GiB of host
+  memory after ~60 thousand traced transfers during the load test, and
+  triggered side-effect DNS timeouts and a brief Patroni outage. In
+  production: persistent storage (Cassandra/Elasticsearch) with ratio
+  sampling, or a head/tail sampler prioritizing errors/slow traces, not
+  100%.
 
-## Архитектурные решения (мини-ADR)
+## Architecture decisions (mini-ADRs)
 
-Десять решений, которые стоит принимать осознанно, а не по умолчанию — что
-выбрано, что отвергнуто и почему.
+Ten decisions worth making deliberately rather than by default — what was
+chosen, what was rejected, and why.
 
-### Монорепо, а не отдельные репозитории на сервис
-**Выбрано:** один репозиторий, один Go-воркспейс (`go.work`) на семь
-сервисов, `pkg/{health,outbox,pgha,tracing}` как общие модули, `proto/gen/go`
-— общие контракты.
-**Отвергнуто:** отдельный репозиторий на сервис — обычный выбор для
-организации с отдельными командами и независимым деплоем.
-**Почему:** проект — не набор независимо развиваемых команд, а одна система,
-которую один человек меняет сразу в нескольких сервисах за один шаг (пример —
-трейсинг: один пакет, семь `go.mod`, изменения в `pkg/pgha.NewPool`
-подхватывают все сервисы разом через `replace`). Полирепо покупает
-независимость релизного цикла — здесь релизного цикла в привычном смысле нет
-вообще, а независимость обернулась бы ручной синхронизацией версий общих
-пакетов между семью репозиториями.
+### A monorepo, not per-service repositories
+**Chosen:** one repository, one Go workspace (`go.work`) for seven
+services, `pkg/{health,outbox,pgha,tracing}` as shared modules, `proto/gen/go`
+as shared contracts.
+**Rejected:** a separate repository per service — the usual choice for an
+organization with separate teams and independent deploys.
+**Why:** this project isn't a set of independently evolving teams, it's one
+system that one person changes across several services in a single step at a
+time (example — tracing: one package, seven `go.mod` files, a change in
+`pkg/pgha.NewPool` is picked up by every service at once via `replace`).
+Polyrepo buys release-cycle independence — there's no release cycle here in
+the usual sense at all, and that independence would have turned into manual
+version syncing of shared packages across seven repositories.
 
-### Свой Gateway, а не Traefik/Kong
-**Выбрано:** `gateway/` — обычный `net/http`-сервис: `httputil.ReverseProxy`
-по префиксу пути плюс собственная JWT-мидлварь плюс WebSocket-эндпоинт с той
-же аутентификацией.
-**Отвергнуто:** готовый API-gateway (Traefik, Kong, Envoy) с JWT-плагином.
-**Почему:** JWT-валидация, WS-аутентификация первым сообщением и
-маршрутизация здесь — не три независимые задачи с общей инфраструктурой, а
-одна: `parseAccessToken` используется и мидлварью, и WS-хендлером напрямую
-как обычная Go-функция, без сериализации решения через внешний плагин-API.
-Готовый gateway решил бы маршрутизацию не хуже, но купил бы это ценой
-второго языка конфигурации (Traefik-labels/Kong-plugins) для логики, которая
-на несколько сотен строк Go пишется яснее и тестируется как обычный код
-(`gateway/ws_test.go`, `gateway/notify_test.go`), а не через интеграционные
-тесты против чужого рантайма. На масштабе с десятками сервисов и несколькими
-командами это решение стоило бы пересмотреть.
+### A custom Gateway, not Traefik/Kong
+**Chosen:** `gateway/` — an ordinary `net/http` service: `httputil.ReverseProxy`
+by path prefix plus its own JWT middleware plus a WebSocket endpoint with the
+same authentication.
+**Rejected:** an off-the-shelf API gateway (Traefik, Kong, Envoy) with a
+JWT plugin.
+**Why:** JWT validation, WS authentication on the first message, and routing
+here aren't three independent concerns sharing infrastructure, they're one:
+`parseAccessToken` is used directly by both the middleware and the WS
+handler as an ordinary Go function, with no decision serialized through an
+external plugin API. An off-the-shelf gateway would have handled routing
+just as well, but at the cost of a second configuration language
+(Traefik labels/Kong plugins) for logic that reads more clearly in a few
+hundred lines of Go and tests like ordinary code
+(`gateway/ws_test.go`, `gateway/notify_test.go`), rather than through
+integration tests against someone else's runtime. At the scale of dozens of
+services and several teams, this decision would be worth revisiting.
 
-### Kafka, а не NATS
-**Выбрано:** Kafka (через `segmentio/kafka-go`) как единственная шина
-событий.
-**Отвергнуто:** NATS / NATS JetStream — проще в эксплуатации, ниже задержка.
-**Почему:** два требования есть в системе с первого события, и у NATS Core их
-нет вовсе, а JetStream добавляет отдельным слоем поверх: партиционирование по
-ключу с гарантией порядка внутри партиции (`user_id`/`sender_account_id` —
-события одного счёта обязаны обрабатываться по порядку) и переигровка с
-начала для компактированных топиков (`user.events`/`account.events` — новый
-консьюмер обязан увидеть полную историю по каждому ключу, не только последние
-N сообщений). Это ядро модели Kafka, а не надстройка. Цена — Kafka заметно
-тяжелее в эксплуатации (видно и на нагрузочном тесте: релей outbox упирается
-в дефолтный `BatchTimeout=1s` у `kafka-go`, см. «Узкое место №3» ниже) — и это
-сознательно принятая цена, а не незамеченный побочный эффект.
+### Kafka, not NATS
+**Chosen:** Kafka (via `segmentio/kafka-go`) as the single event bus.
+**Rejected:** NATS / NATS JetStream — simpler to operate, lower latency.
+**Why:** two requirements exist in this system from the very first event,
+and NATS Core has neither at all, while JetStream adds them as a separate
+layer on top: key-based partitioning with ordering guaranteed within a
+partition (`user_id`/`sender_account_id` — events for one account must be
+processed in order) and replay from the beginning for compacted topics
+(`user.events`/`account.events` — a new consumer must see the full history
+per key, not just the last N messages). That's core to Kafka's model, not
+an add-on. The cost — Kafka is noticeably heavier to operate (visible in the
+load test too: the outbox relay bottlenecks on `kafka-go`'s default
+`BatchTimeout=1s`, see "Bottleneck #3" below) — and that's a deliberately
+accepted cost, not an unnoticed side effect.
 
-### Событие, а не синхронный вызов, при создании счёта
-**Выбрано:** `auth-svc` публикует `UserActivated` в `user.events` после
-подтверждения почты; `accounts-svc` — асинхронный консьюмер, который создаёт
-счёт по этому событию и следом вызывает `ledger-svc` по gRPC.
-**Отвергнуто:** `auth-svc` вызывает `accounts-svc` синхронно (REST/gRPC)
-прямо из хендлера `/verify-email`.
-**Почему:** синхронный вызов сделал бы подтверждение почты зависимым от
-аптайма `accounts-svc` (и транзитивно `ledger-svc`) в момент, когда
-пользователь ждёт ответа в браузере. С событием `/verify-email` коммитит и
-отвечает `200`, не дожидаясь, пока где-то в системе будет готов счёт;
-создание счёта happens-after, но не blocking-after. Цена — пользователь
-теоретически может успеть попасть на дашборд в окне между подтверждением
-почты и обработкой события, когда счёта ещё нет; окно ограничено интервалом
-релея outbox (тикер раз в секунду) — та же at-least-once идемпотентность,
-которая защищает весь Kafka-слой, делает и эту доставку надёжной без
-дополнительного кода.
+### An event, not a synchronous call, when creating an account
+**Chosen:** `auth-svc` publishes `UserActivated` to `user.events` after
+email verification; `accounts-svc` is an async consumer that creates the
+account off that event and then calls `ledger-svc` over gRPC.
+**Rejected:** `auth-svc` calls `accounts-svc` synchronously (REST/gRPC)
+directly from the `/verify-email` handler.
+**Why:** a synchronous call would have made email verification depend on
+`accounts-svc`'s uptime (and transitively `ledger-svc`'s) at the exact moment
+a user is waiting on a response in the browser. With an event, `/verify-email`
+commits and responds `200` without waiting for the account to be ready
+somewhere in the system; account creation happens-after, not blocking-after.
+The cost — a user could theoretically land on the dashboard in the window
+between the email being confirmed and the event being processed, while the
+account doesn't exist yet; the window is bounded by the outbox relay's
+interval (a once-a-second ticker) — the same at-least-once idempotency that
+protects the whole Kafka layer makes this delivery reliable too, with no
+extra code.
 
-### Outbox, а не прямая публикация в Kafka
-**Выбрано:** событие пишется в outbox-таблицу в той же Postgres-транзакции,
-что и бизнес-изменение; отдельный релей-воркер публикует его в Kafka секундой
-позже.
-**Отвергнуто:** публикация в Kafka прямо из хендлера, сразу после `COMMIT`
-бизнес-транзакции — именно так исторически было устроено в auth-svc, до
-миграции на outbox.
-**Почему:** прямая публикация оставляет окно, которое ничем не закрыть: упади
-процесс между `COMMIT` и вызовом Kafka-продюсера — событие теряется молча,
-бизнес-изменение состоялось, а система об этом не узнала. Outbox делает
-публикацию частью той же атомарной единицы, что и само изменение (либо оба,
-либо ни одного), ценой того, что публикация становится отложенной на
-секунду-другую, а не мгновенной — цена, измеренная в нагрузочном тесте
-(«Узкое место №3»): при дефолтных настройках релей отстаёт от нагрузки в 176
-раз.
+### An outbox, not a direct publish to Kafka
+**Chosen:** the event is written to an outbox table in the same Postgres
+transaction as the business change; a separate relay worker publishes it to
+Kafka a second or so later.
+**Rejected:** publishing to Kafka directly from the handler, right after the
+business transaction's `COMMIT` — that's actually how auth-svc was
+historically wired, before the migration to an outbox.
+**Why:** a direct publish leaves a window nothing can close: if the process
+crashes between the `COMMIT` and the call to the Kafka producer, the event is
+lost silently — the business change happened, and the system never found
+out. An outbox makes the publish part of the same atomic unit as the change
+itself (either both happen, or neither does), at the cost of the publish
+becoming delayed by a second or two instead of instant — a cost measured in
+the load test ("Bottleneck #3"): with default settings, the relay falls
+176x behind the load.
 
-### Сигнал, а не данные, во WebSocket-сообщениях
-**Выбрано:** `{"type":"balance.changed"}`,
-`{"type":"transfer.updated","transfer_id":"..."}` — только тип события и
-идентификатор; клиент перезапрашивает авторитетное значение обычным HTTP.
-**Отвергнуто:** класть в WS-сообщение сам новый баланс/статус, экономя
-клиенту лишний HTTP-запрос.
-**Почему:** порядок доставки по WS не гарантирован (событие может дойти после
-более позднего или не дойти вовсе — например, если соединение разорвалось
-между отправкой и доставкой), а значит любое значение прямо в сообщении может
-оказаться устаревшим молча — клиент не отличит свежие данные от протухших,
-которые выглядят как свежие. У сигнала этой проблемы нет по построению:
-HTTP-запрос, который он вызывает, всегда проходит через `jwtMiddleware` и
-всегда читает текущее состояние. Цена — на каждое изменение уходит два круга
-(WS-пуш + HTTP-запрос) вместо одного, и это осознанно принято ради
-консистентности, а не пропущено по недосмотру.
+### A signal, not data, in WebSocket messages
+**Chosen:** `{"type":"balance.changed"}`,
+`{"type":"transfer.updated","transfer_id":"..."}` — only the event type and
+an identifier; the client re-fetches the authoritative value over ordinary
+HTTP.
+**Rejected:** putting the actual new balance/status in the WS message
+itself, saving the client an extra HTTP request.
+**Why:** WS delivery order isn't guaranteed (an event can arrive after a
+later one, or not arrive at all — e.g. if the connection dropped between
+sending and delivery), which means any value placed directly in the message
+could silently be stale — the client can't tell fresh data apart from stale
+data that looks fresh. A signal has none of this problem by construction:
+the HTTP request it triggers always goes through `jwtMiddleware` and always
+reads current state. The cost — every change costs two round trips (a WS
+push + an HTTP request) instead of one, and that's deliberately accepted for
+the sake of consistency, not missed by oversight.
 
-### `succeeded` и `credited` — два разных статуса депозита, не один
-**Выбрано:** депозит проходит `succeeded` (Stripe принял платёж) →
-`credited` (фоновый воркер провёл проводку в ledger) как два отдельных,
-наблюдаемых статуса с зазором между ними.
-**Отвергнуто:** один статус `completed`, выставляемый прямо в Stripe-вебхуке.
-**Почему:** это два разных факта, физически происходящих в разное время и в
-разных системах — Stripe подтвердил списание с карты, Neo-Bank начислил
-деньги на баланс, — и схлопывание их в один статус было бы неправдой в те
-секунды, когда webhook уже пришёл, а фоновый воркер ещё не провёл
-транзакцию. Фронтенд использует эту честность впрямую: экран депозита не
-показывает «баланс пополнен» по первому же успеху, а опрашивает `GET
-/deposits/{id}`, пока статус не станет `credited`. Обратная сторона —
-сложнее (нужен фоновый воркер, реконсиляция зависших `succeeded`-депозитов),
-но альтернатива обманывала бы пользователя ровно в тот момент, когда доверие
-к цифре баланса важнее всего.
+### `succeeded` and `credited` — two distinct deposit statuses, not one
+**Chosen:** a deposit goes through `succeeded` (Stripe accepted the
+payment) → `credited` (a background worker posted the ledger entry) as two
+separate, observable statuses with a gap between them.
+**Rejected:** a single `completed` status, set directly in the Stripe
+webhook.
+**Why:** these are two distinct facts, physically happening at different
+times in different systems — Stripe confirmed the card charge, Neo-Bank
+credited the balance — and collapsing them into one status would be untrue
+during the seconds when the webhook has already arrived but the background
+worker hasn't posted the transaction yet. The frontend uses this honesty
+directly: the deposit screen doesn't show "balance topped up" on the first
+success, it polls `GET /deposits/{id}` until the status becomes `credited`.
+The trade-off is more complexity (a background worker is needed,
+reconciliation for stuck `succeeded` deposits), but the alternative would
+mislead the user at exactly the moment trust in the balance figure matters
+most.
 
-### Нет MongoDB — или любой другой NoSQL-базы
-**Выбрано:** один Postgres (кластер) на всё, включая то, что выглядит как
-неструктурированные данные (JSONB-колонки — `fraud_checks.details`,
+### No MongoDB — or any other NoSQL database
+**Chosen:** one Postgres (cluster) for everything, including what looks
+like unstructured data (JSONB columns — `fraud_checks.details`,
 `outbox.trace_context`).
-**Отвергнуто:** документная база под конкретные сервисы — например,
-notifications-svc с его проекцией `user_contacts`, или fraud-svc с `details`,
-которые и так JSONB.
-**Почему:** сердце системы — двойная запись (`entries`), и её инвариант
-(`SUM(entries) = 0`, ни один баланс не уходит в минус под конкуренцией) не
-формулируется без строгих ACID-транзакций и блокировок на уровне строки — то,
-что документная база не даёт по определению модели согласованности. Любой
-сервис, который завёл бы отдельную NoSQL-базу, не получил бы принципиально
-ничего: он либо не участвует в денежном инварианте (notifications-svc,
-fraud-svc), и Postgres с JSONB для его данных ничем не хуже документной базы,
-либо участвует — и тогда обязателен ACID, вопрос закрыт. Цена «одного
-Postgres на всё» — независимое масштабирование каждого сервиса по
-собственному профилю нагрузки; на масштабе этого проекта её никто не платит.
+**Rejected:** a document database for specific services — say,
+notifications-svc with its `user_contacts` projection, or fraud-svc with
+`details`, which is already JSONB.
+**Why:** the heart of the system is double-entry (`entries`), and its
+invariant (`SUM(entries) = 0`, no balance ever going negative under
+concurrency) can't be expressed without strict ACID transactions and
+row-level locks — something a document database doesn't provide by
+definition of its consistency model. Any service that stood up a separate
+NoSQL database would gain nothing fundamental: it either doesn't
+participate in the money invariant (notifications-svc, fraud-svc), and
+Postgres with JSONB for its data is no worse than a document database, or it
+does participate — and then ACID is mandatory, question closed. The cost of
+"one Postgres for everything" is independent scaling of each service by its
+own load profile; at this project's scale, nobody pays that cost.
 
-### Профиль — в auth-svc, а не в отдельном profile-svc
-**Выбрано:** `display_name`/`avatar_key`/`avatar_updated_at` — колонки на
-`users` в auth-svc, отдаются через `GET /profile`/`PATCH /profile` там же.
-**Отвергнуто:** отдельный `profile-svc` со своей БД, своим outbox, своими
-миграциями.
-**Почему:** auth-svc уже владеет сущностью пользователя — профиль
-(отображаемое имя, аватар) её атрибут, не атрибут счёта (`accounts-svc`) и не
-самостоятельная сущность с собственным жизненным циклом. Разделение по
-сервисам в этом проекте идёт по владению данными (см. «Монорепо» выше, тот же
-принцип), а не по каждой новой паре полей: `profile-svc` был бы чище с точки
-зрения границ ответственности на бумаге, но ради двух колонок пришлось бы
-поднимать вторую копию всей обвязки, которая у auth-svc уже есть и работает —
-Postgres-подключение, миграции, `auth_outbox` + relay + cleanup-воркер,
-health-check — и добавить сервису-потребителю (`notifications-svc`) ещё один
-gRPC/HTTP-клиент и точку отказа ради данных, которые логически всё равно
-принадлежат пользователю, которым уже владеет auth-svc. `ProfileUpdated`
-поэтому публикуется через уже существующий `auth_outbox`/`user.events`, тем
-же путём, что и `UserActivated` — не новый топик, не новая таблица.
+### Profile lives in auth-svc, not a separate profile-svc
+**Chosen:** `display_name`/`avatar_key`/`avatar_updated_at` are columns on
+`users` in auth-svc, served through `GET /profile`/`PATCH /profile` there
+too.
+**Rejected:** a separate `profile-svc` with its own DB, its own outbox, its
+own migrations.
+**Why:** auth-svc already owns the user entity — the profile (display name,
+avatar) is an attribute of it, not an attribute of the account
+(`accounts-svc`) and not a standalone entity with its own lifecycle.
+Service boundaries in this project follow data ownership (see "Monorepo"
+above, the same principle), not every new pair of fields: a `profile-svc`
+would be cleaner in terms of responsibility boundaries on paper, but for two
+columns it would mean standing up a second copy of all the plumbing
+auth-svc already has and already runs — a Postgres connection, migrations,
+`auth_outbox` + relay + cleanup worker, health check — and giving the
+consuming service (`notifications-svc`) another gRPC/HTTP client and point
+of failure for data that logically still belongs to the user auth-svc
+already owns. That's why `ProfileUpdated` is published through the existing
+`auth_outbox`/`user.events`, the same path as `UserActivated` — not a new
+topic, not a new table.
 
-### Экран профиля: параллельные запросы с фронта, а не агрегирующий эндпоинт в Gateway
-**Выбрано:** экран профиля бьёт по трём источникам данных (`GET /profile` —
-auth-svc; `GET /accounts/me` — accounts-svc, сама уже агрегирующая счёт, IBAN
-и баланс через `ledger-svc`) двумя независимыми HTTP-запросами; фронт (когда
-дойдёт очередь — см. «НЕ ДЕЛАЙ» этого спринта) объединяет их через
-react-query.
-**Отвергнуто:** BFF-эндпоинт в Gateway (`GET /profile-screen` или подобный),
-который сам делает оба вызова и отдаёт один собранный JSON.
-**Почему:** у BFF ровно один реальный довод — меньше round-trip'ов с мобильной
-сети, что имеет цену на плохом канале, но не в этой системе на этой стадии.
-Взамен Gateway перестаёт быть тонким прокси (см. «Свой Gateway» выше — его
-работа сегодня — маршрутизация, JWT, WebSocket, ничего доменного) и
-получает знание о том, что такое «экран профиля» — доменную концепцию,
-которая по-хорошему не должна знать транспортный слой. Два независимых
-запроса вместо одного агрегирующего — это ещё и то, что напрямую даёт задачу
-3 ниже бесплатно: если `auth-svc` недоступен, `GET /accounts/me` — отдельное
-TCP-соединение к отдельному бэкенду — этого попросту не заметит; агрегирующий
-эндпоинт, наоборот, должен был бы САМ решать, что делать со своим собственным
-частичным отказом (ждать оба вызова с общим таймаутом? возвращать
-`207 Multi-Status`? глотать ошибку одного домена молча?) — не бесплатная
-логика, а ровно то, чего вариант с параллельными запросами избегает по
-построению. **Если бы был выбран BFF** — оба вызова (auth-svc, accounts-svc)
-обязаны идти из Gateway параллельно (`goroutine` + `errgroup`/`sync.WaitGroup`
-на оба вызова, ждать оба, не один за другим), иначе латентность реального
-экрана — это сумма двух сервисов, а не максимум из них; но это гипотетический
-дизайн, а не то, что здесь сделано.
+### Profile screen: parallel requests from the frontend, not an aggregating Gateway endpoint
+**Chosen:** the profile screen hits three data sources (`GET /profile` —
+auth-svc; `GET /accounts/me` — accounts-svc, which already aggregates the
+account, IBAN, and balance via `ledger-svc`) as two independent HTTP
+requests; the frontend (whenever it gets there — see this sprint's "NOT TO
+DO") merges them via react-query.
+**Rejected:** a BFF endpoint in the Gateway (`GET /profile-screen` or
+similar) that makes both calls itself and returns one assembled JSON.
+**Why:** a BFF has exactly one real argument in its favor — fewer round
+trips over a mobile network, which has a real cost on a bad connection, but
+not in this system at this stage. In exchange, the Gateway stops being a
+thin proxy (see "A custom Gateway" above — its job today is routing, JWT,
+WebSocket, nothing domain-specific) and gains knowledge of what a "profile
+screen" even is — a domain concept the transport layer shouldn't really
+know about. Two independent requests instead of one aggregating call is
+also what directly gives task 3 below for free: if `auth-svc` is
+unavailable, `GET /accounts/me` — a separate TCP connection to a separate
+backend — simply won't notice; an aggregating endpoint, by contrast, would
+have had to decide FOR ITSELF what to do about its own partial failure
+(wait on both calls with a shared timeout? return `207 Multi-Status`?
+silently swallow one domain's error?) — not free logic, and exactly what the
+parallel-request approach avoids by construction. **Had a BFF been chosen**
+— both calls (auth-svc, accounts-svc) would have to go out from the Gateway
+in parallel (a `goroutine` + `errgroup`/`sync.WaitGroup` for both calls,
+waiting on both, not one after another), or the real screen's latency
+becomes the sum of the two services rather than the max of them; but that's
+a hypothetical design, not what's actually built here.
 
-### Проверка вручную: частичная деградация экрана профиля
+### Manual verification: partial degradation of the profile screen
 ```bash
-# Всё поднято — оба запроса отвечают:
+# Everything up — both requests respond:
 curl -s http://localhost:8080/profile -H "Authorization: Bearer $ALICE_TOKEN"
 curl -s http://localhost:8080/accounts/me -H "Authorization: Bearer $ALICE_TOKEN"
 
-# Гасим auth-svc — баланс не должен пострадать:
+# Kill auth-svc — the balance must not be affected:
 docker compose stop auth-svc
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/profile \
   -H "Authorization: Bearer $ALICE_TOKEN"
-# 502/503 — Gateway не может достучаться до auth-svc
+# 502/503 — the Gateway can't reach auth-svc
 curl -s http://localhost:8080/accounts/me -H "Authorization: Bearer $ALICE_TOKEN"
-# 200, IBAN и баланс на месте — accounts-svc и ledger-svc ничего не знают
-# про auth-svc и не вызывают его ни для чего в этом пути
+# 200, IBAN and balance are intact — accounts-svc and ledger-svc know nothing
+# about auth-svc and never call it for anything on this path
 docker compose start auth-svc
 ```
-Работает без единой строчки специального кода: `jwtMiddleware` проверяет
-JWT локально (HMAC по `JWT_SECRET`, тот же секрет, которым его подписал
-auth-svc при логине) — токен, выданный до падения auth-svc, продолжает
-проходить проверку и после, поскольку валидация не идёт обратно в auth-svc за
-подтверждением. `GET /accounts/me` со своей стороны не делает ни одного
-вызова в auth-svc — счёт, IBAN и баланс целиком приходят из accounts-svc и
-ledger-svc. Отказ одного домена не может утечь во второй, потому что между
-ними на этом пути в принципе нет вызова.
+This works with not one line of special-case code: `jwtMiddleware` verifies
+the JWT locally (HMAC over `JWT_SECRET`, the same secret auth-svc signed it
+with at login) — a token issued before auth-svc went down keeps passing
+verification afterward too, since validation never goes back to auth-svc for
+confirmation. `GET /accounts/me`, for its part, makes zero calls into
+auth-svc — the account, IBAN, and balance come entirely from accounts-svc
+and ledger-svc. A failure in one domain can't leak into the other, because
+there's no call between them on this path at all.
 
-## Структура
-- `gateway/` — единая точка входа (API Gateway)
-- `services/` — микросервисы: `auth-svc`, `accounts-svc`, `ledger-svc`, `transfers-svc`, `fraud-svc`, `notifications-svc`
-- `proto/` — общие protobuf-контракты между сервисами
-- `infra/patroni/` — образ и конфиг Patroni (управляет всеми тремя узлами Postgres), `infra/haproxy/` — маршрутизация на текущего лидера, `infra/postgres/` — запрос для мониторинга лага, `infra/failover/` — тест переключения; всё это — см. «Postgres: репликация и автоматический failover» ниже
-- `frontend/` — SPA (Vite + React + TypeScript), см. «Фронтенд» ниже
-- `.github/workflows/` — CI-пайплайны
+## Layout
+- `gateway/` — the single entry point (API Gateway)
+- `services/` — microservices: `auth-svc`, `accounts-svc`, `ledger-svc`, `transfers-svc`, `fraud-svc`, `notifications-svc`
+- `proto/` — shared protobuf contracts between services
+- `infra/patroni/` — the Patroni image and config (manages all three Postgres nodes), `infra/haproxy/` — routing to the current leader, `infra/postgres/` — the lag-monitoring query, `infra/failover/` — the failover test; all of this — see "Postgres: replication and automatic failover" below
+- `frontend/` — the SPA (Vite + React + TypeScript), see "Frontend" below
+- `.github/workflows/` — CI pipelines
 
-## Инфраструктура (dev)
-Postgres, Redis и Kafka подняты в `docker-compose.yml`. Postgres использует каждый сервис, у которого есть своя схема (все, кроме gateway). Redis — только auth-svc (сессии/токены). Kafka — auth-svc, accounts-svc и transfers-svc как продюсеры, accounts-svc и notifications-svc как консьюмеры (см. «События (Kafka)» ниже); notifications-svc дополнительно публикует в `transfer.events.dlq` (см. «notifications-svc: устойчивость консьюмера»), так что технически он теперь и продюсер тоже, но только для собственного dead letter topic, не для доменных событий.
+## Infrastructure (dev)
+Postgres, Redis, and Kafka are brought up in `docker-compose.yml`. Postgres is used by every service that has its own schema (everyone but the gateway). Redis is auth-svc only (sessions/tokens). Kafka has auth-svc, accounts-svc, and transfers-svc as producers, accounts-svc and notifications-svc as consumers (see "Events (Kafka)" below); notifications-svc additionally publishes to `transfer.events.dlq` (see "notifications-svc: consumer resilience"), so technically it's now a producer too, but only for its own dead-letter topic, not for domain events.
 
-Postgres — не один контейнер, а кластер из трёх узлов под Patroni с автоматическим failover, плюс etcd как DCS и HAProxy как точка входа; сервисы подключаются к `pg-haproxy:5432` и про конкретные узлы ничего не знают. Подробности — в «Postgres: репликация и автоматический failover» ниже.
+Postgres isn't a single container but a three-node cluster under Patroni with automatic failover, plus etcd as the DCS and HAProxy as the entry point; services connect to `pg-haproxy:5432` and know nothing about the individual nodes. Details — in "Postgres: replication and automatic failover" below.
 
-Jaeger собирает трейсы со всех сервисов (UI — http://localhost:16686), см. «Трейсинг» ниже. От него сознательно ничто не зависит: недоступный Jaeger означает отсутствие трейсов и ничего больше.
+Jaeger collects traces from every service (UI — http://localhost:16686), see "Tracing" below. Nothing deliberately depends on it: an unavailable Jaeger means no traces and nothing more.
 
-Креды Postgres в `docker-compose.yml` — только для локальной разработки, не для продакшена. То же относится к одноузловому etcd: для прода нужен кворум из 3+ узлов, иначе DCS сам становится единой точкой отказа.
+The Postgres credentials in `docker-compose.yml` are for local development only, not production. The same goes for the single-node etcd: production needs a quorum of 3+ nodes, or the DCS itself becomes a single point of failure.
 
-MinIO — S3-совместимое объектное хранилище (бакет `avatars`, создаётся одноразовым `minio-init` при старте, тем же приёмом, что `kafka-init` создаёт топики). `auth-svc` — единственный сервис с доступом к нему: загрузка аватара через presigned URL, подробности — «Загрузка аватара» ниже. Креды — dev-only, как у Postgres. S3-совместимый API — не случайность, а причина выбора MinIO для дева: переезд в прод — это Cloudflare R2 или AWS S3 с тем же протоколом, то есть смена endpoint/креды в конфиге `auth-svc`, а не переписывание кода.
+MinIO is an S3-compatible object store (the `avatars` bucket, created by a one-shot `minio-init` on startup, the same trick `kafka-init` uses to create topics). `auth-svc` is the only service with access to it: avatar upload via a presigned URL, details — "Avatar upload" below. Credentials are dev-only, like Postgres's. The S3-compatible API isn't an accident — it's the reason MinIO was chosen for dev: moving to production means Cloudflare R2 or AWS S3 on the same protocol, i.e. swapping the endpoint/credentials in `auth-svc`'s config, not rewriting code.
 
-## Postgres: репликация и автоматический failover (Patroni + etcd)
-Один инстанс Postgres — точка отказа всей системы. Потоковая репликация (предыдущий спринт) убрала риск потери данных, но не убрала простой: если primary падал, система лежала, пока кто-то руками не промоутит реплику. Это ещё не HA.
+## Postgres: replication and automatic failover (Patroni + etcd)
+A single Postgres instance is a single point of failure for the whole system. Streaming replication (previous sprint) removed the risk of data loss, but not the downtime: if the primary went down, the system stayed down until someone manually promoted a replica. That's not HA yet.
 
-Теперь кластер — **три равноправных узла** (`pg-node1`, `pg-node2`, `pg-node3`) под управлением **Patroni**, который следит за узлами и при падении лидера сам промоутит стендбай. Важное отличие от прошлого спринта: узлы больше не называются «primary» и «replica». Кто лидер, кто синхронный стендбай, а кто асинхронный — решение Patroni, оно хранится в etcd и **меняется во время работы**. Роли, зашитые в имена контейнеров, были бы враньём после первого же переключения.
+Now the cluster is **three equal nodes** (`pg-node1`, `pg-node2`, `pg-node3`) under **Patroni**, which watches the nodes and, when the leader goes down, promotes a standby itself. An important difference from the previous sprint: nodes are no longer called "primary" and "replica." Who's the leader, who's the synchronous standby, and who's the asynchronous one is Patroni's decision, stored in etcd, and **it changes at runtime**. Roles baked into container names would be a lie after the very first failover.
 
-- **`etcd`** — DCS (Distributed Configuration Store), хранилище с консенсусом.
-- **`pg-node1/2/3`** — Postgres 16 + Patroni в одном контейнере (`infra/patroni/Dockerfile`).
-- **`pg-haproxy`** — единственная точка входа для приложения (`infra/haproxy/haproxy.cfg`).
+- **`etcd`** — the DCS (Distributed Configuration Store), a consensus-backed store.
+- **`pg-node1/2/3`** — Postgres 16 + Patroni in one container (`infra/patroni/Dockerfile`).
+- **`pg-haproxy`** — the single entry point for the application (`infra/haproxy/haproxy.cfg`).
 
-### Зачем DCS: без консенсуса автофейловер — это генератор split-brain
-Узел, потерявший связь с лидером, не может отличить «лидер умер» от «это меня отрезало от сети». Если он промоутит себя по такой догадке, получаются **два узла, принимающих записи**, и две расходящиеся истории. Для ledger это катастрофа: обе истории выглядят валидными, `SUM(entries)` в каждой сходится, а денег в сумме стало больше — восстановление возможно только вручную, сравнением двух WAL.
+### Why a DCS: without consensus, autofailover is a split-brain generator
+A node that loses contact with the leader can't tell "the leader died" apart from "I got cut off from the network." If it promotes itself on that guess, you get **two nodes accepting writes**, and two diverging histories. For a ledger that's a catastrophe: both histories look valid, `SUM(entries)` balances in each one, and the total amount of money has increased — recovery is only possible manually, by diffing the two WALs.
 
-etcd убирает догадку: чтобы стать лидером, нужно взять ключ, который физически может держать только один узел, а меньшинство, оказавшееся в изоляции, не наберёт кворум и ключ не возьмёт.
+etcd removes the guesswork: to become leader, a node has to take a key that physically only one node can hold, and a minority that ends up isolated can't reach quorum and won't take it.
 
-**Одноузловой etcd здесь — сознательное упрощение для локальной разработки.** У одного узла нет кворума, который можно потерять, — то есть он сам является единой точкой отказа, ровно той, которую этот спринт убирал, просто уровнем ниже. Отказ etcd не приводит к split-brain (Patroni при потере DCS демоутит лидера — это безопасное направление), но записи прекращаются до возвращения etcd. **В проде нужно 3 или 5 узлов etcd в разных failure domain'ах.**
+**A single-node etcd here is a deliberate simplification for local development.** A single node has no quorum to lose — meaning it's itself a single point of failure, exactly the one this sprint removed, just one layer down. An etcd outage doesn't cause split-brain (Patroni demotes the leader when it loses the DCS — that's the safe direction), but writes stop until etcd comes back. **Production needs 3 or 5 etcd nodes across separate failure domains.**
 
-### Конфиг Patroni: что тут действительно важно
-Весь конфиг — `infra/patroni/patroni.yml`, один на все три узла (различия — три переменные окружения в `docker-compose.yml`, как это было с `replica-entrypoint.sh`). Два блока стоят отдельного внимания.
+### Patroni config: what actually matters here
+The whole config is `infra/patroni/patroni.yml`, one file for all three nodes (the differences are three environment variables in `docker-compose.yml`, the same way `replica-entrypoint.sh` used to work). Two blocks deserve special attention.
 
-**`synchronous_mode: true` + `synchronous_node_count: 1`** — это то, что делает переключение безопасным для ledger, и то, ради чего в прошлом спринте платили задержкой синхронной реплики.
+**`synchronous_mode: true` + `synchronous_node_count: 1`** is what makes a failover safe for the ledger, and what the previous sprint paid synchronous-replica latency for.
 
-Без `synchronous_mode` Patroni промоутит кандидата с наибольшим LSN. У этого узла может не быть транзакций, которые primary **уже подтвердил клиенту**: клиенту сказали «committed», деньги ушли, а новый лидер о них не слышал. Это не «небольшой лаг», это порванная транзакция.
+Without `synchronous_mode`, Patroni promotes the candidate with the highest LSN. That node might be missing transactions the primary **already confirmed to the client**: the client was told "committed," the money moved, and the new leader never heard about it. That's not "a bit of lag," that's a torn transaction.
 
-С `synchronous_mode` Patroni ведёт множество синхронных стендбаев и в `synchronous_standby_names`, и в ключе `/sync` в etcd, и **отказывается промоутить узел, которого в этом ключе нет**. А поскольку лидер не может подтвердить коммит, пока синхронный стендбай его не сбросил на диск, любая подтверждённая транзакция физически лежит на единственном узле, который вообще имеет право стать лидером. Вся цепочка рассуждений про «ни одна подтверждённая транзакция не потеряна» держится на этом, и именно это проверяет `infra/failover/failover_test.go`.
+With `synchronous_mode`, Patroni tracks the set of synchronous standbys both in `synchronous_standby_names` and in the `/sync` key in etcd, and **refuses to promote a node that isn't in that key**. And since the leader can't confirm a commit until a synchronous standby has flushed it to disk, any confirmed transaction physically lives on the one node that's even eligible to become leader. The entire chain of reasoning about "no confirmed transaction is ever lost" rests on this, and it's exactly what `infra/failover/failover_test.go` verifies.
 
-`synchronous_node_count: 1` воспроизводит топологию прошлого спринта один в один: из двух стендбаев один синхронный, второй асинхронный.
+`synchronous_node_count: 1` reproduces the previous sprint's topology exactly: of two standbys, one synchronous, one asynchronous.
 
-**`synchronous_mode_strict` НЕ включён.** Non-strict означает: если исчезнет *последний* синхронный стендбай, лидер деградирует до асинхронного коммита и продолжит принимать записи. Strict — заблокирует записи, сохранив гарантию «коммит есть минимум на двух узлах» абсолютно, ценой доступности. На трёх узлах при убийстве одного non-strict не срабатывает вообще (второй стендбай остаётся). Настоящему банку, вероятно, нужен strict — но это должно быть осознанным решением, а не унаследованным дефолтом.
+**`synchronous_mode_strict` is NOT enabled.** Non-strict means: if the *last* synchronous standby disappears, the leader degrades to asynchronous commits and keeps accepting writes. Strict would block writes, preserving the "committed on at least two nodes" guarantee absolutely, at the cost of availability. With three nodes, killing one doesn't trigger non-strict behavior at all (the second standby remains). A real bank probably needs strict — but that should be a deliberate decision, not an inherited default.
 
-**Бюджет переключения** — `ttl: 20`, `loop_wait: 3`, `retry_timeout: 5`. Patroni требует `ttl >= loop_wait + 2*retry_timeout`, иначе просто медленный лидер (GC-пауза, тормознувший диск) не успеет обновить свой ключ и будет демоутнут здоровым. Обнаружение стоит до `ttl` секунд — ничего не может промоутиться, пока ключ мёртвого лидера не истечёт, и это главный рычаг на времени переключения. **20 — не свободный выбор, это жёсткий минимум Patroni**: всё, что меньше, молча поднимается до 20 с единственной строкой в логе (`WARNING: ttl=15 can't be smaller than 20, adjusting...`), так что конфиг, обещающий 15-секундный бюджет, был бы фикцией.
+**The failover budget** — `ttl: 20`, `loop_wait: 3`, `retry_timeout: 5`. Patroni requires `ttl >= loop_wait + 2*retry_timeout`, or a merely slow leader (a GC pause, a stalled disk) wouldn't refresh its key in time and would get demoted while healthy. Detection costs up to `ttl` seconds — nothing can be promoted until the dead leader's key expires, and that's the main lever on failover time. **20 isn't a free choice, it's Patroni's hard minimum**: anything smaller is silently raised to 20 with a single log line (`WARNING: ttl=15 can't be smaller than 20, adjusting...`), so a config promising a 15-second budget would be a fiction.
 
-### Точка входа: HAProxy, а не target_session_attrs
-После фейловера адрес лидера меняется, поэтому хардкодить хост в сервисах нельзя. Рассматривались два варианта; выбран HAProxy.
+### Entry point: HAProxy, not target_session_attrs
+After a failover the leader's address changes, so a service can't hardcode a host. Two options were considered; HAProxy was chosen.
 
-Альтернатива — `target_session_attrs=read-write` со списком всех хостов в строке подключения: драйвер сам обходит их и находит принимающий запись. pgx это поддерживает, и вариант рабочий. Против него два довода, и второй — решающий:
+The alternative — `target_session_attrs=read-write` with a list of every host in the connection string: the driver walks them itself and finds the one accepting writes. pgx supports this, and it's a working option. Two arguments against it, and the second one is decisive:
 
-1. **Строка подключения перестаёт быть одной.** Список из трёх хостов пришлось бы держать синхронным в шести местах `docker-compose.yml`, во всех `DATABASE_URL` из README, в `cmd/seed` и `cmd/devtopup`. С HAProxy адрес остаётся один (`pg-haproxy:5432`), и хостовые порты те же, что были до Patroni, — ни одна команда из README не поменялась.
-2. **Это другой вопрос, заданный не тому.** `target_session_attrs=read-write` спрашивает у Postgres `SHOW transaction_read_only` — то есть «принимаешь ли ты сейчас записи». HAProxy спрашивает у Patroni `GET /primary` — «считает ли консенсус-слой тебя лидером прямо сейчас». Это не одно и то же: узел может отвечать «я writable» в момент, когда Patroni его уже демоутит или зафенсил. Для ledger правильный вопрос — к слою, который владеет ключом лидера, а не к процессу, который про этот ключ ещё не узнал.
+1. **The connection string stops being a single string.** A list of three hosts would have to be kept in sync in six places in `docker-compose.yml`, in every `DATABASE_URL` in the README, in `cmd/seed`, and in `cmd/devtopup`. With HAProxy, the address stays a single one (`pg-haproxy:5432`), and the host ports are the same they were before Patroni — not one command in the README changed.
+2. **It's the wrong question, asked of the wrong party.** `target_session_attrs=read-write` asks Postgres `SHOW transaction_read_only` — i.e. "are you currently accepting writes." HAProxy asks Patroni `GET /primary` — "does the consensus layer consider you the leader right now." Those aren't the same thing: a node can answer "I'm writable" at the exact moment Patroni is already demoting or fencing it. For a ledger, the right question goes to the layer that owns the leader key, not to a process that hasn't found out about that key yet.
 
-Порты `pg-haproxy`:
+`pg-haproxy` ports:
 
-| порт | кто | зачем |
+| port | who | what for |
 |---|---|---|
-| 5432 | текущий лидер | `DATABASE_URL` — записи и всё read-your-writes-чувствительное |
-| 5433 | любой стендбай | `DATABASE_URL_REPLICA` — см. правило разделения чтений ниже |
-| 5434 | текущий синхронный стендбай | только инспекция и тесты |
-| 7000 | статистика | и источник healthcheck'а самого контейнера |
+| 5432 | current leader | `DATABASE_URL` — writes and anything read-your-writes-sensitive |
+| 5433 | any standby | `DATABASE_URL_REPLICA` — see the read-splitting rule below |
+| 5434 | current synchronous standby | inspection and tests only |
+| 7000 | stats | also the source of the container's own healthcheck |
 
-Две настройки в `infra/haproxy/haproxy.cfg`, без которых конструкция не работает:
+Two settings in `infra/haproxy/haproxy.cfg`, without which the whole construction doesn't work:
 
-- **`on-marked-down shutdown-sessions`** — это то, что покупает «пулы переподключаются, а не остаются мёртвыми», и покупается оно здесь, а не в Go-коде. Без него TCP-соединения, которые pgxpool уже держит к старому лидеру, остаются ESTABLISHED после того, как узел провалил health-check: пул продолжает раздавать соединения к узлу, которого нет, и каждое падает только при использовании. С ним HAProxy рвёт эти сессии в момент пометки узла как down, клиент немедленно получает ошибку соединения, а pgx уничтожает сбойнувшее соединение вместо возврата в пул — и пул наполняется уже от нового лидера.
-- **`resolvers docker`** — HAProxy по умолчанию резолвит хостнеймы `server` **один раз при старте** и кеширует адрес навсегда. Docker выдаёт пересозданному контейнеру новый IP. Результат: прокси «здоров», а все бэкенды показывают L4CON, потому что ходят по адресам, где никого нет. Это не гипотетика — так и случилось после пересборки образа Patroni, и это же сломало бы возвращение убитого узла в конце теста.
+- **`on-marked-down shutdown-sessions`** — this is what buys "pools reconnect instead of staying dead," and it's bought here, not in Go code. Without it, TCP connections pgxpool is already holding to the old leader stay ESTABLISHED after the node fails its health check: the pool keeps handing out connections to a node that's gone, and each one only fails when it's actually used. With it, HAProxy tears down those sessions the moment a node is marked down, the client gets an immediate connection error, and pgx destroys the failed connection instead of returning it to the pool — and the pool refills from the new leader.
+- **`resolvers docker`** — by default HAProxy resolves `server` hostnames **once at startup** and caches the address forever. Docker gives a recreated container a new IP. The result: the proxy reports "healthy," while every backend shows L4CON, because it's talking to addresses where nobody's listening. This isn't hypothetical — it actually happened after rebuilding the Patroni image, and it would have broken the killed node coming back at the end of the test too.
 
-### Обработка на стороне приложения
-Общий код — `pkg/pgha`. Фейловер намеренно **не прячется**: это несколько секунд, когда соединения рвутся и запросы падают. Задача — чтобы к концу этого окна всё восстановилось само.
+### Application-side handling
+Shared code is `pkg/pgha`. A failover is deliberately **not hidden**: it's a few seconds where connections drop and requests fail. The goal is for everything to recover on its own by the end of that window.
 
-- **`pgha.NewPool`** — пул с настройками под меняющегося лидера: `HealthCheckPeriod` 10s вместо дефолтной минуты (фоновая горутина pgx быстрее выбрасывает сломанные простаивающие соединения), `ConnectTimeout` 5s (иначе дозвон до исчезнувшего узла упирается в TCP-таймаут ОС — минуты), умеренные `MaxConnLifetime`/jitter.
-- **`pgha.WaitForWritable` + `pgha.Retry`** — порядок в `main()` каждого сервиса перевёрнут: сначала пул, потом миграции. Пул — это то, чем можно спросить «лидер уже есть?», и `WaitForWritable` блокируется, пока ответ не «да». Сервис, стартовавший в середине фейловера, теперь пережидает его, а не умирает на попытке миграции против стендбая. `pgha.Retry` при этом **возвращает настоящую ошибку миграции немедленно** — сломанный SQL не должен превращаться в двухминутное молчание.
-- **`pgha.IsUnavailable`** — классификатор «база недоступна» против «запрос неправильный». Самое неочевидное место в пакете и источник реального бага (см. ниже).
+- **`pgha.NewPool`** — a pool tuned for a changing leader: `HealthCheckPeriod` 10s instead of the default one minute (pgx's background goroutine discards broken idle connections faster), `ConnectTimeout` 5s (otherwise dialing a vanished node runs into the OS's TCP timeout — minutes), moderate `MaxConnLifetime`/jitter.
+- **`pgha.WaitForWritable` + `pgha.Retry`** — the order in each service's `main()` is flipped: pool first, then migrations. The pool is what lets you ask "is there a leader yet?", and `WaitForWritable` blocks until the answer is yes. A service that started mid-failover now waits it out instead of dying trying to migrate against a standby. `pgha.Retry`, meanwhile, **returns a real migration error immediately** — broken SQL shouldn't turn into two minutes of silence.
+- **`pgha.IsUnavailable`** — the classifier for "the database is unreachable" versus "the query is wrong." The least obvious spot in the package, and the source of a real bug (see below).
 
-Долгоживущие консьюмеры проверены отдельно, потому что «работает» для них означает «пережил без ручного рестарта»:
+Long-lived consumers were verified separately, because for them "it works" means "survived without a manual restart":
 
-- **Релей outbox и воркеры реконсиляции** переживали фейловер и раньше — они логируют ошибку и повторяют на следующем тике. Во время окна это ~1 строка в секунду на сервис; шумно, но это правильный шум: он показывает ровно то, что происходит.
-- **`accounts-svc`, консьюмер `user.events`** — при ошибке `FetchMessage` крутился без задержки (`continue` без `time.Sleep`), в отличие от своих аналогов в `notifications-svc`. На фейловере это горячий цикл, который топит в логе единственную полезную строку. Добавлен `fetchErrorBackoff` и проверка `ctx.Err()`.
-- **`notifications-svc`, консьюмер `transfer.events`** — здесь был **настоящий баг обработки данных**. Лестница ретраев (5 попыток, 0.5/1/2/4s ≈ 7.5s) была рассчитана на «моргнул SMTP», после чего сообщение уходит в DLQ как poison. Фейловер длиннее этого окна, то есть **первое же переключение отправило бы в dead letter topic пачку совершенно нормальных уведомлений о переводах**. Ничего бы не потерялось — для того DLQ и есть, — но «каждый перевод во время фейловера требует ручного реплея» и выглядит как инцидент с poison-сообщениями вместо рутинного события. Теперь ошибки, для которых `pgha.IsUnavailable` истинно, ретраятся на отдельном бюджете (`transferUnavailableBudget`, 5 минут) и **не расходуют** попытки poison-лестницы.
+- **The outbox relay and reconciliation workers** already survived a failover before — they log the error and retry on the next tick. During the window that's ~1 log line a second per service; noisy, but the right kind of noise: it shows exactly what's happening.
+- **`accounts-svc`'s `user.events` consumer** — on a `FetchMessage` error it spun with no delay (`continue` with no `time.Sleep`), unlike its counterparts in `notifications-svc`. During a failover that's a hot loop drowning the one useful log line. Added `fetchErrorBackoff` and a `ctx.Err()` check.
+- **`notifications-svc`'s `transfer.events` consumer** — this one had a **real data-processing bug**. The retry ladder (5 attempts, 0.5/1/2/4s ≈ 7.5s) was sized for "SMTP blinked," after which the message goes to the DLQ as poison. A failover runs longer than that window, meaning **the very first failover would have sent a batch of perfectly normal transfer notifications to the dead-letter topic**. Nothing would have been lost — that's what the DLQ is for — but "every transfer during a failover needs a manual replay" reads as a poison-message incident instead of a routine event. Now errors for which `pgha.IsUnavailable` is true retry on a separate budget (`transferUnavailableBudget`, 5 minutes) and **don't spend** attempts from the poison ladder.
 
-### Тест фейловера — главное в этом спринте
-`infra/failover/failover_test.go`. Многие поднимают репликацию и никогда не проверяют переключение; в результате оно не работает ровно тогда, когда нужно.
+### The failover test — the centerpiece of this sprint
+`infra/failover/failover_test.go`. Plenty of setups bring up replication and never actually test a failover; as a result it doesn't work exactly when it's needed.
 
-Тест закрыт **явным opt-in'ом**, а не обычной для этого репозитория проверкой наличия `DATABASE_URL`: он убивает контейнер, и `go test ./...` при поднятом стеке не должен ронять базу побочным эффектом.
+The test is gated behind an **explicit opt-in**, not this repo's usual `DATABASE_URL`-presence check: it kills a container, and `go test ./...` against a running stack must not take the database down as a side effect.
 
 ```
 FAILOVER_TEST=1 go test ./infra/failover/... -v -count=1 -timeout 15m
 ```
 
-Что он делает: создаёт ledger-аккаунты через настоящий gRPC, запускает 4 горутины, льющие переводы через `ledger-svc` (то есть через **пул самого сервиса**, а не тестовый), убивает контейнер лидера через `docker kill` (SIGKILL, не `stop` — при graceful shutdown Patroni отдаёт ключ лидера сам, и это как раз лёгкий случай), после чего проверяет:
+What it does: creates ledger accounts through real gRPC, spins up 4 goroutines pouring transfers through `ledger-svc` (i.e. through **the service's own pool**, not a test one), kills the leader's container with `docker kill` (SIGKILL, not `stop` — with a graceful shutdown Patroni hands off the leader key itself, and that's the easy case), then verifies:
 
-1. **Ни одна подтверждённая транзакция не потеряна.** Только подтверждённые: вызов, который упал или отвалился по таймауту, мог закоммититься, а мог и нет, и приложению об этом не сообщали — его отсутствие потерей данных не является. Проверяется, что у каждой транзакции на новом лидере **две** записи: односторонняя запись формально «на месте», но это ровно та порванная пара, которая ломает двойную запись.
-2. **`SUM(entries) = 0`** — глобально по счетам теста и **отдельно по каждому `transaction_id`**. Второе строго сильнее: две ошибки, равные и противоположные, в разных транзакциях сократились бы в общей сумме.
-3. **Приложение восстановилось само.** Сравниваются `StartedAt` и `RestartCount` контейнеров `ledger-svc`/`transfers-svc`/`notifications-svc` до и после: если бы Docker их перезапустил, «восстановилось» ничего не доказывало бы про пулы. Плюс `GET /healthz` у `transfers-svc` (он делает `SELECT 1` на своём пуле) снова 200.
-4. **Старый лидер возвращается репликой, а не вторым лидером.** `leaderName` роняет тест, если лидеров больше одного, — то есть сама проверка и есть проверка на split-brain.
+1. **No confirmed transaction is ever lost.** Confirmed only: a call that failed or timed out might have committed or might not have, and the application was never told either way — its absence isn't data loss. It checks that every transaction has **two** entries on the new leader: a one-sided entry is formally "present," but it's exactly the torn pair that breaks double-entry.
+2. **`SUM(entries) = 0`** — globally across the test's accounts and **separately per `transaction_id`**. The second check is strictly stronger: two equal-and-opposite errors in different transactions would cancel out in the global sum.
+3. **The application recovered on its own.** `StartedAt` and `RestartCount` for the `ledger-svc`/`transfers-svc`/`notifications-svc` containers are compared before and after: if Docker had restarted them, "recovered" would prove nothing about the pools. Plus `GET /healthz` on `transfers-svc` (which does a `SELECT 1` on its own pool) is 200 again.
+4. **The old leader comes back as a replica, not a second leader.** `leaderName` fails the test if there's more than one leader — meaning this check is itself the split-brain check.
 
-Отдельный тест — `TestSyncStandbyHoldsAcknowledgedTransactionImmediately` — проверяет предпосылку всего остального **без единого ретрая и sleep'а**: как только `ledger-svc` сказал «перевод прошёл», обе записи уже читаются на синхронном стендбае (порт 5434). Если этому тесту понадобится ретрай — репликация не синхронная, и все гарантии выше рушатся. Вынесен отдельно, чтобы такая поломка говорила об этом прямо, а не всплывала позже как загадочная «потеря транзакции».
+A separate test, `TestSyncStandbyHoldsAcknowledgedTransactionImmediately`, verifies the premise everything else rests on **with no retry and no sleep at all**: the instant `ledger-svc` says "the transfer went through," both entries are already readable on the synchronous standby (port 5434). If this test ever needs a retry, replication isn't synchronous, and every guarantee above collapses. It's kept separate so a break like that says so directly, instead of surfacing later as a mysterious "lost transaction."
 
-### Измеренное время переключения
-Три прогона на одной машине (Docker Desktop / Windows, три узла на одном хосте):
+### Measured failover time
+Three runs on one machine (Docker Desktop / Windows, all three nodes on one host):
 
-| прогон | убит | новый лидер | простой записи | |
+| run | killed | new leader | write downtime | |
 |---|---|---|---|---|
-| 1 | pg-node2 | pg-node1 | **25.4 s** | HAProxy ещё с `rise 2` |
-| 2 | pg-node1 | pg-node3 | **23.6 s** | после `rise 1` |
+| 1 | pg-node2 | pg-node1 | **25.4 s** | HAProxy still at `rise 2` |
+| 2 | pg-node1 | pg-node3 | **23.6 s** | after `rise 1` |
 | 3 | pg-node2 | pg-node1 | **23.6 s** | |
-| 4 | pg-node1 | pg-node3 | **24.6 s** | кластер поднят с нуля (`down` + пустые тома) |
+| 4 | pg-node1 | pg-node3 | **24.6 s** | cluster brought up from scratch (`down` + empty volumes) |
 
-Простой измеряется как «первая упавшая запись → первая снова прошедшая запись». Первая версия теста мерила от момента `docker kill` до первого успеха и показала **11 мс** — чушь: вызовы, отправленные *до* убийства, были ещё в полёте, часть из них закоммитилась на умирающем лидере и вернула успех через несколько миллисекунд после. Успехи настоящие, но к восстановлению отношения не имеют.
+Downtime is measured as "first failed write → first write that succeeds again." The first version of the test measured from the moment of `docker kill` to the first success and showed **11 ms** — nonsense: calls sent *before* the kill were still in flight, and some of them committed on the dying leader and returned success a few milliseconds later. The successes were real, but they had nothing to do with recovery.
 
-Из чего складываются ~24 секунды:
+What the ~24 seconds breaks down into:
 
-- **~20 s — истечение TTL ключа лидера.** Доминирующая часть, и это жёсткий минимум Patroni (см. выше). Уменьшить нельзя, не переписав Patroni.
-- **~2 s — выборы и промоушен.**
-- **~1–2 s — HAProxy замечает нового лидера.** Изначально было ~3–4 s: на бэкенде лидера стояло `rise 2`, то есть требовалось два подряд успешных чека. Заменено на `rise 1` — проба здесь не выборка здоровья, а справка: Patroni отвечает 200 на `/primary` тогда и только тогда, когда держит ключ лидера, и держит его один. Второе подтверждение не добавляет информации, но стоит целый `inter` простоя. `fall` при этом остался 2: там асимметрия в другую сторону — один пропущенный чек действительно может быть морганием, и выкидывать на нём лидера дорого.
+- **~20 s — the leader key's TTL expiring.** The dominant part, and it's Patroni's hard minimum (see above). Can't be reduced without rewriting Patroni.
+- **~2 s — the election and promotion.**
+- **~1–2 s — HAProxy noticing the new leader.** Originally ~3–4 s: the leader's backend was set to `rise 2`, i.e. it required two consecutive successful checks. Switched to `rise 1` — the check here isn't sampling health, it's a confirmation: Patroni answers 200 on `/primary` if and only if it holds the leader key, and only one node ever holds it. A second confirmation adds no information but costs a whole `inter` interval of downtime. `fall` stayed at 2, though: the asymmetry runs the other way there — one missed check really can be a blink, and demoting the leader over it is expensive.
 
-То есть в проде с дефолтным `ttl: 30` это окно было бы ~35 s, а ниже ~22 s его на Patroni не опустить в принципе.
+So in production with the default `ttl: 30` this window would be ~35 s, and there's no way to push it below ~22 s on Patroni at all.
 
-### Что сломалось по дороге (и почему это стоит знать)
-Три вещи, каждая из которых прошла бы незамеченной без теста:
+### What broke along the way (and why it's worth knowing)
+Three things, each of which would have gone unnoticed without the test:
 
-1. **`pgha.IsUnavailable` считал таймаут подключения дедлайном вызывающего.** pgx сам следит за `ConnectTimeout`, поэтому дозвон до мёртвого узла возвращает `*pgconn.ConnectError`, цепочка которого заканчивается на `context.DeadlineExceeded`. Проверка контекстных ошибок стояла раньше проверки на `ConnectError` — и классифицировала это как «дедлайн вызывающего, не проблема базы», то есть как неретраебельное. Результат: `WaitForWritable` сдавался на первой же попытке, и **все шесть сервисов уходили в crash-loop** при старте против кластера, который ещё выбирал лидера. Регрессионный тест — `TestIsUnavailable_ConnectTimeoutIsNotACallerDeadline`, и он воспроизводит ошибку по-настоящему (слушатель, который принимает TCP и молчит), потому что причина у `pgconn.ConnectError` неэкспортирована и подделать нужную форму нельзя.
-2. **HAProxy кешировал IP узлов навсегда** — см. `resolvers docker` выше.
-3. **Проверки в самом тесте падали от того, что он же и проверяет.** Пул теста держал соединения к убитому узлу, HAProxy их порвал, и первый верификационный запрос отваливался с `unexpected EOF` — тест сообщал о потере данных там, где ничего не терялось. Верификация обёрнута в `pgha.Retry`: тест про транзиентные сбои соединения не должен сам падать на транзиентном сбое соединения.
+1. **`pgha.IsUnavailable` treated a connect timeout as the caller's own deadline.** pgx tracks `ConnectTimeout` itself, so dialing a dead node returns a `*pgconn.ConnectError` whose chain ends in `context.DeadlineExceeded`. The context-error check was placed before the `ConnectError` check — and classified this as "the caller's deadline, not a database problem," i.e. non-retryable. The result: `WaitForWritable` gave up on the very first attempt, and **all six services crash-looped** on startup against a cluster that was still electing a leader. The regression test is `TestIsUnavailable_ConnectTimeoutIsNotACallerDeadline`, and it reproduces the error for real (a listener that accepts the TCP connection and stays silent), because the cause inside `pgconn.ConnectError` is unexported and the right shape can't be faked.
+2. **HAProxy cached node IPs forever** — see `resolvers docker` above.
+3. **The test's own checks failed because of the very thing they were checking.** The test's pool held connections to the killed node, HAProxy tore them down, and the first verification query failed with `unexpected EOF` — the test reported data loss where nothing had actually been lost. Verification is now wrapped in `pgha.Retry`: a test about transient connection failures shouldn't fail on a transient connection failure itself.
 
-### Проверка вручную
+### Manual verification
 ```
 docker compose up -d
 
-# кто сейчас кто (роли меняются — это нормально)
+# who's who right now (roles change — that's normal)
 docker compose exec -T pg-node1 curl -s http://127.0.0.1:8008/cluster
 
-# ровно один 'sync', остальные 'async'; application_name — имя узла Patroni
+# exactly one 'sync', the rest 'async'; application_name is Patroni's node name
 psql "postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   -c "SELECT application_name, state, sync_state FROM pg_stat_replication ORDER BY 1;"
 #  application_name |   state   | sync_state
@@ -626,57 +643,57 @@ psql "postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=dis
 #  pg-node2         | streaming | async
 #  pg-node3         | streaming | sync
 
-# лаг в байтах и секундах
+# lag in bytes and seconds
 psql "postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   -f infra/postgres/check_replication_lag.sql
 
-# маршрутизация: 5432 пишет, 5433 — стендбай (в recovery)
+# routing: 5432 writes, 5433 is a standby (in recovery)
 psql "postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" -tAc "SELECT pg_is_in_recovery();"   # f
 psql "postgres://neobank:neobank_dev_password@localhost:5433/neobank?sslmode=disable" -tAc "SELECT pg_is_in_recovery();"   # t
 
-# состояние бэкендов HAProxy (ровно один UP в primary)
+# HAProxy backend status (exactly one UP in primary)
 curl -s 'http://localhost:7000/;csv' | awk -F, '$2 ~ /^pg-node/ {print $1,$2,$18}'
 
-# фейловер вручную, без убийства: плановое переключение
+# manual failover, no killing involved: a planned switchover
 docker compose exec -T pg-node1 patronictl -c /etc/patroni/patroni.yml switchover --force
 ```
 
-Обратите внимание: `patronictl switchover` — это **плановое** переключение, и оно быстрое (лидер отдаёт ключ сам, TTL ждать не нужно). Оно не заменяет тест: измеряемый и опасный случай — именно внезапная смерть.
+Note: `patronictl switchover` is a **planned** switchover, and it's fast (the leader hands off the key itself, no need to wait out the TTL). It doesn't replace the test: the case that's measured and dangerous is a sudden death.
 
-### Разделение чтений: почему НЕ «все SELECT на реплику»
-Соблазнительный, но неверный для финансового приложения дефолт. Сценарий поломки: пользователь делает перевод (пишет на primary) → тут же открывает экран баланса → баланс читается с отстающей асинхронной реплики → видит старое значение → решает, что перевод не прошёл, и повторяет его. Это классическое нарушение read-your-writes, и решает его не «реплика подешевле», а явное per-query правило:
+### Read splitting: why NOT "every SELECT hits a replica"
+A tempting but wrong default for a financial app. The failure scenario: a user makes a transfer (writes to the primary) → immediately opens the balance screen → the balance is read from a lagging asynchronous replica → sees the old value → decides the transfer didn't go through, and retries it. That's a textbook read-your-writes violation, and it's not solved by "a cheaper replica," but by an explicit per-query rule:
 
-- **Только лидер** — всё, что читается сразу после записи того же (или связанного) действия: баланс (`GET /accounts/me`), статус перевода/депозита сразу после его создания, первая страница ленты операций (`GET /transfers` без курсора — это ровно то, что открывается сразу после перевода/пополнения).
-- **Можно на стендбай** — данные, устаревание которых на секунды не меняет решение пользователя: страницы истории операций дальше первой. `GET /transfers?cursor=...` (курсор непустой ⇒ пользователь уже пролистал мимо этих строк один раз) — единственный запрос в этом кодбейсе, который сегодня реально соответствует этому критерию; выбор сделан явно в `listTransfersHandler` (`services/transfers-svc/http.go`), а не через глобальный «читать всегда с реплики» переключатель.
+- **Leader only** — anything read right after a write from the same (or a related) action: the balance (`GET /accounts/me`), a transfer/deposit status right after it's created, the first page of the operations feed (`GET /transfers` with no cursor — exactly what opens right after a transfer/top-up).
+- **A standby is fine** — data whose staleness by a few seconds doesn't change the user's decision: operation-history pages beyond the first. `GET /transfers?cursor=...` (a non-empty cursor ⇒ the user has already scrolled past these rows once) is the one query in this codebase that actually meets that bar today; the choice is made explicitly in `listTransfersHandler` (`services/transfers-svc/http.go`), not through a global "always read from the replica" switch.
 
-Механизм — два раздельных пула соединений в `transfers-svc/main.go`: `pool` (запись + всё read-your-writes-чувствительное, `DATABASE_URL` → `pg-haproxy:5432`, то есть текущий лидер) и `readPool` (`DATABASE_URL_REPLICA` → `pg-haproxy:5433`, то есть любой текущий стендбай, с фоллбэком на лидер, если переменная не задана — так `go test` и любое окружение без стендбаев работают, просто без выигрыша от них). `listTransfersHandler` выбирает пул по наличию курсора в запросе — решение видно прямо в хендлере, не спрятано в общем data-access слое.
+The mechanism is two separate connection pools in `transfers-svc/main.go`: `pool` (writes + anything read-your-writes-sensitive, `DATABASE_URL` → `pg-haproxy:5432`, i.e. the current leader) and `readPool` (`DATABASE_URL_REPLICA` → `pg-haproxy:5433`, i.e. any current standby, falling back to the leader if the variable isn't set — so `go test` and any environment without standbys still work, just without the benefit of them). `listTransfersHandler` picks the pool based on whether the request has a cursor — the decision is visible right in the handler, not hidden in a shared data-access layer.
 
-Что здесь изменил Patroni: раньше `DATABASE_URL_REPLICA` указывал на `postgres-replica-async` — на **контейнер**, который держал эту роль постоянно. Ровно это предположение фейловер и ломает: узел, обслуживавший эти чтения, после переключения может оказаться лидером. Теперь адрес описывает **роль**, а не хост, и HAProxy сам выводит лидера из пула стендбаев в момент промоушена (Patroni отвечает 200 на `/replica` только для узла в recovery). Обратная сторона — читающий пул теперь может попасть и на синхронный стендбай, а не только на асинхронный: для единственного запроса, который сюда ходит, это строго лучше (свежее), а правило выше от этого не меняется.
+What Patroni changed here: `DATABASE_URL_REPLICA` used to point at `postgres-replica-async` — a **container** that held that role permanently. That's exactly the assumption a failover breaks: the node serving those reads can end up as the leader after a switchover. Now the address describes a **role**, not a host, and HAProxy itself removes the leader from the standby pool the moment it's promoted (Patroni only answers 200 on `/replica` for a node in recovery). The flip side — the read pool can now land on the synchronous standby too, not only the asynchronous one: for the one query that goes through it, that's strictly better (fresher), and it doesn't change the rule above.
 
-Других сервисов это пока не касается: `accounts-svc` отдаёт баланс, `transfers-svc`'s `GET /deposits/{id}` — статус депозита сразу после оплаты, оба read-your-writes-чувствительны по определению и остаются на лидере. Заводить им читающий пул, которым нечего читать, было бы мёртвым кодом, а не соблюдением правила.
+No other service is affected yet: `accounts-svc` serves the balance, `transfers-svc`'s `GET /deposits/{id}` serves a deposit's status right after payment — both are read-your-writes-sensitive by definition and stay on the leader. Giving them a read pool with nothing to read from it would be dead code, not compliance with the rule.
 
-## События (Kafka)
-`auth-svc` публикует `UserActivated` в топик `user.events`, `accounts-svc` — `AccountCreated` в `account.events`, `transfers-svc` — `TransferCompleted`/`TransferFailed`/`TransferRejected` в `transfer.events`. Контракты — `proto/events/v1/{user,account,transfer}_events.proto`, сериализация бинарным protobuf. Ключ сообщения — `user_id` для `UserActivated`/`AccountCreated`, `sender_account_id` для Transfer*-событий: гарантирует, что все события одного пользователя/счёта попадают в одну партицию и обрабатываются по порядку. `event_id` — случайный UUIDv4 (`outbox.GenerateEventID`, см. ниже), используется консьюмерами (accounts-svc, notifications-svc) для дедупликации при повторной доставке (см. «Идемпотентность» ниже и «notifications-svc» дальше).
+## Events (Kafka)
+`auth-svc` publishes `UserActivated` to the `user.events` topic, `accounts-svc` publishes `AccountCreated` to `account.events`, `transfers-svc` publishes `TransferCompleted`/`TransferFailed`/`TransferRejected` to `transfer.events`. Contracts live in `proto/events/v1/{user,account,transfer}_events.proto`, serialized as binary protobuf. The message key is `user_id` for `UserActivated`/`AccountCreated`, `sender_account_id` for Transfer* events: this guarantees every event for one user/account lands in the same partition and is processed in order. `event_id` is a random UUIDv4 (`outbox.GenerateEventID`, see below), used by consumers (accounts-svc, notifications-svc) to deduplicate on redelivery (see "Idempotency" below and "notifications-svc" further down).
 
-Кроме ключа и тела, каждое сообщение несёт **Kafka-заголовок `event_type`** (`outbox.HeaderEventType`) со значением из колонки `event_type` outbox-строки — дословно `TransferCompleted`, `UserActivated` и т.д. Это часть wire-контракта, а не отладочная метка: protobuf не самоописателен, и на топике с несколькими типами сообщений (`transfer.events`) консьюмеру больше не на что опереться — подробности в секции про письма о переводах.
+Besides the key and body, every message carries a **Kafka header `event_type`** (`outbox.HeaderEventType`) with the value from the outbox row's `event_type` column — literally `TransferCompleted`, `UserActivated`, etc. This is part of the wire contract, not a debugging tag: protobuf isn't self-describing, and on a topic carrying several message types (`transfer.events`) the consumer has nothing else to go on — details in the section on transfer emails.
 
-`accounts-svc` — consumer топика `user.events` (consumer group `accounts-svc`): на `UserActivated` создаёт строку в `accounts` со сгенерированным номером счёта и `status = 'active'`, а **сразу после этого** — вызывает `ledger-svc` `CreateLedgerAccount(account_id)` по gRPC, чтобы у нового счёта появился ledger-аккаунт (адрес ledger — env `LEDGER_GRPC_ADDR`, дефолт `ledger-svc:8083`). Порядок фиксации важен: если вызов ledger упал, offset события **не** коммитится — Kafka передоставит сообщение, а идемпотентность (consumer'а и самого `CreateLedgerAccount`) делает повтор безопасным. Это ровно тот случай, ради которого строились at-least-once + идемпотентность.
+`accounts-svc` is a consumer of the `user.events` topic (consumer group `accounts-svc`): on `UserActivated` it creates a row in `accounts` with a generated account number and `status = 'active'`, and **immediately after that** — calls `ledger-svc`'s `CreateLedgerAccount(account_id)` over gRPC, so the new account gets a ledger account (the ledger address is the `LEDGER_GRPC_ADDR` env var, default `ledger-svc:8083`). The commit ordering matters: if the ledger call fails, the event's offset is **not** committed — Kafka will redeliver the message, and idempotency (both the consumer's and `CreateLedgerAccount`'s own) makes the retry safe. This is exactly the case at-least-once + idempotency was built for.
 
-Авто-создание топиков брокером включено (`KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"` задано в `docker-compose.yml` явно, хотя это и так дефолт Kafka), но полагаться на него мы перестали: одноразовый сервис `kafka-init` создаёт все три топика с явной политикой retention до старта notifications-svc — `compact` для `user.events`/`account.events`, `delete` для `transfer.events`. Почему разные — см. «Kafka: offset reset и retention» и «`transfer.events` — `delete`, а не `compact`» дальше. Ни auth-svc, ни transfers-svc не блокируют старт на доступности Kafka: продюсер (`segmentio/kafka-go`) подключается лениво при первой записи и переподключается сам, как и клиенты Postgres/Redis.
+Broker auto-creation of topics is enabled (`KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"` is set explicitly in `docker-compose.yml`, even though it's Kafka's default anyway), but we stopped relying on it: a one-shot `kafka-init` service creates all three topics with an explicit retention policy before notifications-svc starts — `compact` for `user.events`/`account.events`, `delete` for `transfer.events`. Why they differ — see "Kafka: offset reset and retention" and "`transfer.events` — `delete`, not `compact`" further down. Neither auth-svc nor transfers-svc blocks startup on Kafka's availability: the producer (`segmentio/kafka-go`) connects lazily on the first write and reconnects on its own, just like the Postgres/Redis clients.
 
-### Outbox: как публикация переживает недоступность Kafka
-И auth-svc, и transfers-svc публикуют события через транзакционный outbox, а не напрямую в момент запроса — общая реализация (таблица + релей) вынесена в `pkg/outbox` (`neobank/pkg/outbox`), подключается через `require`/`replace` так же, как `pkg/health` и `proto/gen/go`.
+### Outbox: how publishing survives Kafka being unavailable
+Both auth-svc and transfers-svc publish events through a transactional outbox rather than directly at request time — the shared implementation (table + relay) lives in `pkg/outbox` (`neobank/pkg/outbox`), pulled in via `require`/`replace` the same way as `pkg/health` and `proto/gen/go`.
 
-Механика одинакова для обоих сервисов:
-1. Событие пишется в outbox-таблицу **в той же Postgres-транзакции**, что и бизнес-изменение, которое оно описывает (`outbox.InsertEvent`, вызывается с уже открытым `pgx.Tx`) — либо оба пишутся, либо ни один: событие не может «потеряться» из-за краша между коммитом бизнес-строки и публикацией в Kafka, и не может появиться для отката, которого не было.
-2. Отдельный воркер-релей (`outbox.RunRelay`, тикер раз в секунду) забирает необработанные строки (`published_at IS NULL`) через `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 100`, публикует их в Kafka и помечает `published_at = now()` — публикация идёт **до** отметки, так что краш между ними даёт дубль (безопасно: консьюмер дедуплицирует по `event_id`), а не молчаливую потерю. `SKIP LOCKED` — на случай нескольких инстансов одного сервиса: каждый берёт свою пачку, не блокируясь на чужой.
-3. Опубликованные строки не удаляются сразу — `outbox.RunCleanupWorker` (раз в час) удаляет только те, что старше `OUTBOX_RETENTION` (дефолт 7 дней), оставляя недавнюю историю доступной для отладки.
+The mechanics are identical for both services:
+1. The event is written to the outbox table **in the same Postgres transaction** as the business change it describes (`outbox.InsertEvent`, called with an already-open `pgx.Tx`) — either both are written or neither is: the event can't "get lost" from a crash between the business row's commit and the Kafka publish, and it can't survive a rollback that never happened.
+2. A separate relay worker (`outbox.RunRelay`, a once-a-second ticker) grabs unprocessed rows (`published_at IS NULL`) via `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 100`, publishes them to Kafka, and marks `published_at = now()` — the publish happens **before** the mark, so a crash between them produces a duplicate (safe: the consumer deduplicates by `event_id`), not a silent loss. `SKIP LOCKED` is there for multiple instances of the same service: each grabs its own batch without blocking on another instance's.
+3. Published rows aren't deleted right away — `outbox.RunCleanupWorker` (once an hour) deletes only rows older than `OUTBOX_RETENTION` (default 7 days), keeping recent history available for debugging.
 
-Таблицы называются по-разному в двух сервисах (`outbox` в transfers-svc, `auth_outbox` в auth-svc) — оба живут в одной физической базе `neobank`, и одинаковое имя пересеклось бы.
+The tables are named differently in the two services (`outbox` in transfers-svc, `auth_outbox` in auth-svc) — both live in the same physical `neobank` database, and the same name would have collided.
 
-`auth-svc` исторически публиковал `UserActivated` напрямую из HTTP-хендлера сразу после коммита (см. TODO, который был в `services/auth-svc/kafka.go`) — это было осознанным ограничением MVP с известной дырой (краш между коммитом и публикацией терял событие молча). **Мигрирован на outbox**: `verifyEmailCode` пишет событие в `auth_outbox` в той же транзакции, что переводит `users.status` в `active`; сама публикация теперь асинхронна, через тот же релей, что и у transfers-svc. Заодно у auth-svc впервые появился настоящий раннер миграций (`services/auth-svc/migrate.go`, `MigrationsTable: "schema_migrations_auth_svc"`) — раньше `users`/`verification_codes` создавались `migrate` CLI вручную, без отслеживания в коде сервиса.
+`auth-svc` historically published `UserActivated` directly from the HTTP handler right after the commit (see the TODO that used to be in `services/auth-svc/kafka.go`) — that was a deliberate MVP limitation with a known hole (a crash between the commit and the publish lost the event silently). **Migrated to an outbox**: `verifyEmailCode` now writes the event to `auth_outbox` in the same transaction that flips `users.status` to `active`; the actual publish is now asynchronous, through the same relay as transfers-svc. As a side effect, auth-svc got a real migration runner for the first time (`services/auth-svc/migrate.go`, `MigrationsTable: "schema_migrations_auth_svc"`) — previously `users`/`verification_codes` were created by the `migrate` CLI by hand, with no tracking in the service's own code.
 
-### Проверка вручную
+### Manual verification
 ```bash
 docker compose exec kafka kafka-topics.sh --bootstrap-server localhost:9092 --list
 docker compose exec kafka kafka-console-consumer.sh \
@@ -686,92 +703,92 @@ docker compose exec kafka kafka-console-consumer.sh \
   --property print.key=true \
   --timeout-ms 10000
 ```
-`key` выводится читаемым текстом (это `user_id`), `value` — бинарный protobuf и в консоли будет нечитаемым — это ожидаемо, не баг.
+`key` prints as readable text (it's `user_id`), `value` is binary protobuf and will show up unreadable in the console — expected, not a bug.
 
-### Идемпотентность
+### Idempotency
 
-`accounts-svc` — at-least-once consumer (сначала пишет в БД, потом коммитит оффсет; если упасть между этими двумя шагами, Kafka передоставит то же сообщение после рестарта). Повторная доставка `UserActivated` обрабатывается на двух независимых, дополняющих друг друга уровнях (`handleUserActivated` в `services/accounts-svc/kafka.go`):
+`accounts-svc` is an at-least-once consumer (writes to the DB first, then commits the offset; a crash between those two steps means Kafka redelivers the same message after a restart). Redelivery of `UserActivated` is handled at two independent, complementary levels (`handleUserActivated` in `services/accounts-svc/kafka.go`):
 
-1. **`accounts.user_id UNIQUE`** — INSERT использует `ON CONFLICT (user_id) DO NOTHING`. Если строка для этого `user_id` уже есть, повторная доставка не создаёт вторую и не падает — логируется («already exists... not recreating») и оффсет коммитится как обычно. Это единственный уровень, который *обязателен*: он один гарантирует отсутствие дублей в любом случае, даже если ниже что-то пойдёт не так.
-2. **`processed_events`** (миграция `000002`, `event_id UUID PRIMARY KEY, processed_at TIMESTAMPTZ`) — быстрый путь для уже обработанных событий: перед обработкой consumer проверяет, есть ли `event_id` в таблице, и если да — пропускает работу целиком, даже не трогая `accounts`. Запись в `processed_events` делается **последним** шагом, строго после того, как строка в `accounts` подтверждённо существует (создана только что или уже была). Это осознанно: если бы событие помечалось обработанным *до* реальной обработки, а обработка затем упала бы по-настоящему (не из-за дубля, а по другой причине), оффсет не закоммитился бы, Kafka передоставила бы сообщение — но `processed_events` уже говорила бы «готово», и повтор был бы ложно пропущен, а пользователь остался бы без счёта навсегда. Запись последним шагом закрывает эту дыру: любой сбой до неё оставляет `processed_events` пустой, и повтор всегда по-настоящему переобрабатывается.
+1. **`accounts.user_id UNIQUE`** — the INSERT uses `ON CONFLICT (user_id) DO NOTHING`. If a row for this `user_id` already exists, redelivery doesn't create a second one and doesn't fail — it's logged ("already exists... not recreating") and the offset commits as usual. This is the only level that's *mandatory*: on its own it guarantees no duplicates ever, even if something below it goes wrong.
+2. **`processed_events`** (migration `000002`, `event_id UUID PRIMARY KEY, processed_at TIMESTAMPTZ`) — a fast path for already-processed events: before processing, the consumer checks whether `event_id` is in the table, and if so, skips the work entirely, without even touching `accounts`. The write to `processed_events` happens as the **last** step, strictly after the row in `accounts` is confirmed to exist (just created, or already there). This is deliberate: if the event were marked processed *before* actual processing, and processing then genuinely failed (not from a duplicate, for some other reason), the offset wouldn't commit, Kafka would redeliver — but `processed_events` would already say "done," so the retry would be falsely skipped, and the user would be left without an account forever. Writing it last closes that hole: any failure before it leaves `processed_events` empty, and a retry always genuinely reprocesses.
 
-Оба INSERT'а (`accounts`, затем `processed_events`) сознательно не обёрнуты в одну транзакцию: consumer однопоточный и последовательный (`FetchMessage` вызывается строго по одному сообщению за раз, без конкурентной обработки внутри процесса), гонок между сообщениями нет — а уровень 1 сам по себе делает пересоздание строки безопасным, даже если запись в `processed_events` не успела произойти или потерялась.
+The two INSERTs (`accounts`, then `processed_events`) are deliberately not wrapped in a single transaction: the consumer is single-threaded and sequential (`FetchMessage` is always called one message at a time, with no concurrent processing inside the process), so there are no races between messages — and level 1 by itself makes recreating the row safe even if the write to `processed_events` never happened or was lost.
 
-Между созданием счёта и записью в `processed_events` вклинивается ещё один шаг — вызов `ledger-svc` `CreateLedgerAccount(account_id)` (см. выше). `processed_events` по-прежнему пишется **последним**, строго после того, как и строка `accounts`, и ledger-аккаунт подтверждённо существуют. Если ledger-вызов падает (сервис недоступен, сетевой сбой), обработчик возвращает ошибку, offset не коммитится, Kafka передоставляет — а идемпотентность самого `CreateLedgerAccount` (`ON CONFLICT (account_id)` → возвращает существующий) делает повтор безопасным. Кросс-сервисный RPC в одну SQL-транзакцию с локальными записями обернуть нельзя в принципе — за корректность повтора отвечает именно идемпотентность на каждом уровне, а не общая транзакция.
+Another step wedges itself between account creation and the write to `processed_events` — the call to `ledger-svc`'s `CreateLedgerAccount(account_id)` (see above). `processed_events` is still written **last**, strictly after both the `accounts` row and the ledger account are confirmed to exist. If the ledger call fails (service unavailable, network error), the handler returns an error, the offset doesn't commit, Kafka redelivers — and `CreateLedgerAccount`'s own idempotency (`ON CONFLICT (account_id)` → returns the existing one) makes the retry safe. A cross-service RPC can't be wrapped into one SQL transaction with local writes, period — correctness of the retry is guaranteed by idempotency at every level, not by a shared transaction.
 
-### Проверка идемпотентности вручную
+### Manually verifying idempotency
 
-Самый практичный способ воспроизвести повторную доставку без ручной сборки protobuf-сообщений — сбросить закоммиченный оффсет consumer-группы `accounts-svc` назад, заставив её перечитать уже обработанное сообщение:
+The most practical way to reproduce a redelivery without hand-assembling protobuf messages is to reset the `accounts-svc` consumer group's committed offset backward, forcing it to reread an already-processed message:
 
 ```bash
-# 1. Остановить accounts-svc — сброс оффсета требует неактивной группы
-#    (Kafka считает группу активной ещё некоторое время после остановки
-#    контейнера, из-за session timeout; проверить состояние можно через
-#    --describe, дождавшись "has no active members"):
+# 1. Stop accounts-svc — resetting the offset requires an inactive group
+#    (Kafka considers a group active for a while after the container
+#    stops, due to the session timeout; check the state with
+#    --describe and wait for "has no active members"):
 docker compose stop accounts-svc
 docker compose exec kafka kafka-consumer-groups.sh \
   --bootstrap-server localhost:9092 --describe --group accounts-svc
 
-# 2. Сдвинуть оффсет топика user.events на 1 сообщение назад
-#    (к последнему обработанному UserActivated):
+# 2. Move the user.events topic's offset back by 1 message
+#    (to the last processed UserActivated):
 docker compose exec kafka kafka-consumer-groups.sh \
   --bootstrap-server localhost:9092 \
   --group accounts-svc --topic user.events \
   --reset-offsets --shift-by -1 --execute
 
-# 3. Запустить accounts-svc заново — она перечитает то же сообщение:
+# 3. Start accounts-svc again — it rereads the same message:
 docker compose start accounts-svc
 docker compose logs -f accounts-svc
 ```
 
-Проверено вручную на этом стеке (`bitnamilegacy/kafka:3.7.1`): после шага 3 в логах появляется `accounts-svc: event <event_id> already processed, skipping (redelivery)`, а `SELECT count(*) FROM accounts WHERE user_id = '<user_id>'` остаётся `1`. Дополнительно проверен и уровень 1 отдельно: если вручную удалить строку из `processed_events` (`DELETE FROM processed_events WHERE event_id = '<event_id>'`) и повторить шаги 1–3, лог показывает уже другую ветку — `account for user <user_id> already exists (redelivery of event <event_id>), not recreating` — то есть дедупликация срабатывает и без `processed_events`, только на `ON CONFLICT (user_id)`; при этом строка в `processed_events` восстанавливается (самолечение), а счёт по-прежнему один. Оффсет консьюмера в обоих случаях в итоге закоммичен (`kafka-consumer-groups.sh --describe` показывает `LAG 0`), т.е. дубль не оставляет группу «застрявшей».
+Manually verified on this stack (`bitnamilegacy/kafka:3.7.1`): after step 3, the logs show `accounts-svc: event <event_id> already processed, skipping (redelivery)`, and `SELECT count(*) FROM accounts WHERE user_id = '<user_id>'` stays `1`. Level 1 was also verified separately: manually delete the row from `processed_events` (`DELETE FROM processed_events WHERE event_id = '<event_id>'`) and repeat steps 1–3, and the log shows a different branch instead — `account for user <user_id> already exists (redelivery of event <event_id>), not recreating` — meaning deduplication still fires without `processed_events`, on `ON CONFLICT (user_id)` alone; the row in `processed_events` is then restored (self-healing), and there's still just one account. Either way, the consumer's offset ends up committed (`kafka-consumer-groups.sh --describe` shows `LAG 0`), i.e. a duplicate never leaves the group "stuck."
 
-## notifications-svc: проекция `user_contacts` из событий
+## notifications-svc: the `user_contacts` projection built from events
 
-Прежде чем отправлять письма (это следующая секция), `notifications-svc` строит и поддерживает свою локальную проекцию `user_id`/`account_id` → `email` (`user_contacts`), полностью из Kafka-событий, без единого синхронного вызова в auth-svc или accounts-svc. Это осознанный архитектурный выбор: сервис, специально вынесенный из критического пути (отправка писем не должна блокировать регистрацию или переводы), не должен обзаводиться зависимостью от аптайма другого сервиса ради того, чтобы просто узнать чей-то email — каждый сервис владеет своими данными, а notifications-svc держит собственную, независимую копию того, что ему нужно.
+Before sending any emails (that's the next section), `notifications-svc` builds and maintains its own local projection from `user_id`/`account_id` → `email` (`user_contacts`), entirely from Kafka events, with not a single synchronous call into auth-svc or accounts-svc. This is a deliberate architectural choice: a service specifically pulled off the critical path (sending emails must not block registration or transfers) shouldn't gain a dependency on another service's uptime just to find out someone's email — every service owns its own data, and notifications-svc keeps its own independent copy of what it needs.
 
-Два consumer'а (одна consumer-группа `notifications-svc`, два ридера — `kafka-go`'s `Reader` подписывается ровно на один топик, поэтому один ридер на топик, не один на группу):
-- `user.events` → `UserActivated` → `upsertUserContactEmail` создаёт/обновляет строку `(user_id, email)`, `account_id` не трогает.
-- `account.events` (новый топик, публикует accounts-svc через тот же outbox-подход, что transfers-svc/auth-svc — см. `services/accounts-svc/accounts.go`, `tryCreateAccount`) → `AccountCreated` → `updateUserContactAccountLink` дозаполняет `account_id` и `account_number` в уже существующую строку.
+Two consumers (one consumer group `notifications-svc`, two readers — `kafka-go`'s `Reader` subscribes to exactly one topic, so one reader per topic, not one per group):
+- `user.events` → `UserActivated` → `upsertUserContactEmail` creates/updates the `(user_id, email)` row, doesn't touch `account_id`.
+- `account.events` (a new topic, published by accounts-svc through the same outbox approach as transfers-svc/auth-svc — see `services/accounts-svc/accounts.go`, `tryCreateAccount`) → `AccountCreated` → `updateUserContactAccountLink` fills in `account_id` and `account_number` on the already-existing row.
 
-`AccountCreated` причинно всегда следует за `UserActivated` (accounts-svc создаёт счёт только в ответ на `UserActivated`), но у двух топиков независимые ридеры без гарантии взаимного порядка обработки внутри notifications-svc. Поэтому `updateUserContactAccountLink` — намеренно `UPDATE`, не `UPSERT`: если строки `user_contacts` ещё нет (обработчик `user.events` не успел), `RowsAffected = 0`. `email TEXT NOT NULL` в схеме исключает противоположную стратегию (upsert с пустым email).
+`AccountCreated` always causally follows `UserActivated` (accounts-svc only creates an account in response to `UserActivated`), but the two topics have independent readers with no guarantee of relative processing order inside notifications-svc. That's why `updateUserContactAccountLink` is deliberately an `UPDATE`, not an `UPSERT`: if the `user_contacts` row doesn't exist yet (the `user.events` handler hasn't caught up), `RowsAffected = 0`. The schema's `email TEXT NOT NULL` rules out the opposite strategy (an upsert with an empty email).
 
-Ждём мы при этом **внутри процесса** (`contactWaitAttempts` × `contactWaitDelay` = 15 × 200 мс), а не «вернуть ошибку и положиться на переспрашивание». У `Reader` из `kafka-go` **нет** per-message redelivery внутри работающего процесса: `FetchMessage` всегда отдаёт следующее сообщение независимо от того, закоммичен ли предыдущий оффсет. «Не коммитить» помогает, только если процесс перезапустится раньше, чем закоммитится любой более поздний оффсет на той же партиции; как только это произошло, пропущенное сообщение потеряно. Ограничение цикла нужно, чтобы по-настоящему застрявший случай не блокировал горутину навсегда.
+The wait here happens **inside the process** (`contactWaitAttempts` × `contactWaitDelay` = 15 × 200ms), not "return an error and rely on redelivery." `kafka-go`'s `Reader` has **no** per-message redelivery within a running process: `FetchMessage` always hands back the next message regardless of whether the previous offset was committed. "Don't commit" only helps if the process restarts before any later offset on the same partition gets committed; once that's happened, the skipped message is gone. The loop's cap exists so a genuinely stuck case doesn't block the goroutine forever.
 
-Дедупликация — тот же паттерн idempotent-consumer, что у accounts-svc: проверка перед обработкой, запись после. Своя таблица `notifications_processed_events`, не `processed_events` — та уже занята accounts-svc в той же физической базе `neobank` (тот же класс коллизии, что уже заставил переименовать outbox-таблицы в `auth_outbox`/`accounts_outbox`, см. выше). Все типы событий пишутся в одну таблицу — `event_id` глобально уникален независимо от типа. Для `UserActivated`/`AccountCreated` статус всегда `skipped`: они кормят проекцию и писем не порождают (о регистрации auth-svc пишет пользователю сам). `processing`/`sent` появляются на событиях переводов — см. следующую секцию.
+Deduplication is the same idempotent-consumer pattern as accounts-svc: check before processing, write after. Its own table, `notifications_processed_events`, not `processed_events` — that one's already taken by accounts-svc in the same physical `neobank` database (the same class of collision that already forced renaming the outbox tables to `auth_outbox`/`accounts_outbox`, see above). Every event type writes to the one table — `event_id` is globally unique regardless of type. For `UserActivated`/`AccountCreated` the status is always `skipped`: they feed the projection and never produce an email (auth-svc emails the user about registration itself). `processing`/`sent` show up on transfer events — see the next section.
 
-### Kafka: offset reset и retention
+### Kafka: offset reset and retention
 
-`UserActivated` публикуется с спринта 2, а `notifications-svc` подключается только сейчас — новая consumer-группа без явных настроек могла бы начать читать `user.events` с конца топика, и все пользователи, зарегистрированные раньше, остались бы без email в проекции навсегда. Решение, оба пункта обязательны вместе, ни один не достаточен в одиночку:
+`UserActivated` has been published since sprint 2, and `notifications-svc` is only connecting now — a new consumer group with no explicit settings could start reading `user.events` from the end of the topic, and every user registered earlier would be left out of the projection forever, with no email. The fix, both parts mandatory together, neither sufficient alone:
 
-1. **`StartOffset: kafka.FirstOffset`** в `newKafkaReader` (`services/notifications-svc/kafka.go`) — явно, а не полагаясь на дефолт `kafka-go`. Действует только один раз: пока у группы `notifications-svc` нет закоммиченного оффсета на партиции. После первого коммита оффсета это значение больше не читается — чтение всегда продолжается с закоммиченного места, так что параметр безопасно оставить в коде навсегда, а не убирать после первого деплоя.
-2. **`cleanup.policy=compact`** на топиках `user.events` и `account.events` (не `delete`, дефолт брокера) — иначе `FirstOffset` не помог бы, если старые сообщения уже физически удалены по retention до того, как notifications-svc впервые подключился. Компакция вместо этого хранит последнее сообщение на каждый ключ (`user_id`) бессрочно — ровно то, что нужно для построения проекции состояния, и естественно для топика, где почти всегда один `UserActivated` на пользователя. Применяется через одноразовый сервис `kafka-init` в `docker-compose.yml` (`kafka-topics.sh --create --if-not-exists ... --config cleanup.policy=compact` + `kafka-configs.sh --alter --add-config` — второе идемпотентно и покрывает случай, когда топик уже существовал с дефолтной политикой до этого изменения). `notifications-svc` зависит от `kafka-init` (`condition: service_completed_successfully`) — топики гарантированно сконфигурированы до первого чтения.
+1. **`StartOffset: kafka.FirstOffset`** in `newKafkaReader` (`services/notifications-svc/kafka.go`) — explicit, not relying on `kafka-go`'s default. It only takes effect once: as long as the `notifications-svc` group has no committed offset on the partition. After the first offset commit this value is never read again — reading always resumes from the committed position, so it's safe to leave this setting in the code forever rather than remove it after the first deploy.
+2. **`cleanup.policy=compact`** on the `user.events` and `account.events` topics (not `delete`, the broker's default) — otherwise `FirstOffset` wouldn't help if old messages were already physically removed by retention before notifications-svc ever connected. Compaction instead keeps the last message per key (`user_id`) forever — exactly what's needed to build a state projection, and natural for a topic where there's almost always one `UserActivated` per user. Applied through the one-shot `kafka-init` service in `docker-compose.yml` (`kafka-topics.sh --create --if-not-exists ... --config cleanup.policy=compact` + `kafka-configs.sh --alter --add-config` — the second one is idempotent and covers the case where the topic already existed with the default policy before this change). `notifications-svc` depends on `kafka-init` (`condition: service_completed_successfully`) — the topics are guaranteed to be configured before the first read.
 
-Проверено вручную: остановленные `notifications-svc`/`postgres` volume, существующие в топике `UserActivated` от пользователей, зарегистрированных до появления этого сервиса, — после `docker compose up` (миграции применяются, ридер стартует с `FirstOffset`) все они появляются в `user_contacts` без создания новых пользователей и без обращения к auth-svc.
+Manually verified: with `notifications-svc`/the Postgres volume stopped, and `UserActivated` messages already sitting on the topic from users registered before this service existed — after `docker compose up` (migrations apply, the reader starts at `FirstOffset`) every one of them shows up in `user_contacts` with no new users created and no calls to auth-svc.
 
-### Устойчивость к недоступности auth-svc
+### Resilience to auth-svc being unavailable
 
-`notifications-svc` никогда не вызывает auth-svc (ни HTTP, ни gRPC) — вся связь только через Kafka и собственную БД. Проверено: `docker compose stop auth-svc`, затем обычный поток (перевод, либо ранее необработанное `UserActivated` через сдвиг оффсета) — `notifications-svc` продолжает читать и обрабатывать события без ошибок, `/healthz` остаётся `200`.
+`notifications-svc` never calls auth-svc (neither HTTP nor gRPC) — all communication is through Kafka and its own DB only. Verified: `docker compose stop auth-svc`, then the normal flow (a transfer, or a previously unprocessed `UserActivated` via an offset shift) — `notifications-svc` keeps reading and processing events with no errors, `/healthz` stays `200`.
 
-## Профиль пользователя (auth-svc)
+## User profile (auth-svc)
 
-`GET /profile` и `PATCH /profile` (через Gateway, `X-User-Id` из JWT — тот же паттерн, что `accounts-svc.GET /me`) отдают и обновляют `display_name` пользователя. Почему это auth-svc, а не отдельный сервис — мини-ADR «Профиль — в auth-svc, а не в отдельном profile-svc» выше. `avatar_key`/`avatar_updated_at` — колонки на `users` (миграция `000005`); сама загрузка аватара — ниже, «Загрузка аватара».
+`GET /profile` and `PATCH /profile` (through the Gateway, `X-User-Id` from the JWT — the same pattern as `accounts-svc.GET /me`) serve and update the user's `display_name`. Why this lives in auth-svc rather than a separate service — see the mini-ADR "Profile lives in auth-svc, not a separate profile-svc" above. `avatar_key`/`avatar_updated_at` are columns on `users` (migration `000005`); avatar upload itself is below, "Avatar upload."
 
-### Валидация `display_name`
+### `display_name` validation
 
-Обрезка пробелов по краям — не ошибка, а нормализация. После обрезки:
-- **пустая строка — это сброс в `NULL`**, а не «имя == пустая строка»: PATCH с `{"display_name": ""}` (или без поля вовсе — эндпоинт принимает ровно одно поле, и пропущенному полю просто нечему в этом узком теле запроса означать «оставь как было») убирает отображаемое имя;
-- длиннее `maxDisplayNameLength` (50 рун, не байт — многобайтовые скрипты вроде японского не наказываются за свою UTF-8-кодировку) — отклоняется;
-- любой control-символ (`unicode.IsControl` — `\n`, `\t`, нулевой байт, C1-диапазон и т.д.) — отклоняется;
-- любой из символов **переопределения/изоляции направления текста** (LRE, RLE, PDF, LRO, RLO, U+202A–U+202E, и LRI/RLI/FSI/PDI, U+2066–U+2069) — отклоняется. Именно RLO — классический вектор визуальной подмены (тот же приём, что в spoofing-атаках через имена файлов): строка на экране читается не в том порядке, в котором она реально хранится. Направленные **метки** (LRM/RLM, U+200E/U+200F) в список запрета намеренно не входят — это подсказки для рендеринга, не переопределения, сами по себе порядок символов изменить не могут.
+Trimming leading/trailing whitespace isn't an error, it's normalization. After trimming:
+- **an empty string means reset to `NULL`**, not "name == empty string": a PATCH with `{"display_name": ""}` (or the field omitted entirely — the endpoint accepts exactly one field, and an omitted field simply has nothing to mean "leave as is" in this narrow request body) clears the display name;
+- longer than `maxDisplayNameLength` (50 runes, not bytes — multi-byte scripts like Japanese aren't penalized for their UTF-8 encoding) — rejected;
+- any control character (`unicode.IsControl` — `\n`, `\t`, a null byte, the C1 range, etc.) — rejected;
+- any of the **text-direction override/isolate** characters (LRE, RLE, PDF, LRO, RLO, U+202A–U+202E, and LRI/RLI/FSI/PDI, U+2066–U+2069) — rejected. RLO in particular is the classic visual-spoofing vector (the same trick used in filename spoofing attacks): the string reads on screen in a different order than it's actually stored. Directional **marks** (LRM/RLM, U+200E/U+200F) are deliberately not on the reject list — they're rendering hints, not overrides, and can't change character order on their own.
 
-### `ProfileUpdated`: тот же outbox, что и `UserActivated`
+### `ProfileUpdated`: the same outbox as `UserActivated`
 
-`updateProfile` (`services/auth-svc/profile.go`) пишет новое значение `display_name` и событие `ProfileUpdated` в `auth_outbox` в одной транзакции — тот же приём защиты от dual-write, что `verifyEmailCode` уже применяет к `UserActivated`. Событие едет тем же relay'ем, в тот же топик `user.events`, с тем же `partition_key = user_id` — специально, чтобы Kafka гарантировал порядок между `UserActivated` и последующими `ProfileUpdated` одного пользователя без дополнительных ожиданий на стороне консьюмера (в отличие от `AccountCreated`, который живёт на независимом топике без такой гарантии — см. «notifications-svc: проекция `user_contacts`» выше).
+`updateProfile` (`services/auth-svc/profile.go`) writes the new `display_name` value and a `ProfileUpdated` event to `auth_outbox` in one transaction — the same dual-write protection `verifyEmailCode` already applies to `UserActivated`. The event travels through the same relay, to the same `user.events` topic, with the same `partition_key = user_id` — deliberately, so Kafka guarantees ordering between `UserActivated` and any later `ProfileUpdated` for the same user with no extra waiting on the consumer side (unlike `AccountCreated`, which lives on an independent topic with no such guarantee — see "notifications-svc: the `user_contacts` projection" above).
 
-`notifications-svc`'s `user.events`-консьюмер (переименован в `runUserEventsConsumer`, было `runUserActivatedConsumer`) различает `UserActivated`/`ProfileUpdated` по заголовку `event_type`, который relay проставляет на каждое сообщение — тот же приём, что уже используется для трёх типов на `transfer.events`. Сообщение без заголовка (более старые записи) трактуется как `UserActivated` — единственное, что когда-либо публиковалось в этот топик до `ProfileUpdated`, так что это не костыль, а корректное прочтение легаси-сообщения. `handleProfileUpdated` — `UPDATE`, не `UPSERT`: строка `user_contacts` уже должна существовать (её создаёт `UserActivated`, который, по доказанному выше порядку партиции, обрабатывается раньше), поэтому — в отличие от `updateUserContactAccountLink` — здесь не нужен цикл ожидания.
+`notifications-svc`'s `user.events` consumer (renamed to `runUserEventsConsumer`, was `runUserActivatedConsumer`) tells `UserActivated`/`ProfileUpdated` apart by the `event_type` header the relay stamps on every message — the same trick already used for the three types on `transfer.events`. A message with no header (older records) is treated as `UserActivated` — the only thing ever published to this topic before `ProfileUpdated` existed, so this isn't a hack, it's a correct reading of a legacy message. `handleProfileUpdated` is an `UPDATE`, not an `UPSERT`: the `user_contacts` row is already guaranteed to exist (it's created by `UserActivated`, which — by the partition ordering proven above — is processed first), so unlike `updateUserContactAccountLink`, no wait loop is needed here.
 
-### Проверка вручную
+### Manual verification
 ```bash
 curl -s -X PATCH http://localhost:8080/auth/profile \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
@@ -779,132 +796,133 @@ curl -s -X PATCH http://localhost:8080/auth/profile \
 # {"user_id":"...","display_name":"Alice","avatar_key":null,"avatar_updated_at":null}
 
 curl -s http://localhost:8080/auth/profile -H "Authorization: Bearer $ALICE_TOKEN"
-# то же самое значение — GET и PATCH используют один и тот же запрос к users
+# same value — GET and PATCH use the same query against users
 
-# Имя из управляющих символов отклоняется без обращения к БД:
+# A name made of control characters is rejected without touching the DB:
 curl -s -o /dev/null -w "%{http_code}\n" -X PATCH http://localhost:8080/auth/profile \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -d '{"display_name":"Alice\nBob"}'
 # 400
 
-# Сброс в NULL пустой строкой:
+# Reset to NULL with an empty string:
 curl -s -X PATCH http://localhost:8080/auth/profile \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -d '{"display_name":""}'
 # {"user_id":"...","display_name":null,...}
 
-# Проекция notifications-svc обновилась (после того как relay успел
-# доставить событие — обычно меньше секунды):
+# notifications-svc's projection has updated (after the relay has had
+# time to deliver the event — usually under a second):
 docker compose exec pg-haproxy psql -U neobank -d neobank -c \
-  "SELECT user_id, display_name FROM user_contacts WHERE user_id = '<uuid Alice>'"
+  "SELECT user_id, display_name FROM user_contacts WHERE user_id = '<Alice's uuid>'"
 ```
-Проверено: `PATCH` сохраняет имя (видно в ответе и при повторном `GET`), `ProfileUpdated` доезжает до `notifications-svc` (строка в `auth_outbox` получает `published_at`, затем `user_contacts.display_name` меняется), а имя с `\n` внутри отклоняется `400`-м без единого обращения к Postgres.
+Verified: `PATCH` saves the name (visible in the response and on a repeat `GET`), `ProfileUpdated` reaches `notifications-svc` (the row in `auth_outbox` gets `published_at`, then `user_contacts.display_name` changes), and a name containing `\n` is rejected with a `400` without a single call to Postgres.
 
-## Загрузка аватара (auth-svc + MinIO)
+## Avatar upload (auth-svc + MinIO)
 
-### Принцип: байты не идут через backend
+### Principle: bytes never pass through the backend
 
-`POST /profile/avatar/upload-url` выдаёт presigned PUT-политику (POST-policy — S3-термин, ниже почему именно она, а не голый PUT) на короткий TTL; клиент грузит файл напрямую в MinIO. `auth-svc` никогда не видит тело загрузки на этом шаге — тот же принцип, что со Stripe Elements («Stripe-фондированные депозиты» выше): чувствительное/тяжёлое не пересекает периметр сервиса, и сервис не держит соединение на время загрузки мегабайт и не масштабируется под трафик картинок.
+`POST /profile/avatar/upload-url` issues a presigned PUT policy (a POST policy — the S3 term; why that and not a bare PUT, below) with a short TTL; the client uploads the file directly to MinIO. `auth-svc` never sees the upload body at this step — the same principle as with Stripe Elements ("Stripe-funded deposits" above): anything sensitive or heavy never crosses the service's perimeter, and the service doesn't hold a connection open for megabytes of upload or need to scale for image traffic.
 
-Цена принципа — валидация ДО загрузки невозможна: сервис ничего не видел, пока файл не оказался в бакете. Отсюда второй эндпоинт.
+The cost of this principle is that validation BEFORE upload is impossible: the service never saw anything until the file was already in the bucket. Hence the second endpoint.
 
-### `POST /profile/avatar/confirm` — вся валидация здесь, постфактум
+### `POST /profile/avatar/confirm` — all validation happens here, after the fact
 
-`confirmAvatarHandler` (`services/auth-svc/avatar.go`) забирает объект из MinIO по `key` и проверяет, в этом порядке — каждая проверка дешевле следующей, так что ничего не платит больше, чем нужно, чтобы быть отклонённым:
+`confirmAvatarHandler` (`services/auth-svc/avatar.go`) fetches the object from MinIO by `key` and checks, in this order — each check cheaper than the next, so nothing pays more than it has to in order to be rejected:
 
-1. **Владение ключом.** `key` обязан быть ровно `avatars/{X-User-Id}/{upload-id}` — сгенерированным этим же сервисом при выдаче presigned-URL, под префиксом вызывающего пользователя. Клиент передаёт `key` в теле запроса, поэтому это единственная проверка авторизации между «подтвердить свою загрузку» и «подтвердить произвольный ключ в бакете».
-2. **Реальный размер** — `StatObject` без скачивания тела; ограничение задано и на уровне presigned-политики (`content-length-range`, ниже), и здесь — на случай, если политика когда-то была неверно настроена.
-3. **Тип по магическим байтам.** `http.DetectContentType` на скачанные байты — никогда не по расширению ключа и не по `Content-Type`, который прислал клиент: оба подделываются тривиально, только содержимое — нет. Разрешённый список закрытый и явный (`allowedAvatarContentTypes`): `image/jpeg`, `image/png`.
-4. **Декомпрессионная бомба** — `image.DecodeConfig` (читает только заголовок формата, не пиксели) даёт заявленные `width`/`height` до того, как выделяется буфер под полное декодирование; `width*height` свыше `maxAvatarPixels` (20 МП) отклоняется здесь, а не после аллокации. Маленький, хорошо сжимаемый файл с огромными заявленными размерами — ровно тот случай, который эта проверка ловит; см. тест `TestDecodeAvatarImage_DecompressionBomb` (`avatar_test.go`) — сплошной 6000×6000 PNG весит 4.5 КБ и отклоняется именно по разрешению, не по размеру файла.
+1. **Key ownership.** `key` must be exactly `avatars/{X-User-Id}/{upload-id}` — generated by this same service when the presigned URL was issued, under the calling user's own prefix. The client passes `key` in the request body, so this is the only authorization check standing between "confirm your own upload" and "confirm an arbitrary key in the bucket."
+2. **Real size** — `StatObject` with no body download; the limit is enforced both at the presigned-policy level (`content-length-range`, below) and here, in case the policy was ever misconfigured.
+3. **Type by magic bytes.** `http.DetectContentType` on the downloaded bytes — never by the key's extension and never by the `Content-Type` the client sent: both are trivially forged, only the content isn't. The allow-list is closed and explicit (`allowedAvatarContentTypes`): `image/jpeg`, `image/png`.
+4. **Decompression bomb** — `image.DecodeConfig` (reads only the format header, not the pixels) yields the claimed `width`/`height` before a buffer for full decoding is ever allocated; `width*height` above `maxAvatarPixels` (20 MP) is rejected here, before any allocation. A small, highly compressible file with enormous claimed dimensions is exactly the case this check catches; see the `TestDecodeAvatarImage_DecompressionBomb` test (`avatar_test.go`) — a solid 6000×6000 PNG weighs 4.5 KB and is rejected specifically on resolution, not file size.
 
-Отклонённый на любом из этих шагов файл **не удаляется** — остаётся в хранилище до фоновой уборки (ниже). `confirm`, упавший на середине, не должен решать, безопасно ли стирать то, что может понадобиться повторной попытке.
+A file rejected at any of these steps is **not deleted** — it stays in storage until the background cleanup (below). A `confirm` that failed partway through shouldn't get to decide whether it's safe to erase something a retry might still need.
 
-### Перекодирование, а не сохранение присланного как есть
+### Re-encoding, not storing what was sent as-is
 
-Файл, прошедший проверки, не сохраняется байт-в-байт — декодируется в `image.Image`, центрируется в квадрат (сторона — меньшая из ширины/высоты), масштабируется до 64 и 256 px (`golang.org/x/image/draw`, `CatmullRom`) и кодируется заново в JPEG. Два независимых повода, оба реальные, не гипотетические:
+A file that passes the checks isn't saved byte-for-byte — it's decoded into an `image.Image`, center-cropped to a square (the side is the smaller of width/height), scaled to 64 and 256 px (`golang.org/x/image/draw`, `CatmullRom`), and re-encoded to JPEG. Two independent reasons, both real, not hypothetical:
 
-- **EXIF.** Фото с телефона несёт GPS-координаты места съёмки. У декодированного `image.Image` нет памяти о байтовой раскладке исходного файла — метаданные не «удаляются», их физически неоткуда взять при перекодировании с нуля. Проверено на реальном фото с настоящими GPS-тегами (Pillow — `exiftool` недоступен без прав администратора в этом окружении, `pip install piexif Pillow` — нет): после `confirm` `Image.getexif()` возвращает пустой словарь на обеих итоговых картинках, GPS IFD (`0x8825`) отсутствует полностью.
-- **Полиглоты.** Файл, валидный одновременно как изображение и как что-то исполняемое, перестаёт быть таковым после перекодирования — на выходе строго JPEG, порождённый `image/jpeg.Encode` с нуля, а не байты, которые кто-то прислал.
+- **EXIF.** A phone photo carries GPS coordinates of where it was taken. A decoded `image.Image` has no memory of the source file's byte layout — the metadata isn't "removed," there's physically nowhere for it to come from when re-encoding from scratch. Verified on a real photo with real GPS tags (Pillow — `exiftool` isn't available without admin rights in this environment, `pip install piexif Pillow` isn't either): after `confirm`, `Image.getexif()` returns an empty dict on both resulting images, the GPS IFD (`0x8825`) is entirely absent.
+- **Polyglots.** A file that's simultaneously valid as an image and as something executable stops being that after re-encoding — the output is strictly JPEG, produced by `image/jpeg.Encode` from scratch, not the bytes anyone actually sent.
 
-Обе версии (64 и 256 px) заливаются под `{key}/64` и `{key}/256`; исходная загрузка по голому `key` удаляется (best-effort — см. `avatar.go`) сразу после, поскольку раздаётся всегда только перекодированное.
+Both versions (64 and 256 px) are uploaded under `{key}/64` and `{key}/256`; the original upload at the bare `key` is deleted (best-effort — see `avatar.go`) right after, since only the re-encoded versions are ever served.
 
-### Presigned POST-политика, а не голый PUT — ограничение размера на уровне хранилища
+### A presigned POST policy, not a bare PUT — size limits enforced at the storage layer
 
-`SetContentLengthRange` в `minio.PostPolicy` — то, что превращает «клиент прислал файл побольше, чем нужно» в отказ MinIO/S3 ещё до того, как байты дойдут до `confirm`, а не в клиентскую проверку `file.size`, которую враждебный клиент просто не станет делать. Голый presigned PUT такой политики не несёт — отсюда именно POST-policy, не PUT-URL. Проверено (`TestPresignedUploadURL_RejectsOversizedUpload`, `avatar_integration_test.go`): реальный HTTP POST с телом больше лимита получает отказ от MinIO напрямую.
+`SetContentLengthRange` in `minio.PostPolicy` is what turns "the client sent a file bigger than it should be" into a rejection from MinIO/S3 before the bytes ever reach `confirm`, rather than a client-side `file.size` check a hostile client simply won't bother making. A bare presigned PUT carries no such policy — hence a POST policy specifically, not a PUT URL. Verified (`TestPresignedUploadURL_RejectsOversizedUpload`, `avatar_integration_test.go`): a real HTTP POST with a body larger than the limit is rejected by MinIO directly.
 
-### Замена аватара удаляет предыдущий объект
+### Replacing an avatar deletes the previous object
 
-`swapAvatarKey` (`avatar.go`) читает текущий `avatar_key` пользователя (`SELECT ... FOR UPDATE`, чтобы увидеть значение ДО собственного `UPDATE` — `UPDATE ... RETURNING (SELECT ...)` в одном выражении вернул бы уже новое значение, не старое) и возвращает его вызывающему коду. После успешной записи двух новых объектов и обновления `avatar_key` оба объекта старого ключа (`{old}/64`, `{old}/256`) удаляются — иначе каждая смена аватара оставляет мусор в бакете навсегда.
+`swapAvatarKey` (`avatar.go`) reads the user's current `avatar_key` (`SELECT ... FOR UPDATE`, to see the value BEFORE its own `UPDATE` — an `UPDATE ... RETURNING (SELECT ...)` in a single statement would already return the new value, not the old one) and hands it back to the calling code. After the two new objects are successfully written and `avatar_key` is updated, both objects at the old key (`{old}/64`, `{old}/256`) are deleted — otherwise every avatar change leaves garbage in the bucket forever.
 
-### Неподтверждённые загрузки: фоновая уборка
+### Unconfirmed uploads: background cleanup
 
-Два независимых воркера, оба по образцу `runResolveAttemptsCleanupWorker` в accounts-svc:
+Two independent workers, both modeled on `runResolveAttemptsCleanupWorker` in accounts-svc:
 
-- `runAvatarUploadAttemptsCleanupWorker` (`avatar_rate_limit.go`) чистит саму таблицу учёта попыток (`avatar_upload_attempts`) — та же проблема, что и `iban_resolve_attempts` там.
-- `runAvatarCleanupWorker` (`avatar_cleanup.go`) чистит **объекты в MinIO**: раз в час ищет под префиксом `avatars/` ключи ровно с двумя слэшами (`avatars/{user}/{id}` — необработанная загрузка; обработанная всегда трёхсегментная, `avatars/{user}/{id}/{64|256}`, и никогда не трогается) старше 24 часов и удаляет их. Успешный `confirm` сам удаляет свой сырой ключ сразу — так что доживший до суток бесхозный ключ означает: `confirm` либо не был вызван вовсе, либо отклонил файл на валидации.
+- `runAvatarUploadAttemptsCleanupWorker` (`avatar_rate_limit.go`) cleans up the attempt-tracking table itself (`avatar_upload_attempts`) — the same problem `iban_resolve_attempts` has there.
+- `runAvatarCleanupWorker` (`avatar_cleanup.go`) cleans up **objects in MinIO**: once an hour it looks under the `avatars/` prefix for keys with exactly two slashes (`avatars/{user}/{id}` — an unprocessed upload; a processed one always has three segments, `avatars/{user}/{id}/{64|256}`, and is never touched) older than 24 hours, and deletes them. A successful `confirm` already deletes its own raw key right away — so an orphaned key surviving a full day means `confirm` was either never called at all, or rejected the file during validation.
 
-### Rate-limit на выдачу upload-URL
+### Rate limit on issuing upload URLs
 
-Выдача presigned-URL ничего не стоит серверу — без лимита это способ бесконечно плодить цели для заливки и заполнить хранилище мусором, независимо от того, что `confirm` в итоге отклонит. `recordAvatarUploadAttempt` (`avatar_rate_limit.go`) — тот же атомарный `WITH ... COUNT ... INSERT ... SELECT ... WHERE` из одного запроса, что и `recordResolveAttempt` в accounts-svc, по умолчанию 5 попыток / 10 минут (`AVATAR_UPLOAD_RATE_LIMIT`/`AVATAR_UPLOAD_RATE_WINDOW`) — свободнее лимита на резолв IBAN, поскольку смена аватара несколько раз за десять минут — обычное поведение живого пользователя, а не десять разных резолвов подряд.
+Issuing a presigned URL costs the server nothing — with no limit, that's a way to endlessly spawn upload targets and fill storage with garbage, regardless of what `confirm` ultimately rejects. `recordAvatarUploadAttempt` (`avatar_rate_limit.go`) is the same atomic single-query `WITH ... COUNT ... INSERT ... SELECT ... WHERE` as `recordResolveAttempt` in accounts-svc, defaulting to 5 attempts / 10 minutes (`AVATAR_UPLOAD_RATE_LIMIT`/`AVATAR_UPLOAD_RATE_WINDOW`) — looser than the IBAN resolve limit, since changing an avatar a few times in ten minutes is ordinary behavior for a real user, not ten different resolves in a row.
 
-### Раздача: presigned GET, а не публичное чтение бакета
+### Serving: presigned GET, not public bucket reads
 
-Оба варианта валидны, правильного ответа нет — задача явно просит выбрать и обосновать. Выбран **presigned GET** (`avatarGetURLTTL` = 1 час, подписывается заново при каждом `GET /profile`).
+Both options are valid, there's no single right answer here — the task explicitly calls for picking one and justifying it. **Presigned GET** was chosen (`avatarGetURLTTL` = 1 hour, re-signed on every `GET /profile`).
 
-**Отвергнуто:** публичное чтение бакета (`mc anonymous set download`) — проще, кешируется CDN бесплатно, не требует подписи на каждый ответ.
+**Rejected:** public bucket reads (`mc anonymous set download`) — simpler, cached by a CDN for free, no signing needed on every response.
 
-**Почему presigned, а не публичный, именно здесь:** аватар — не секрет (перевод не зависит от того, кто его видел), но это персональные данные, привязанные к конкретному, идентифицируемому пользователю банка. Публичный бакет с предсказуемым или переборным ключом означал бы: кто угодно, не проходя аутентификацию, может листать фотографии клиентов банка. Ключи здесь — случайные UUID, не последовательные id, так что прямого перебора нет, но публичное чтение всё равно означает: любой, кто ГДЕ-ТО увидел URL (реферер, лог прокси, шеринг), получает доступ навсегда, без TTL и без возможности отозвать. Presigned URL с TTL в час — это тот же компромисс, что уже сделан для JWT-токенов в этой системе (короткоживущие, а не вечные), применённый к ещё одному виду доступа к персональным данным. Цена — отсутствие CDN-кеширования и переподпись на каждый `GET /profile`; при объёме аватаров в этой системе это не узкое место, которое стоило бы решать сейчас (тот же принцип, что и в «Горячий счёт» — не оптимизировать то, что не измерено как проблема).
+**Why presigned, not public, specifically here:** an avatar isn't a secret (a transfer doesn't depend on who's seen it), but it is personal data tied to a specific, identifiable bank customer. A public bucket with a predictable or brute-forceable key would mean anyone, without authenticating at all, could browse the bank's customers' photos. The keys here are random UUIDs, not sequential ids, so direct enumeration isn't possible — but public reads would still mean anyone who's seen the URL ANYWHERE (a referrer header, a proxy log, sharing it) gets access forever, with no TTL and no way to revoke it. A presigned URL with an hour's TTL is the same trade-off already made for JWT tokens in this system (short-lived, not eternal), applied to one more kind of access to personal data. The cost is no CDN caching and re-signing on every `GET /profile`; at the volume of avatars in this system that's not a bottleneck worth solving now (the same principle as in "Hot account" — don't optimize what hasn't been measured as a problem).
 
-### Что сломалось по дороге: два разных endpoint для одного MinIO
+### What broke along the way: two different endpoints for the same MinIO
 
-Первая версия использовала один и тот же адрес (`MINIO_ENDPOINT=minio:9000`, docker-compose-имя) и для собственных вызовов `auth-svc` (Stat/Get/Put/Remove/List — эти реально идут из контейнера `auth-svc` внутри сети compose), и для подписи presigned-URL. Живая проверка тут же показала проблему: presigned-URL с хостом `minio` не резолвится ни у какого клиента вне сети docker compose — ни у браузера, ни у `curl` с хост-машины. Второй симптом того же корня: `minio-go.PresignedPostPolicy` сама делает сетевой вызов (`GetBucketLocation`) на адрес клиента, которым подписывает — если для подписи использовать «внешний» адрес (`localhost:9000`), но выполнять код внутри контейнера `auth-svc`, этот адрес до MinIO уже не достучится (`localhost` внутри контейнера — это сам контейнер). Решение — два клиента `minio-go` в `avatarStorage` (`storage.go`): `client` на `MINIO_ENDPOINT` для всего, что делает сам сервис, `publicClient` на `MINIO_PUBLIC_ENDPOINT` только для подписи, плюс явный `Region` в опциях обоих клиентов, чтобы подпись не пыталась ничего сама выяснять по сети.
+The first version used the same address (`MINIO_ENDPOINT=minio:9000`, the docker-compose name) both for `auth-svc`'s own calls (Stat/Get/Put/Remove/List — these really do go out from the `auth-svc` container inside the compose network) and for signing presigned URLs. A live check immediately surfaced the problem: a presigned URL with host `minio` doesn't resolve for any client outside the docker compose network — not a browser, not `curl` from the host machine. A second symptom of the same root cause: `minio-go.PresignedPostPolicy` itself makes a network call (`GetBucketLocation`) to the address of the client it's signing with — if the "external" address (`localhost:9000`) is used for signing but the code runs inside the `auth-svc` container, that address can no longer reach MinIO at all (`localhost` inside a container is the container itself). The fix — two `minio-go` clients in `avatarStorage` (`storage.go`): `client` on `MINIO_ENDPOINT` for everything the service does itself, `publicClient` on `MINIO_PUBLIC_ENDPOINT` only for signing, plus an explicit `Region` in both clients' options so signing never tries to figure anything out over the network itself.
 
-### Проверка вручную
+### Manual verification
 ```bash
-# 1. Выдать presigned-URL (rate-limited, 5/10 мин на пользователя)
+# 1. Issue a presigned URL (rate-limited, 5/10 min per user)
 curl -s -X POST http://localhost:8080/auth/profile/avatar/upload-url \
   -H "Authorization: Bearer $ALICE_TOKEN"
 # {"url":"http://localhost:9000/avatars/","fields":{...},"key":"avatars/<uuid>/<uuid>"}
 
-# 2. Реально загрузить файл (POST-policy, multipart/form-data — так это будет
-#    делать фронт в спринте 13; здесь для проверки годится Python/requests
-#    или curl -F по каждому полю из "fields" плюс -F "file=@avatar.jpg")
+# 2. Actually upload the file (a POST policy, multipart/form-data — this is
+#    what the frontend will do in sprint 13; for manual verification,
+#    Python/requests or curl -F for each field from "fields" plus
+#    -F "file=@avatar.jpg" both work)
 
-# 3. Подтвердить
+# 3. Confirm
 curl -s -X POST http://localhost:8080/auth/profile/avatar/confirm \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -d '{"key":"avatars/<uuid>/<uuid>"}'
 # {"avatar_key":"...","avatar_url_64":"http://localhost:9000/...","avatar_url_256":"..."}
 
-# 4. Настоящий JPEG с GPS в EXIF (проверено на реальном фото со Statue of
-#    Liberty координатами, Pillow/piexif) — после confirm обе итоговые
-#    картинки: Image.getexif() пуст, GPS IFD (0x8825) отсутствует.
+# 4. A real JPEG with GPS in its EXIF (verified on a real photo with actual
+#    Statue of Liberty coordinates, Pillow/piexif) — after confirm, both
+#    resulting images: Image.getexif() is empty, GPS IFD (0x8825) is absent.
 
-# 5. Файл с .jpg-подобным ключом, но текстовым содержимым — confirm:
+# 5. A file with a .jpg-looking key but text content — confirm:
 # {"error":"unsupported image type \"text/plain; charset=utf-8\""} — 400,
-# объект остаётся в MinIO (для фоновой уборки), avatar_key не меняется.
+# the object stays in MinIO (for background cleanup), avatar_key doesn't change.
 
-# 6. Второй confirm для того же пользователя — GET /auth/profile снова 200,
-# но старые avatars/<prev-uuid>/{64,256} пропадают из бакета (mc ls).
+# 6. A second confirm for the same user — GET /auth/profile is 200 again,
+# but the old avatars/<prev-uuid>/{64,256} disappear from the bucket (mc ls).
 ```
-Проверено вживую (не только юнит-тестами): полный цикл через реальный Gateway — регистрация, presigned-загрузка настоящего JPEG с EXIF-GPS, confirm, обе итоговые картинки скачаны по presigned GET и прогнаны через Pillow (0 EXIF-тегов на выходе), не-картинка с `.jpg`-именем отклонена на confirm с объектом, оставленным в хранилище, rate-limit сработал ровно на исчерпании лимита. Дублирующая проверка через `go test` (`services/auth-svc/avatar_integration_test.go`) — та же логика против того же MinIO, включая замену аватара и уборку неподтверждённых загрузок с `retention=0` (не настоящие часы ожидания).
+Verified live (not just with unit tests): a full cycle through a real Gateway — registration, a presigned upload of a real JPEG with EXIF GPS, confirm, both resulting images downloaded via presigned GET and run through Pillow (0 EXIF tags in the output), a non-image with a `.jpg` name rejected on confirm with the object left in storage, the rate limit firing exactly when the limit was exhausted. A duplicate check via `go test` (`services/auth-svc/avatar_integration_test.go`) — the same logic against the same MinIO, including avatar replacement and cleanup of unconfirmed uploads with `retention=0` (not real hours of waiting).
 
-## ledger-svc: внутренний gRPC API
+## ledger-svc: internal gRPC API
 
-`ledger-svc` считает и хранит балансы (`account_balances` — кэш поверх лога `entries`, всегда пересчитываемый из него), исполняет атомарные переводы между двумя счетами и отдаёт историю проводок. У него **нет** публичного HTTP API и **нет** маршрута в `gateway` — это осознанно: единственный клиент ledger-svc — `transfers-svc` (со спринта 5), который сам отвечает за аутентификацию и авторизацию перевода до вызова ledger. Здесь нет ни `X-User-Id`, ни какой-либо другой клиентской идентичности — это внутренний, service-to-service контракт.
+`ledger-svc` computes and stores balances (`account_balances` — a cache on top of the `entries` log, always recomputable from it), executes atomic transfers between two accounts, and serves transaction history. It has **no** public HTTP API and **no** route in `gateway` — deliberately: ledger-svc's only client is `transfers-svc` (since sprint 5), which is itself responsible for authenticating and authorizing a transfer before ever calling the ledger. There's no `X-User-Id` here, nor any other client identity — this is an internal, service-to-service contract.
 
-Протокол — gRPC, а не HTTP: это вызов между сервисами внутри кластера, а не браузерный запрос, и `buf.gen.yaml` в репозитории уже настроен на генерацию grpc-стабов (`protoc-gen-go-grpc`), так что добавить контракт стоило дёшево.
+The protocol is gRPC, not HTTP: this is a call between services inside the cluster, not a browser request, and `buf.gen.yaml` in the repo was already set up to generate gRPC stubs (`protoc-gen-go-grpc`), so adding the contract was cheap.
 
-Контракт — `proto/ledger/v1/ledger.proto` (`ledger.v1.LedgerService`):
-- `GetBalance(account_id) → balance` — O(1) чтение из `account_balances`.
-- `ExecuteTransfer(from_account_id, to_account_id, amount) → transaction_id` — атомарный перевод; бизнес-ошибки («недостаточно средств», «аккаунт не найден» — отдельно для `from`/`to`, «невалидная сумма») возвращаются как grpc-статусы (`FailedPrecondition`, `NotFound`, `InvalidArgument`), а не как поле в успешном ответе — это gRPC-идиоматичный эквивалент HTTP-кода + JSON `{"error": ...}` в остальных сервисах репозитория.
-- `GetHistory(account_id, limit, offset) → entries[]` — постранично, новые сверху (`ORDER BY created_at DESC, id DESC`; `id` — tie-breaker, потому что обе проводки одного перевода получают одинаковый `created_at`: `now()` внутри одной транзакции Postgres фиксирован на её начало).
+The contract lives in `proto/ledger/v1/ledger.proto` (`ledger.v1.LedgerService`):
+- `GetBalance(account_id) → balance` — an O(1) read from `account_balances`.
+- `ExecuteTransfer(from_account_id, to_account_id, amount) → transaction_id` — an atomic transfer; business errors ("insufficient funds," "account not found" — separately for `from`/`to`, "invalid amount") come back as gRPC statuses (`FailedPrecondition`, `NotFound`, `InvalidArgument`), not as a field in a successful response — this is the gRPC-idiomatic equivalent of an HTTP status + a JSON `{"error": ...}` in the rest of the repo's services.
+- `GetHistory(account_id, limit, offset) → entries[]` — paginated, newest first (`ORDER BY created_at DESC, id DESC`; `id` is the tie-breaker, because both entries of one transfer get the same `created_at`: `now()` inside a single Postgres transaction is fixed at its start).
 
-Генерация Go-кода из `.proto`: `buf generate` из корня репозитория (нужны локально `buf`, `protoc-gen-go`, `protoc-gen-go-grpc`).
+Generating Go code from `.proto`: `buf generate` from the repo root (needs `buf`, `protoc-gen-go`, `protoc-gen-go-grpc` locally).
 
-Сервер дополнительно регистрирует стандартный grpc health-check (`grpc.health.v1.Health`) вместо HTTP `/healthz` и grpc reflection — для internal-only сервиса без внешних потребителей компромисс «reflection раскрывает контракт» не действует, а reflection избавляет от необходимости раздавать `.proto`-файлы, чтобы дёргать сервис через `grpcurl`.
+The server additionally registers the standard gRPC health check (`grpc.health.v1.Health`) instead of an HTTP `/healthz`, and gRPC reflection — for an internal-only service with no external consumers, the "reflection exposes the contract" trade-off doesn't apply, and reflection saves having to hand out `.proto` files just to poke the service with `grpcurl`.
 
-### Проверка вручную
+### Manual verification
 ```bash
 grpcurl -plaintext localhost:8083 list
 
@@ -918,125 +936,126 @@ grpcurl -plaintext -d '{"account_id": "<uuid>", "limit": 10, "offset": 0}' \
   localhost:8083 ledger.v1.LedgerService/GetHistory
 ```
 
-### Конкурентность: перевод не может увести счёт в минус
+### Concurrency: a transfer can never push an account negative
 
-`executeTransfer` — единственный писатель в `entries`/`account_balances`, и он обязан отклонять перевод, если баланса не хватает. Опасность — классическая read-then-write гонка: два одновременных перевода с одного счёта оба читают один и тот же (ещё не списанный) баланс, оба видят «средств достаточно» и оба проходят — счёт уходит в минус, хотя каждая проверка по отдельности была «корректной».
+`executeTransfer` is the only writer to `entries`/`account_balances`, and it must reject a transfer if the balance isn't enough. The danger is a classic read-then-write race: two concurrent transfers off the same account both read the same (not-yet-debited) balance, both see "sufficient funds," and both go through — the account goes negative even though each check on its own was "correct."
 
-**Выбран `SELECT ... FOR UPDATE`, а не `SERIALIZABLE`.** Обе стороны перевода (`ledger_accounts` строки `from` и `to`) блокируются `FOR UPDATE` внутри одной транзакции, **в детерминированном порядке — по возрастанию `account_id`**, а не в порядке `from`→`to`. Без этого два встречных перевода (A→B и B→A одновременно) могли бы захватить блокировки в противоположном порядке и словить дедлок; сортировка по `account_id` гарантирует, что обе транзакции всегда пытаются заблокировать один и тот же счёт первым — вторая просто ждёт, дедлок невозможен. `SERIALIZABLE` тоже решил бы гонку, но потребовал бы retry-цикла на `40001 serialization_failure` — такого паттерна в репозитории нигде больше нет, и вносить его ради одной функции означало бы новый, ничем не подкреплённый класс ошибок. `FOR UPDATE` вместо этого просто блокирует вторую транзакцию до коммита первой — тот же приём, что уже используется в `accounts-svc` (`updateAccountStatus`) и `auth-svc`, только тут блокируются два счёта, а не один.
+**`SELECT ... FOR UPDATE` was chosen, not `SERIALIZABLE`.** Both sides of the transfer (the `from` and `to` rows in `ledger_accounts`) are locked with `FOR UPDATE` inside a single transaction, **in a deterministic order — ascending `account_id`**, not `from`→`to` order. Without this, two opposing transfers (A→B and B→A at the same time) could grab their locks in opposite orders and deadlock; sorting by `account_id` guarantees both transactions always try to lock the same account first — the second one just waits, a deadlock is impossible. `SERIALIZABLE` would have solved the race too, but would have required a retry loop on `40001 serialization_failure` — no such pattern exists anywhere else in the repo, and introducing it for one function alone would mean a new, unsupported class of errors. `FOR UPDATE` instead simply blocks the second transaction until the first commits — the same trick already used in `accounts-svc` (`updateAccountStatus`) and `auth-svc`, just locking two accounts here instead of one.
 
-**Тест, который это доказывает** — `TestExecuteTransfer_ConcurrentOverdraftPrevention` (`services/ledger-svc/ledger_test.go`): счёт с балансом 10000, 20 горутин одновременно пытаются списать по 1000 (суммарно 20000 — вдвое больше, чем есть). Ожидаемо: ровно 10 успехов, 10 `insufficient funds`, итоговый баланс ровно 0 (никогда отрицательный), и `SUM(entries)` по всем счетам, задействованным в тесте, равен 0.
+**The test that proves it** — `TestExecuteTransfer_ConcurrentOverdraftPrevention` (`services/ledger-svc/ledger_test.go`): an account with a 10000 balance, 20 goroutines simultaneously trying to debit 1000 each (20000 total — twice what's actually there). Expected: exactly 10 successes, 10 `insufficient funds`, a final balance of exactly 0 (never negative), and `SUM(entries)` across every account involved in the test equal to 0.
 
-Это не тест логики «по одной проверке за раз» — он реально запускает 20 горутин параллельно, так что гонка (если она есть) успевает проявиться. Проверено вручную: если временно убрать `FOR UPDATE` из `lockLedgerAccount`, тест падает стабильно (10 из 10 прогонов) — все 20 переводов проходят, баланс уходит на −10000. С `FOR UPDATE` тест стабильно зелёный (прогонялся `-count=15` подряд). Запустить самостоятельно:
+This isn't a "one check at a time" logic test — it genuinely spins up 20 goroutines in parallel, so the race, if it exists, has a real chance to show up. Manually verified: temporarily removing `FOR UPDATE` from `lockLedgerAccount` makes the test fail reliably (10 out of 10 runs) — all 20 transfers go through, the balance ends up at −10000. With `FOR UPDATE`, the test is reliably green (run with `-count=15` in a row). Run it yourself:
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./... -run TestExecuteTransfer_ConcurrentOverdraftPrevention -count=20 -v
 ```
-(`-race` здесь не годится — он ловит гонки по памяти Go, а не гонки по блокировкам строк в Postgres, которые как раз и проверяются; сама горутина в тесте не имеет разделяемого мутируемого состояния — каждая пишет только в свой индекс среза.)
+(`-race` doesn't apply here — it catches Go memory races, not Postgres row-lock races, which is exactly what's being tested; the goroutine in the test itself has no shared mutable state — each one only writes to its own slice index.)
 
-## accounts-svc: баланс в `GET /accounts/me`
+## accounts-svc: the balance in `GET /accounts/me`
 
-`GET /accounts/me` (через Gateway, с валидным токеном) возвращает счёт пользователя **вместе с балансом**. Баланс — авторитетный, живёт в `ledger-svc`; accounts-svc получает его вызовом `GetBalance(account_id)` по gRPC (`account_id` = `accounts.id` = `ledger_accounts.account_id`).
+`GET /accounts/me` (through the Gateway, with a valid token) returns the user's account **together with the balance**. The balance is authoritative and lives in `ledger-svc`; accounts-svc gets it by calling `GetBalance(account_id)` over gRPC (`account_id` = `accounts.id` = `ledger_accounts.account_id`).
 
-Формат: `balance` — целое число в **минимальных единицах** (центах), плюс отдельное поле `currency` (сейчас всегда `"EUR"` — в ledger нет измерения валюты, а форматирование `"123.45 €"` — работа фронта, не API):
+Format: `balance` is an integer in **minor units** (cents), plus a separate `currency` field (currently always `"EUR"` — the ledger has no notion of currency, and formatting `"€123.45"` is the frontend's job, not the API's):
 ```json
 { "id": "...", "user_id": "...", "account_number": "NB...", "iban": "IE34ZZZZ00004234567890",
   "status": "active", "created_at": "...", "updated_at": "...", "balance": 50000, "currency": "EUR" }
 ```
-У нового пользователя ledger-аккаунт уже создан (через Kafka-обработчик выше), проводок нет → `balance: 0`.
+A brand-new user already has a ledger account (created by the Kafka handler above), no entries yet → `balance: 0`.
 
-Если `ledger-svc` временно недоступен (`Unavailable`/`DeadlineExceeded`), эндпоинт возвращает **503**, а не `200` с нулевым балансом: показать фейковый ноль вместо настоящего баланса в банке хуже, чем честно сказать «сервис недоступен».
+If `ledger-svc` is temporarily unavailable (`Unavailable`/`DeadlineExceeded`), the endpoint returns **503**, not a `200` with a zero balance: showing a fake zero instead of the real balance in a bank is worse than honestly saying "service unavailable."
 
-## Dev-инструменты
+## Dev tools
 
-> Только для локальной разработки. Не путь для прода.
+> Local development only. Not the path to production.
 
-- `services/ledger-svc/cmd/seed` — наполняет локальную БД примерными ledger-данными (genesis + два счёта, см. заголовок файла).
-- `services/ledger-svc/cmd/devtopup` — **пополнение счёта пользователя** до появления Stripe (спринт 9). Переводит `--amount` центов с genesis-аккаунта на `--account-id` (это `accounts.id`) через **обычный `ExecuteTransfer`** ledger-svc — тот же реальный путь (локи, проверка баланса, обновление кэша), что и у продового перевода. Единственное, что не может пройти через `ExecuteTransfer` — эмиссия денег (источник ушёл бы в минус, а `ExecuteTransfer` это запрещает): поэтому, когда у genesis не хватает средств, инструмент **чеканит** деньги в genesis прямой сбалансированной вставкой в БД (external → genesis, чтобы `SUM(entries)=0` сохранялся), и только потом делает настоящий перевод. Именно эта прямая эмиссия — причина, почему это dev-инструмент, а не HTTP-эндпоинт.
+- `services/ledger-svc/cmd/seed` — fills the local DB with sample ledger data (genesis + two accounts, see the file header).
+- `services/ledger-svc/cmd/devtopup` — **topping up a user's account** before Stripe existed (sprint 9). Transfers `--amount` cents from the genesis account to `--account-id` (that's `accounts.id`) through ledger-svc's **ordinary `ExecuteTransfer`** — the same real path (locks, balance check, cache update) as a production transfer. The one thing that can't go through `ExecuteTransfer` is minting money (the source would go negative, and `ExecuteTransfer` forbids that): so when genesis doesn't have enough funds, the tool **mints** money into genesis with a direct, balanced DB insert (external → genesis, so `SUM(entries)=0` is preserved), and only then makes the real transfer. That direct minting is exactly why this is a dev tool, not an HTTP endpoint.
 
   ```bash
-  # из services/ledger-svc, ledger-svc должен быть запущен (docker compose up ledger-svc)
+  # from services/ledger-svc, ledger-svc must be running (docker compose up ledger-svc)
   DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   LEDGER_GRPC_ADDR="localhost:8083" \
     go run ./cmd/devtopup --account-id <accounts.id> --amount 50000
   ```
-  После этого `GET /accounts/me` для того же пользователя показывает `"balance": 50000`.
+  After this, `GET /accounts/me` for the same user shows `"balance": 50000`.
 
-## Перевод денег через ledger (transfers-svc)
+## Moving money through the ledger (transfers-svc)
 
-`transfers-svc` создаёт запись `transfers` в статусе `pending` (валидация: сумма положительна, получатель резолвится по IBAN через `accounts-svc.ResolveAccountByIban` — подробности резолва и его отказов см. «Резолв получателя по IBAN» ниже, получатель ≠ отправитель, получатель не `closed`, отправитель `active` — баланс здесь **не** проверяется, это сделает `ledger-svc` атомарно), а затем вызывает `ledger-svc.ExecuteTransfer(sender_account_id, recipient_account_id, amount)` и по результату обновляет запись:
-- успех → `status = 'completed'`, `ledger_transaction_id` — id проводки из ответа ledger.
-- `ledger` вернул «недостаточно средств» (`FailedPrecondition`) → `status = 'failed'`, `failure_reason = 'insufficient_funds'`.
-- `ledger` вернул «аккаунт не найден» (`NotFound`) или невалидную сумму (`InvalidArgument`, на практике недостижимо — `transfers-svc` уже проверил сумму раньше) или свою внутреннюю ошибку (`Internal`) → `status = 'failed'` с соответствующей `failure_reason` (`account_not_found` / `invalid_amount` / `ledger_internal_error`) — каждая доменная ошибка размечена явно, а не свалена в один общий `'error'`.
+`transfers-svc` creates a `transfers` row in `pending` status (validation: the amount is positive, the recipient resolves by IBAN via `accounts-svc.ResolveAccountByIban` — for resolve details and its failure modes see "Resolving a recipient by IBAN" below, recipient ≠ sender, recipient isn't `closed`, sender is `active` — the balance is **not** checked here, `ledger-svc` does that atomically), then calls `ledger-svc.ExecuteTransfer(sender_account_id, recipient_account_id, amount)` and updates the row based on the result:
+- success → `status = 'completed'`, `ledger_transaction_id` — the entry id from the ledger's response.
+- `ledger` returned "insufficient funds" (`FailedPrecondition`) → `status = 'failed'`, `failure_reason = 'insufficient_funds'`.
+- `ledger` returned "account not found" (`NotFound`) or an invalid amount (`InvalidArgument`, unreachable in practice — `transfers-svc` already checked the amount earlier) or its own internal error (`Internal`) → `status = 'failed'` with the matching `failure_reason` (`account_not_found` / `invalid_amount` / `ledger_internal_error`) — every domain error is tagged explicitly, not dumped into one generic `'error'`.
 
-### Честная граница: неопределённый исход
+### An honest boundary: an undetermined outcome
 
-`ledger-svc.ExecuteTransfer` (`services/ledger-svc/ledger.go`) оборачивает свою работу в одну Postgres-транзакцию, которая либо целиком коммитится, либо целиком откатывается (`defer tx.Rollback(ctx)`, `tx.Commit(ctx)` — только на успехе) **до того**, как уйдёт какой-либо gRPC-ответ. Это значит: любой полноценный ответ — успех или один из явных `status.Error(...)`, которые `ledger-svc` возвращает сам (`FailedPrecondition`, `NotFound`, `InvalidArgument`, `Internal`) — говорит совершенно точно, ушли деньги или нет.
+`ledger-svc.ExecuteTransfer` (`services/ledger-svc/ledger.go`) wraps its work in a single Postgres transaction that either commits entirely or rolls back entirely (`defer tx.Rollback(ctx)`, `tx.Commit(ctx)` only on success) **before** any gRPC response goes out. That means: any well-formed response — success, or one of the explicit `status.Error(...)` values `ledger-svc` returns itself (`FailedPrecondition`, `NotFound`, `InvalidArgument`, `Internal`) — states with complete certainty whether the money moved or not.
 
-`codes.Unavailable`, `codes.DeadlineExceeded` и `codes.Unknown` — принципиально другой случай: `ledger-svc` их сам никогда не возвращает, они возникают только на уровне транспорта (не достучались, либо не дождались ответа за `ledgerCallTimeout` = 5 секунд). Здесь `transfers-svc` **не знает**, исполнился перевод или нет: запрос мог не дойти, а мог дойти, исполниться, и уже ответ потеряться на обратном пути. Пометить `failed` в этом случае — соврать, если деньги реально ушли; пометить `completed` без `transaction_id` — соврать в другую сторону. Поэтому запись остаётся `pending` как есть (никакой записи в БД не делается вообще), а клиенту возвращается `202 Accepted` с телом `{"status": "pending", "message": "transfer status unknown, still processing"}`.
+`codes.Unavailable`, `codes.DeadlineExceeded`, and `codes.Unknown` are a fundamentally different case: `ledger-svc` itself never returns them — they only arise at the transport level (the call never got through, or no response arrived within `ledgerCallTimeout` = 5 seconds). Here `transfers-svc` genuinely **doesn't know** whether the transfer executed or not: the request might never have arrived, or it might have arrived, executed, and had its response lost on the way back. Marking it `failed` in this case would be a lie if the money really did move; marking it `completed` with no `transaction_id` would be a lie the other way. So the row stays `pending` as it already was (no DB write happens at all), and the client gets back `202 Accepted` with the body `{"status": "pending", "message": "transfer status unknown, still processing"}`.
 
-Разрешается эта неопределённость автоматически — см. «Reconciliation: закрываем pending переводы» ниже. То же самое «зависшее pending» применимо и к неопределённому исходу fraud-проверки (см. «fraud-check перед ledger») — тот же класс проблемы в двух местах потока, закрывается той же reconciliation-задачей, а не отдельно для каждого случая.
+This uncertainty resolves itself automatically — see "Reconciliation: closing out pending transfers" below. The same "stuck pending" applies to an undetermined fraud-check outcome too (see "fraud check before the ledger") — the same class of problem at two points in the flow, closed by the same reconciliation job rather than handled separately for each case.
 
-### Проверка вручную
+### Manual verification
 ```bash
-# через Gateway: sender резолвится из X-User-Id, который Gateway кладёт
-# сам из JWT после /auth/login — см. "API-клиент"/JWT-мидлварь выше
+# through the Gateway: the sender resolves from X-User-Id, which the
+# Gateway itself sets from the JWT after /auth/login — see the
+# "API client"/JWT middleware section above
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
   -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":1000}'
 ```
-Успешный перевод — `201` и `"status":"completed"` с заполненным `ledger_transaction_id`; сумма больше баланса — `201` и `"status":"failed","failure_reason":"insufficient_funds"`; оба случая проверяются balance-diff через `GET /accounts/me` обеих сторон (см. `cmd/devtopup` выше — им удобно завести отправителю стартовый баланс).
+A successful transfer — `201` and `"status":"completed"` with `ledger_transaction_id` filled in; an amount larger than the balance — `201` and `"status":"failed","failure_reason":"insufficient_funds"`; both cases are verified via the balance diff through `GET /accounts/me` on both sides (see `cmd/devtopup` above — handy for giving the sender a starting balance).
 
-## Резолв получателя по IBAN (transfers-svc → accounts-svc)
+## Resolving a recipient by IBAN (transfers-svc → accounts-svc)
 
-`accounts-svc.ResolveAccountByIban` (`services/accounts-svc/grpc_server.go`) — единственное место в системе, которое отвечает на вопрос «существует ли счёт с таким IBAN». Именно поэтому его контракт и то, что он умеет отличать, важнее, чем может показаться для одной internal-RPC.
+`accounts-svc.ResolveAccountByIban` (`services/accounts-svc/grpc_server.go`) is the one place in the system that answers "does an account with this IBAN exist." That's exactly why its contract, and what it's able to tell apart, matters more than it might seem to for a single internal RPC.
 
-### IBAN вместо `account_number` — один идентификатор, не два
+### IBAN instead of `account_number` — one identifier, not two
 
-`POST /transfers` раньше принимал `recipient_account_number`; теперь — только `recipient_iban`, и `account_number` как способ адресовать чужой счёт **удалён**, а не оставлен вторым путём «для совместимости» (`ResolveAccountByNumber` и `getAccountByAccountNumber` физически убраны из кодовой базы, не просто помечены deprecated). Причина не техническая — оба варианта работали одинаково надёжно, — а продуктовая: пользователь не должен решать, каким из двух номеров назвать себя собеседнику. `account_number` никуда не делся как поле (он всё ещё в `GET /accounts/me`, это внутренний номер счёта), но адресовать *чужой* счёт можно теперь только по IBAN — единому пользовательскому идентификатору, который заодно проходит настоящую проверку контрольных цифр.
+`POST /transfers` used to accept `recipient_account_number`; now it only accepts `recipient_iban`, and `account_number` as a way to address someone else's account has been **removed**, not left as a second "for compatibility" path (`ResolveAccountByNumber` and `getAccountByAccountNumber` are physically gone from the codebase, not just marked deprecated). The reason isn't technical — both options worked equally reliably — it's product: a user shouldn't have to decide which of two numbers to give someone else to identify themselves. `account_number` hasn't gone away as a field (it's still in `GET /accounts/me`, it's the internal account number), but addressing *someone else's* account is now only possible by IBAN — a single user-facing identifier that also happens to pass a real check-digit validation.
 
-### Три разных исхода — три разных сообщения, не один общий 404
+### Three distinct outcomes — three distinct messages, not one generic 404
 
-Раньше «получатель не резолвится» значило одно: `NotFound`. У IBAN отказов больше, и они означают разное, поэтому `ResolveAccountByIban` различает их через отдельные gRPC-коды, в порядке возрастания цены проверки:
+"Recipient doesn't resolve" used to mean one thing: `NotFound`. IBAN failures come in more flavors, and they mean different things, so `ResolveAccountByIban` tells them apart with distinct gRPC codes, in increasing order of check cost:
 
-1. **`codes.InvalidArgument` — формат или контрольные цифры не сошлись.** Проверяется локально (`iban.Validate`), **до** любого обращения к базе — не только быстрее, но и часть защиты от перебора (mod-97-10 отсеивает даром ~96% случайных строк, см. ниже).
-2. **`codes.FailedPrecondition` — IBAN валиден, но код банка чужой.** Ни один SEPA-рельс здесь не подключён (см. «Честные ограничения»), поэтому это не «не найдено», а «в принципе не наш получатель» — разные сообщения клиенту, разная диагностика на стороне оператора.
-3. **`codes.NotFound` — наш банк, но такого счёта нет.**
-4. **`codes.ResourceExhausted` — сам резолв заблокирован rate-limit'ом** (ниже) — тоже отдельный код, не общая 500-ка.
+1. **`codes.InvalidArgument` — the format or check digits don't match.** Checked locally (`iban.Validate`), **before** any database call — not just faster, it's also part of the defense against enumeration (mod-97-10 filters out ~96% of random strings for free, see below).
+2. **`codes.FailedPrecondition` — the IBAN is valid, but the bank code belongs to someone else.** No SEPA rails are wired up here at all (see "Honest limitations"), so this isn't "not found," it's "not a possible recipient at all" — a different message to the client, different diagnostics on the operator's side.
+3. **`codes.NotFound` — our bank, but no such account.**
+4. **`codes.ResourceExhausted` — the resolve itself is rate-limited** (below) — also its own distinct code, not a generic 500.
 
-`transfers-svc` (`createTransfer`, `services/transfers-svc/transfer.go`) транслирует каждый из четырёх кодов в свой `createTransferOutcome`, а `http.go` — в свой HTTP-статус и текст: `400 invalid IBAN`, `400 only transfers within this bank are supported`, `404 recipient not found`, `429 too many resolve attempts, try again later`.
+`transfers-svc` (`createTransfer`, `services/transfers-svc/transfer.go`) translates each of the four codes into its own `createTransferOutcome`, and `http.go` translates that into its own HTTP status and text: `400 invalid IBAN`, `400 only transfers within this bank are supported`, `404 recipient not found`, `429 too many resolve attempts, try again later`.
 
-### Rate-limit на резолв, а не только на перевод
+### Rate limit on the resolve, not just on the transfer
 
-Эндпоинт, который отвечает «существует/не существует» — оракул для перебора чужих реквизитов, и валидные контрольные цифры **сужают** пространство перебора (остаются только строки, совместимые с mod-97-10), а не делают перебор безопасным. Поэтому лимит стоит именно на резолв, per-user (`user_id` — обязательное поле `ResolveAccountByIbanRequest`, прокинутое из `X-User-Id`, а не что-то, что клиент мог бы подделать), а не только на создание перевода: перевод несёт побочный эффект (идемпотентность, fraud-check, запись в БД) и естественно дороже долбить, а голый резолв — нет.
+An endpoint that answers "exists/doesn't exist" is an oracle for enumerating someone else's bank details, and valid check digits **narrow** the search space (only strings compatible with mod-97-10 remain) rather than making enumeration safe. That's why the limit sits specifically on the resolve, per user (`user_id` — a mandatory field on `ResolveAccountByIbanRequest`, passed through from `X-User-Id`, not something a client could forge), not only on creating a transfer: a transfer carries a side effect (idempotency, fraud check, a DB write) and is naturally more expensive to hammer, while a bare resolve isn't.
 
-Реализация — `services/accounts-svc/rate_limit.go`: одна SQL-инструкция (`WITH ... SELECT count(*) ... INSERT ... SELECT ... WHERE count < limit RETURNING id`) считает попытки пользователя за окно и, только если лимит не исчерпан, тут же атомарно записывает эту попытку — без отдельного `SELECT`, а значит без окна гонки, в котором два параллельных запроса от одного пользователя оба увидели бы «лимит не исчерпан» до того, как любой из них записался. По умолчанию 10 попыток / 5 минут (`IBAN_RESOLVE_RATE_LIMIT` / `IBAN_RESOLVE_RATE_WINDOW`), таблица `iban_resolve_attempts` чистится фоновым воркером раз в 10 минут (retention 1 час — заведомо больше самого длинного разумного окна).
+Implemented in `services/accounts-svc/rate_limit.go`: a single SQL statement (`WITH ... SELECT count(*) ... INSERT ... SELECT ... WHERE count < limit RETURNING id`) counts the user's attempts within the window and, only if the limit isn't exhausted, atomically records this attempt right then — with no separate `SELECT`, and therefore no race window where two parallel requests from the same user could both see "limit not exhausted" before either one had recorded itself. Defaults to 10 attempts / 5 minutes (`IBAN_RESOLVE_RATE_LIMIT` / `IBAN_RESOLVE_RATE_WINDOW`), the `iban_resolve_attempts` table is cleaned up by a background worker once every 10 minutes (retention 1 hour — comfortably longer than the longest reasonable window).
 
-Порядок проверок внутри `ResolveAccountByIban` не случаен: сначала бесплатная проверка контрольных цифр (без БД), потом лимит (единственное место, которое пишет в БД до собственно поиска), потом бесплатное сравнение кода банка, и только в конце — сам `SELECT` по `accounts`. Каждая более дешёвая проверка стоит перед более дорогой.
+The order of checks inside `ResolveAccountByIban` isn't arbitrary: first the free check-digit validation (no DB), then the rate limit (the only place that writes to the DB before the actual lookup), then a free bank-code comparison, and only at the end the actual `SELECT` against `accounts`. Every cheaper check runs before a more expensive one.
 
-### Показывать ли имя получателя — не показываем
+### Whether to show the recipient's name — we don't
 
-Настоящие банки на экране подтверждения перевода показывают имя владельца счёта — это защита от опечатки в реквизитах. Но тот же самый резолв, который выясняет имя, превращается в способ узнать чьё-то имя по IBAN, а IBAN — не секрет (он попадает в чек, в письмо, в разговор). Три варианта на выбор были: не показывать вовсе; показывать частично (первая буква имени + фамилия); показывать полностью с жёстким rate-limit.
+Real banks show the account owner's name on the transfer confirmation screen — that's protection against a typo in the details. But that same resolve, the one that would look up the name, turns into a way to find out someone's name from their IBAN, and an IBAN isn't a secret (it ends up on a receipt, in an email, in conversation). Three options were on the table: don't show it at all; show it partially (first initial + surname); show it in full, behind a hard rate limit.
 
-Выбран первый — но не потому, что это единственно верный ответ (правильного ответа тут нет, это осознанный компромисс, а не готовое правило), а потому что в этой системе решение уже предопределено на уровень ниже: **имени пользователя не существует нигде** — регистрация (`auth-svc/register.go`) собирает только email и пароль, ни в одной таблице, ни в одном proto-сообщении нет поля с именем. Показывать частичное или полное имя означало бы сначала добавить его сбор (новое поле в форме регистрации, новую колонку, новый proto-филд, прокинутый через `ResolveAccountByIban`) — а это уже не решение «как показывать», а отдельная фича с собственной ценой (что, если два пользователя одинаково представятся при регистрации? как это соотносится с KYC, которого тоже нет — см. «Честные ограничения»?). Ничего не показывать — единственный из трёх вариантов, который не требует придумывать данные, которых в системе никогда не было.
+The first was chosen — not because it's the one objectively correct answer (there isn't one here, this is a deliberate trade-off, not a ready-made rule), but because in this system the decision is already made one level down: **a user's name doesn't exist anywhere** — registration (`auth-svc/register.go`) only ever collects an email and a password, and there's no name field in any table or any proto message. Showing a partial or full name would mean first adding the collection of it (a new field on the registration form, a new column, a new proto field threaded through `ResolveAccountByIban`) — and that's no longer a "how to show it" decision, it's a separate feature with its own cost (what if two users give the same name at registration? how does this square with the KYC that's also absent — see "Honest limitations"?). Showing nothing is the only one of the three options that doesn't require inventing data the system never had.
 
-### Проверка вручную
+### Manual verification
 ```bash
-# 1. Битый IBAN — отклоняется без обращения к БД (400, "invalid IBAN")
+# 1. A malformed IBAN — rejected without touching the DB (400, "invalid IBAN")
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
   -d '{"recipient_iban":"IE00ZZZZ00004234567890","amount":1000}'
 
-# 2. Чужой банк — отдельное сообщение (400, "only transfers within this bank are supported")
+# 2. Another bank — a distinct message (400, "only transfers within this bank are supported")
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
   -d '{"recipient_iban":"IE29AIBK93115212345678","amount":1000}'
 
-# 3. Rate-limit: 11 резолвов подряд одним пользователем за < 5 минут —
-#    11-й получает 429 "too many resolve attempts, try again later"
+# 3. Rate limit: 11 resolves in a row from one user in under 5 minutes —
+#    the 11th gets 429 "too many resolve attempts, try again later"
 for i in $(seq 1 11); do
   curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/transfers/ \
     -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
@@ -1045,505 +1064,504 @@ for i in $(seq 1 11); do
 done
 ```
 
-## Stripe-фондированные депозиты (transfers-svc, ledger-svc)
+## Stripe-funded deposits (transfers-svc, ledger-svc)
 
-Stripe-депозиты, целиком: `ledger-svc.Deposit`/`ReverseDeposit`,
-`POST /deposits` (Stripe `PaymentIntent`), `POST /webhooks/stripe`
-(подтверждение), фоновое зачисление succeeded → credited, сверка
-(reconciliation) для трёх видов зависших депозитов, обратные проводки на
-возврат (`charge.refunded`), симулированный вывод денег
-(`POST /withdrawals`), маршрутизация `/deposits`/`/webhooks/stripe` через
-Gateway (см. «Gateway: маршрутизация» ниже), фронтенд-экран `/deposit`
-(см. «Фронтенд: экран пополнения» ниже) и единая история операций (см.
-«История операций» ниже). `POST /withdrawals` наружу через Gateway
-осознанно не вынесен — у симулированного вывода нет формы создания на
-фронтенде (не часть этого шага), выносить эндпоинт без единого вызывающего
-его клиента незачем.
+Stripe deposits, in full: `ledger-svc.Deposit`/`ReverseDeposit`,
+`POST /deposits` (a Stripe `PaymentIntent`), `POST /webhooks/stripe`
+(confirmation), the background succeeded → credited posting, reconciliation
+for three kinds of stuck deposits, reversal entries for refunds
+(`charge.refunded`), simulated withdrawals
+(`POST /withdrawals`), routing `/deposits`/`/webhooks/stripe` through the
+Gateway (see "Gateway: routing" below), the frontend's `/deposit` screen
+(see "Frontend: the deposit screen" below), and a unified operation history
+(see "Operation history" below). `POST /withdrawals` was deliberately not
+exposed externally through the Gateway — the simulated withdrawal has no
+creation form on the frontend (not part of this step), and there's no point
+exposing an endpoint with not a single client actually calling it.
 
-### Почему депозиты живут в transfers-svc, а не в новом payments-svc
+### Why deposits live in transfers-svc, not a new payments-svc
 
-Депозит — тот же класс задачи, что и перевод: движение денег с
-неопределённостью на стороне внешней системы (там — `ledger-svc`, здесь —
-Stripe), которую нужно уметь дожидаться и сверять, а не гарантированно
-знать синхронно в момент HTTP-ответа. transfers-svc уже несёт всю нужную
-для этого инфраструктуру — клиент `ledger-svc`, outbox для надёжной
-публикации событий, воркер reconciliation для зависших состояний (см.
-разделы выше и ниже). Заводить отдельный payments-svc означало бы
-дублировать всё это заново ради разделения ответственности, которое для
-MVP не окупается; если/когда депозиты обрастут собственной сложностью
-(возвраты, несколько провайдеров), выделение в отдельный сервис — разумный
-следующий шаг, но не сейчас.
+A deposit is the same class of problem as a transfer: money movement with
+uncertainty on an external system's side (there it's `ledger-svc`, here
+it's Stripe) that needs to be waited on and reconciled, not guaranteed known
+synchronously at the moment of the HTTP response. transfers-svc already
+carries all the infrastructure this needs — a `ledger-svc` client, an
+outbox for reliable event publishing, a reconciliation worker for stuck
+states (see the sections above and below). Standing up a separate
+payments-svc would mean duplicating all of that again for a separation of
+responsibility that doesn't pay for itself at MVP scale; if/when deposits
+grow their own complexity (refunds, multiple providers), splitting them
+into their own service is a reasonable next step, just not now.
 
-### Схема (`services/transfers-svc/migrations/000006`, `000007`)
+### Schema (`services/transfers-svc/migrations/000006`, `000007`)
 
-`deposits` — одна строка на попытку депозита; `stripe_payment_intent_id`
-уникален — естественная защита от двух записей на один и тот же
-PaymentIntent. Статусы `succeeded` и `credited` — **сознательно разные**:
-`succeeded` значит «Stripe подтвердил списание карты», `credited` — «мы
-провели проводку в ledger». Это два факта в двух разных системах;
-схлопнуть их в один статус означало бы потерять восстановимое состояние
-«Stripe уже взял деньги, а мы их ещё не зачислили» — ровно то место, где
-будущему обработчику вебхука будет что чинить.
+`deposits` is one row per deposit attempt; `stripe_payment_intent_id` is
+unique — a natural safeguard against two rows for the same PaymentIntent.
+The `succeeded` and `credited` statuses are **deliberately distinct**:
+`succeeded` means "Stripe confirmed the card charge," `credited` means "we
+posted the ledger entry." These are two facts in two different systems;
+collapsing them into one status would mean losing the recoverable state of
+"Stripe already took the money, and we haven't credited it yet" — exactly
+the spot a future webhook handler will have something to fix.
 
-`processed_stripe_events` — идемпотентность на уровне `event_id` Stripe
-(`evt_...`): `PRIMARY KEY` на `event_id` надёжнее, чем полагаться на то,
-что Stripe никогда не пришлёт вебхук дважды.
+`processed_stripe_events` gives idempotency at the level of Stripe's
+`event_id` (`evt_...`): a `PRIMARY KEY` on `event_id` is more reliable than
+counting on Stripe never sending the same webhook twice.
 
-### `ledger-svc.Deposit` / `ReverseDeposit` — genesis ↔ счёт пользователя
+### `ledger-svc.Deposit` / `ReverseDeposit` — genesis ↔ a user's account
 
 `Deposit(account_id, amount, reference)` (`proto/ledger/v1/ledger.proto`):
-genesis-проводка, атомарно списывающая `amount` с системного
-genesis-счёта и зачисляющая его на `account_id` той же механикой, что и
-`ExecuteTransfer` (одна Postgres-транзакция, сбалансированная пара
-`entries` с общим `transaction_id`, инкрементальное обновление
-`account_balances`). `ReverseDeposit(account_id, amount, reference)` —
-зеркало в обратную сторону (`account_id` → genesis), для возвратов (см.
-ниже). Обе — **отдельные функции**, обёртки над общей
-`postUncheckedTransfer(from, to, amount, reference)` в `ledger.go`, а не
-ветки внутри `executeTransfer`: единственное поведенческое отличие —
-**нет проверки достаточности средств** на стороне, которая уходит в
-минус (genesis — он по определению обязан это уметь, представляя деньги,
-входящие в систему извне; для `ReverseDeposit` — счёт пользователя,
-объяснение ниже). Встраивать это исключение в `executeTransfer` означало
-бы добавить особый случай в функцию, от которой зависит каждый обычный
-перевод, — общая обёртка переиспользует те же `lockLedgerAccount`/
-`applyBalanceDelta`, что и `executeTransfer`, но оставляет саму
-`executeTransfer` полностью нетронутой.
+a genesis entry, atomically debiting `amount` from the system's genesis
+account and crediting it to `account_id` through the same mechanics as
+`ExecuteTransfer` (one Postgres transaction, a balanced pair of `entries`
+sharing a `transaction_id`, an incremental update to `account_balances`).
+`ReverseDeposit(account_id, amount, reference)` mirrors it in the opposite
+direction (`account_id` → genesis), for refunds (see below). Both are
+**separate functions**, wrappers over a shared
+`postUncheckedTransfer(from, to, amount, reference)` in `ledger.go`, not
+branches inside `executeTransfer`: the one behavioral difference is
+**there's no sufficient-funds check** on the side that goes negative
+(genesis — by definition it has to be able to do this, representing money
+entering the system from outside; for `ReverseDeposit` it's the user's
+account, explained below). Baking this exception into `executeTransfer`
+would mean adding a special case to the function every ordinary transfer
+depends on — the shared wrapper reuses the same `lockLedgerAccount`/
+`applyBalanceDelta` as `executeTransfer`, but leaves `executeTransfer`
+itself completely untouched.
 
-**Идемпотентны по `reference` — в отличие от `ExecuteTransfer`.**
-`reference` — будущий `deposits.id` (UUID) для `Deposit`, или значение,
-детерминированно выведенное из него, для `ReverseDeposit` (см. ниже
-`reversalReference`). Повторный вызов с уже использованным `reference`
-возвращает существующую проводку, а не создаёт вторую. Это сознательно
-другое поведение, чем у `ExecuteTransfer` (переводы остаются
-неидемпотентными, идемпотентность там — на уровне `transfers.
-idempotency_key` в transfers-svc, отдельным слоем выше): у депозита и его
-возврата такого слоя нет, а вызывающая сторона (фоновый воркер
-зачисления, повторная доставка вебхука `charge.refunded`) закономерно
-может вызвать их больше одного раза для одной и той же логической
-операции. Реализовано через `pg_advisory_xact_lock(hashtext(reference))`
-внутри транзакции: сериализует конкурентные вызовы с одним `reference`,
-затем проверяет `SELECT transaction_id FROM entries WHERE reference = $1`
-и либо возвращает найденное, либо проводит как обычно. Обычный `UNIQUE`
-на `entries.reference` не подошёл бы — `executeTransfer` уже легитимно
-пишет две строки (дебет и кредит) с одинаковым `reference` на одну
-проводку.
+**Idempotent by `reference` — unlike `ExecuteTransfer`.**
+`reference` is the future `deposits.id` (a UUID) for `Deposit`, or a value
+deterministically derived from it for `ReverseDeposit` (see
+`reversalReference` below). A repeat call with an already-used `reference`
+returns the existing entry rather than creating a second one. This is
+deliberately different behavior from `ExecuteTransfer` (transfers remain
+non-idempotent; idempotency there lives at the `transfers.
+idempotency_key` level in transfers-svc, a separate layer above): a deposit
+and its reversal have no such layer, and the calling side (the background
+crediting worker, a redelivered `charge.refunded` webhook) can naturally
+end up calling them more than once for the same logical operation.
+Implemented via `pg_advisory_xact_lock(hashtext(reference))` inside the
+transaction: it serializes concurrent calls sharing one `reference`, then
+checks `SELECT transaction_id FROM entries WHERE reference = $1` and either
+returns what it found or posts as usual. A plain `UNIQUE` on
+`entries.reference` wouldn't have worked — `executeTransfer` already
+legitimately writes two rows (debit and credit) with the same `reference`
+for one entry.
 
-Системный genesis-счёт (`00000000-0000-0000-0000-000000000001`) теперь
-детерминированно создаётся миграцией
-`services/ledger-svc/migrations/000005_create_genesis_ledger_account` — до
-этого шага он существовал только как побочный эффект первого запуска
-`cmd/seed`/`cmd/devtopup`. Оба dev-инструмента не тронуты: их собственные
-идемпотентные upsert'ы того же genesis-счёта остаются безвредными
-no-op'ами, раз миграция уже создала строку первой.
+The system's genesis account (`00000000-0000-0000-0000-000000000001`) is
+now deterministically created by the migration
+`services/ledger-svc/migrations/000005_create_genesis_ledger_account` —
+before this step it only ever existed as a side effect of the first run of
+`cmd/seed`/`cmd/devtopup`. Neither dev tool was touched: their own
+idempotent upserts of the same genesis account remain harmless no-ops now
+that the migration creates the row first.
 
-### Секрет Stripe: только через переменную окружения
+### The Stripe secret: environment variable only
 
-`STRIPE_SECRET_KEY` (`sk_test_...`) читается один раз при старте
-transfers-svc (`main.go`) через `os.Getenv`, тем же паттерном, что и
-`JWT_SECRET` у auth-svc — процесс останавливается (`log.Fatal`), если
-переменная не задана, до подключения к Postgres и до миграций. В отличие
-от `JWT_SECRET`, чьё dev-значение — просто захардкоженная в
-`docker-compose.yml` строка (безопасно для внутреннего секрета), реальный
-Stripe-ключ — куда более чувствительный секрет от третьей стороны:
-`docker-compose.yml` берёт его из `${STRIPE_SECRET_KEY}` (docker compose
-сам подставляет значения из `.env` в корне репозитория, рядом с
-`docker-compose.yml`, — механизм работает без единой строчки кода), а
-`.env` — в `.gitignore`; в репозитории лежит только `.env.example` c
-плейсхолдером. Publishable-ключ (`pk_test_...`) сюда не входит — он
-фронтенд-only и отложен до соответствующего шага.
+`STRIPE_SECRET_KEY` (`sk_test_...`) is read once at transfers-svc startup
+(`main.go`) via `os.Getenv`, the same pattern as `JWT_SECRET` in auth-svc —
+the process stops (`log.Fatal`) if the variable isn't set, before
+connecting to Postgres and before migrations. Unlike `JWT_SECRET`, whose
+dev value is just a hardcoded string in `docker-compose.yml` (safe for an
+internal secret), a real Stripe key is a far more sensitive third-party
+secret: `docker-compose.yml` pulls it from `${STRIPE_SECRET_KEY}` (docker
+compose itself substitutes values from `.env` at the repo root, next to
+`docker-compose.yml` — this works with not one line of code), and `.env` is
+in `.gitignore`; the repo only ships `.env.example` with a placeholder. The
+publishable key (`pk_test_...`) isn't part of this — it's frontend-only and
+deferred to the matching step.
 
-Клиент — `github.com/stripe/stripe-go/v86`, создаётся один раз в `main()`
-вызовом `stripe.NewClient(stripeSecretKey)` и хранится в пакетной (не
-локальной) `var stripeClient *stripe.Client`. `stripe.NewClient` ничего не
-делает по сети — как и остальные клиенты этого `main()` (`grpc.NewClient`
-к accounts-svc/fraud-svc/ledger-svc), он ленивый: если ключ окажется
-невалидным, это проявится только на первом реальном вызове Stripe API.
+The client is `github.com/stripe/stripe-go/v86`, created once in `main()`
+via `stripe.NewClient(stripeSecretKey)` and held in a package-level (not
+local) `var stripeClient *stripe.Client`. `stripe.NewClient` does nothing
+over the network — like this `main()`'s other clients (`grpc.NewClient` to
+accounts-svc/fraud-svc/ledger-svc), it's lazy: if the key turns out to be
+invalid, that only surfaces on the first real call to the Stripe API.
 
-### `POST /deposits` — создание PaymentIntent
+### `POST /deposits` — creating the PaymentIntent
 
-Как устроен платёж: `PaymentIntent` — объект на стороне Stripe,
-представляющий намерение списать деньги. transfers-svc создаёт его и
-получает `client_secret`; этот секрет уходит на фронт, где Stripe.js
-подтверждает платёж **напрямую со Stripe** — данные карты никогда не
-проходят через backend. Это не деталь реализации, а осознанная граница
-PCI-scope: сервис никогда не хранит, не логирует и не видит номера карт.
-Результат придёт вебхуком (следующий шаг), не в ответе на этот запрос.
+How the payment works: a `PaymentIntent` is a Stripe-side object
+representing an intent to charge money. transfers-svc creates it and gets
+back a `client_secret`; that secret goes to the frontend, where Stripe.js
+confirms the payment **directly with Stripe** — card details never pass
+through the backend at all. This isn't an implementation detail, it's a
+deliberate PCI-scope boundary: the service never stores, logs, or sees a
+card number. The result arrives via a webhook (the next step), not in the
+response to this request.
 
-`createDepositHandler` (`services/transfers-svc/http.go`), зарегистрирован
-как `POST /deposits`:
-- `account_id` берётся из `X-User-Id` (тот же `resolveSenderAccountID`, что
-  и у переводов) — никогда из тела запроса, чтобы клиент не мог задепозитить
-  на чужой счёт.
-- `amount` проверяется на `[depositMinAmount, depositMaxAmount]`
-  (`services/transfers-svc/deposit.go`): нижняя граница — 50 (минимум
-  Stripe для EUR, €0.50 — иначе Stripe сам отклонит запрос, но менее
-  информативно), верхняя — 1 000 000 центов (€10 000) — не бизнес-лимит, а
-  защита от опечатки в лишние нули.
-- счёт должен быть `active` — на `frozen`/`closed` не зачисляем.
+`createDepositHandler` (`services/transfers-svc/http.go`), registered as
+`POST /deposits`:
+- `account_id` comes from `X-User-Id` (the same `resolveSenderAccountID` as
+  transfers use) — never from the request body, so a client can't deposit
+  into someone else's account.
+- `amount` is checked against `[depositMinAmount, depositMaxAmount]`
+  (`services/transfers-svc/deposit.go`): the lower bound is 50 (Stripe's
+  minimum for EUR, €0.50 — otherwise Stripe would reject the request itself,
+  just less informatively), the upper bound is 1,000,000 cents (€10,000) —
+  not a business limit, protection against a typo adding extra zeros.
+- the account must be `active` — nothing is credited to a `frozen`/`closed` one.
 
-Порядок операций в `createDeposit`: сначала `INSERT INTO deposits`
-(`status='pending'`), потом Stripe `PaymentIntent`, потом `UPDATE ...
-SET stripe_payment_intent_id`. Эти два шага принципиально нельзя завернуть
-в одну транзакцию — между ними живой вызов Stripe API, который не умеет
-участвовать в транзакции Postgres. Если процесс упадёт между шагами,
-останется `pending`-депозит без `stripe_payment_intent_id`: это безопасно
-(деньги не двигались, Stripe в большинстве таких сбоев даже не получил
-запрос) — заброшенная попытка, а не что-то, что нужно чинить прямо здесь.
+The order of operations in `createDeposit`: first `INSERT INTO deposits`
+(`status='pending'`), then the Stripe `PaymentIntent`, then `UPDATE ...
+SET stripe_payment_intent_id`. These two steps fundamentally can't be
+wrapped in one transaction — a live call to the Stripe API sits between
+them, and it can't participate in a Postgres transaction. If the process
+crashes between the steps, a `pending` deposit with no
+`stripe_payment_intent_id` is left behind: this is safe (no money moved,
+and Stripe never even received the request in most such failures) — an
+abandoned attempt, not something that needs fixing right here.
 
-`Metadata: {deposit_id, account_id}` на самом `PaymentIntent` — то, что
-свяжет будущий вебхук с этой записью: у Stripe нет понятия о наших
-первичных ключах, кроме того, что мы сами туда положим.
-`IdempotencyKey = deposit_id` (через `stripe-go`'s `Params.IdempotencyKey`)
-привязывает Stripe-side защиту от дублей к конкретной попытке: повторный
-вызов `Create` с тем же `deposit_id` (например, наш собственный ретрай
-после сетевого сбоя) вернёт тот же `PaymentIntent`, а не создаст второй.
+`Metadata: {deposit_id, account_id}` on the `PaymentIntent` itself is what
+ties a future webhook back to this row: Stripe has no notion of our primary
+keys beyond whatever we put there ourselves.
+`IdempotencyKey = deposit_id` (via `stripe-go`'s `Params.IdempotencyKey`)
+ties Stripe-side duplicate protection to a specific attempt: a repeat call
+after a network failure) returns the same `PaymentIntent` instead of creating a second one.
 
-Ответ — только `{deposit_id, client_secret}`. Секретный ключ Stripe не
-покидает `main()` ни при каких обстоятельствах, а из самого объекта
-`PaymentIntent` наружу уходит единственное поле — `client_secret`.
+The response is just `{deposit_id, client_secret}`. The Stripe secret key never leaves `main()` under any circumstances, and the only field that leaves the `PaymentIntent` object itself is `client_secret`.
 
-### Тесты `POST /deposits`
+### `POST /deposits` tests
 
-`services/transfers-svc/deposit_test.go`, через `fakePaymentIntentCreator`
-(тот же fake-по-функции паттерн, что и `fakeLedgerClient`/
-`fakeAccountsClient` — реальные вызовы к Stripe в тестах не идут):
-`TestCreateDeposit_Success` (в т.ч. `IdempotencyKey`/`metadata` доходят до
-Stripe правильно), `TestCreateDeposit_InvalidAmount` (обе границы),
-`TestCreateDeposit_AccountNotActive`,
-`TestCreateDeposit_StripeErrorLeavesRowPending` (проверяет именно то
-безопасное состояние, которое описано выше).
+`services/transfers-svc/deposit_test.go`, via `fakePaymentIntentCreator`
+(the same fake-by-function pattern as `fakeLedgerClient`/
+`fakeAccountsClient` — no real calls to Stripe happen in tests):
+`TestCreateDeposit_Success` (including `IdempotencyKey`/`metadata`
+reaching Stripe correctly), `TestCreateDeposit_InvalidAmount` (both
+bounds), `TestCreateDeposit_AccountNotActive`,
+`TestCreateDeposit_StripeErrorLeavesRowPending` (verifies exactly the safe
+state described above).
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -run TestCreateDeposit -v
 ```
-Ручная проверка (нужен настоящий `STRIPE_SECRET_KEY` в `.env` —
-см. выше):
+Manual check (needs a real `STRIPE_SECRET_KEY` in `.env` — see above):
 ```bash
 curl -s -X POST http://localhost:8084/deposits \
   -H "X-User-Id: <account's user id>" \
   -H "Content-Type: application/json" \
   -d '{"amount": 5000}'
 ```
-`201` с `{"deposit_id": "...", "client_secret": "pi_..._secret_..."}`;
-в Stripe-дашборде (тестовый режим) — созданный `PaymentIntent` с
+`201` with `{"deposit_id": "...", "client_secret": "pi_..._secret_..."}`;
+in the Stripe dashboard (test mode) — a created `PaymentIntent` with
 `metadata.deposit_id`/`metadata.account_id`.
 
-### Проверка вручную
+### Manual verification
 
 ```bash
 grpcurl -plaintext -d '{"account_id": "<uuid>", "amount": 1000}' \
   localhost:8083 ledger.v1.LedgerService/Deposit
 ```
-Баланс `account_id` (`GET /accounts/me` через Gateway) вырастет ровно на
-`amount`; genesis (`00000000-0000-0000-0000-000000000001`) уйдёт в минус
-ровно на ту же сумму — так и задумано.
+`account_id`'s balance (`GET /accounts/me` through the Gateway) grows by
+exactly `amount`; genesis (`00000000-0000-0000-0000-000000000001`) goes
+negative by exactly the same amount — as intended.
 
-`STRIPE_SECRET_KEY` действительно обязателен: `docker compose up
-transfers-svc` без `.env` (или с закомментированной переменной) —
-контейнер падает сразу с логом `transfers-svc: STRIPE_SECRET_KEY
-environment variable is required`, не долетая даже до подключения к
-Postgres.
+`STRIPE_SECRET_KEY` really is mandatory: `docker compose up
+transfers-svc` with no `.env` (or with the variable commented out) — the
+container fails immediately with the log `transfers-svc:
+STRIPE_SECRET_KEY environment variable is required`, never even reaching
+the Postgres connection.
 
-### Тесты `ledger.Deposit` / `ReverseDeposit`
+### `ledger.Deposit` / `ReverseDeposit` tests
 
-`services/ledger-svc/ledger_test.go`: `TestDeposit_Success` (целевой счёт
-растёт на `amount`, genesis падает на `amount`, `SUM(entries)` по
-транзакции равен 0), `TestDeposit_InvalidAmount`,
-`TestDeposit_AccountNotFound`, `TestDeposit_WithReference` (`reference`
-находится через `getTransactionByReference`),
-`TestDeposit_IsIdempotentByReference` (два вызова с одним `reference` —
-одна и та же проводка, а не две),
-`TestDeposit_ConcurrentSameReferenceDoesNotDoublePost` (20 конкурентных
-вызовов с одним `reference` — ровно одна проводка; доказывает, что
-`pg_advisory_xact_lock` действительно сериализует гонку, а не просто
-выглядит корректно при последовательном вызове), `TestReverseDeposit_
-Success`, `TestReverseDeposit_AllowsNegativeBalance` (нет проверки
-баланса — зеркало отсутствия проверки genesis у `Deposit`),
+`services/ledger-svc/ledger_test.go`: `TestDeposit_Success` (the target
+account grows by `amount`, genesis drops by `amount`, `SUM(entries)` for
+the transaction is 0), `TestDeposit_InvalidAmount`,
+`TestDeposit_AccountNotFound`, `TestDeposit_WithReference` (`reference` is
+found via `getTransactionByReference`),
+`TestDeposit_IsIdempotentByReference` (two calls with the same
+`reference` — one entry, not two),
+`TestDeposit_ConcurrentSameReferenceDoesNotDoublePost` (20 concurrent
+calls with the same `reference` — exactly one entry; proves
+`pg_advisory_xact_lock` genuinely serializes the race rather than just
+looking correct under sequential calls), `TestReverseDeposit_
+Success`, `TestReverseDeposit_AllowsNegativeBalance` (no balance check —
+mirroring genesis's lack of a check in `Deposit`),
 `TestReverseDeposit_IsIdempotentByReference`.
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/ledger-svc/... -run "TestDeposit|TestReverseDeposit" -v
 ```
 
-### `POST /webhooks/stripe` — подтверждение платежа
+### `POST /webhooks/stripe` — confirming the payment
 
-Ответ фронта после оплаты ничего не гарантирует: пользователь может
-закрыть вкладку сразу после того, как деньги списались, и до backend это
-никогда не долетит. Единственный надёжный источник исхода — вебхук от
-Stripe, который приходит асинхронно и независимо от того, жив ли ещё
-клиент. `POST /webhooks/stripe` (`services/transfers-svc/webhook.go`) —
-публичный эндпоинт: у Stripe нет нашего JWT, поэтому проверка подписи —
-не опция, а единственное, что отличает настоящий вебхук от любого, кто
-угадал URL и прислал `{"type":"payment_intent.succeeded",...}` от себя,
-чтобы бесплатно зачислить деньги.
+The frontend's response after paying guarantees nothing: a user can close
+the tab right after the money was charged, and that never reaches the
+backend at all. The one reliable source of truth for the outcome is
+Stripe's webhook, which arrives asynchronously and independently of
+whether the client is even still around. `POST /webhooks/stripe`
+(`services/transfers-svc/webhook.go`) is a public endpoint: Stripe has no
+JWT of ours, so verifying the signature isn't optional — it's the one
+thing telling a real webhook apart from anyone who guessed the URL and
+sent `{"type":"payment_intent.succeeded",...}` themselves to get money
+credited for free.
 
-**Подпись.** `webhook.ConstructEvent(payload, header, webhookSecret)` из
-`stripe-go` — секрет для этого (`whsec_...`) отдельный от
-`STRIPE_SECRET_KEY`, специально не тот же самый: компрометация одного не
-должна автоматически компрометировать другой. Критично — подпись
-считается по **сырым байтам тела**, поэтому `io.ReadAll(r.Body)`
-происходит первым делом, до любого JSON-парсинга: если тело сначала
-распарсить, а потом пересериализовать (другой порядок полей, другие
-пробелы — не важно), подпись перестанет совпадать. Невалидная подпись —
-`400`, без какой-либо обработки, только лог попытки.
+**Signature.** `webhook.ConstructEvent(payload, header, webhookSecret)`
+from `stripe-go` — the secret for this (`whsec_...`) is separate from
+`STRIPE_SECRET_KEY`, deliberately not the same one: compromising one
+shouldn't automatically compromise the other. Critically, the signature is
+computed over the **raw body bytes**, so `io.ReadAll(r.Body)` happens
+first, before any JSON parsing: if the body were parsed and then
+re-serialized (a different field order, different whitespace — doesn't
+matter which), the signature would stop matching. An invalid signature
+gets `400`, with no processing at all, just a log of the attempt.
 
-**Идемпотентность.** Stripe доставляет вебхуки at-least-once и ретраит
-недоставленные — один и тот же `evt_...` может прийти несколько раз.
-Дедупликация — `INSERT event_id` в `processed_stripe_events`; на
-unique-violation — это дубль, `200` без повторной обработки. Проверяющий
-арбитр — сам constraint БД, а не `SELECT exists(...)` в коде: два
-вебхука с одним `event_id` могут прийти параллельно, и только constraint
-корректно разруливает эту гонку (проверка-потом-вставка в коде её не
-ловит).
+**Idempotency.** Stripe delivers webhooks at-least-once and retries
+undelivered ones — the same `evt_...` can arrive more than once.
+Deduplication is `INSERT event_id` into `processed_stripe_events`; on a
+unique violation, it's a duplicate, `200` with no reprocessing. The
+arbiter is the DB constraint itself, not a `SELECT exists(...)` in code:
+two webhooks with the same `event_id` can arrive in parallel, and only a
+constraint correctly resolves that race (a check-then-insert in code
+doesn't catch it).
 
-Важный нюанс, которого нет в буквальной формулировке задачи, но который
-проявляется на практике: `INSERT` в `processed_stripe_events` и апдейт
-`deposits` выполняются **в одной Postgres-транзакции**
-(`processStripeEvent`). Если бы событие помечалось обработанным ДО того,
-как реально применился эффект (апдейт статуса), временный сбой между
-этими двумя шагами означал бы: ответ `500` (проси Stripe повторить), но
-при этом полноценный повтор той же доставки уже никогда не сработает —
-он попадёт в ветку «дубль, игнорируем», а нужный апдейт так и не
-произойдёт. Одна транзакция на оба шага — единственный способ, которым
-`400`/дубль/сбой ведут себя ровно так, как описано в DoD: сбой в
-обработке откатывает и вставку `processed_stripe_events`, так что
-следующая доставка того же `event_id` — это честная первая попытка, а не
-проигнорированный дубль.
+An important nuance that isn't in the literal task description, but shows
+up in practice: the `INSERT` into `processed_stripe_events` and the update
+to `deposits` run **in a single Postgres transaction**
+(`processStripeEvent`). If the event were marked processed BEFORE its
+effect (the status update) was actually applied, a transient failure
+between those two steps would mean: a `500` response (asking Stripe to
+retry), but a genuine retry of the same delivery would then never work —
+it would land in the "duplicate, ignore" branch, and the needed update
+would never happen. One transaction for both steps is the only way
+`400`/duplicate/failure behave exactly as described in the DoD: a failure
+during processing rolls back the `processed_stripe_events` insert too, so
+the next delivery of the same `event_id` is a genuinely first attempt, not
+a wrongly ignored duplicate.
 
-**События.** Три типа обрабатываются: `payment_intent.succeeded` →
+**Events.** Three types are handled: `payment_intent.succeeded` →
 `deposits.status = 'succeeded'`; `payment_intent.payment_failed` →
-`status = 'failed'` + `failure_reason` (код ошибки Stripe, например
-`card_declined`); `charge.refunded` → **не меняет status** (у `deposits`
-нет отдельного статуса `refunded` — полноценный reversal, включая
-возможное расширение схемы, откладывается до соответствующего шага), а
-пишет `failure_reason = 'refunded'` как метку для будущей сверки —
-переиспользование поля по контексту, тот же приём, что и у `Transfer`
-(`FailureReason` уже несёт разный смысл в зависимости от `Status`, см.
-выше). Любой другой тип события — `200` и игнорирование без обработки:
-Stripe шлёт десятки типов событий, и падение на незнакомом заставило бы
-его ретраить бесконечно без всякой пользы.
+`status = 'failed'` + `failure_reason` (Stripe's error code, e.g.
+`card_declined`); `charge.refunded` → **doesn't change status** (`deposits`
+has no separate `refunded` status — a full reversal, including a possible
+schema extension, is deferred to the matching step), and instead writes
+`failure_reason = 'refunded'` as a marker for future reconciliation —
+reusing the field by context, the same trick `Transfer` already uses
+(`FailureReason` already carries a different meaning depending on `Status`,
+see above). Any other event type — `200` and ignored with no processing:
+Stripe sends dozens of event types, and failing on an unfamiliar one would
+make it retry forever for no benefit.
 
-**Скорость.** Обработчик умышленно ничего не делает, кроме проверки
-подписи, дедупликации и одного `UPDATE` — зачисление в `ledger-svc`
-(более медленный, кросс-сервисный вызов) сюда не входит и переезжает в
-отдельный шаг. У Stripe есть таймаут на ответ вебхука; долгая
-синхронная обработка здесь означала бы ложные ретраи от Stripe поверх
-уже случившегося платежа.
+**Speed.** The handler deliberately does nothing beyond verifying the
+signature, deduplicating, and one `UPDATE` — crediting `ledger-svc` (a
+slower, cross-service call) isn't part of this and moves to a separate
+step. Stripe has a timeout on the webhook response; a long synchronous
+handling step here would mean spurious retries from Stripe on top of a
+payment that already happened.
 
-### Локальная разработка вебхуков: Stripe CLI
+### Local webhook development: the Stripe CLI
 
-Stripe не может достучаться до `localhost` напрямую. Локально это решает
-[Stripe CLI](https://docs.stripe.com/stripe-cli):
+Stripe can't reach `localhost` directly. Locally, the
+[Stripe CLI](https://docs.stripe.com/stripe-cli) solves this:
 
 ```bash
 stripe login
 stripe listen --forward-to localhost:8080/webhooks/stripe
 ```
 
-Порт `8080` — это Gateway, не `transfers-svc` напрямую: `/webhooks/stripe`
-теперь проксируется через Gateway (см. "Gateway" ниже), публично и без
-проверки JWT (Stripe не может прислать токен — подпись вебхука сама по
-себе и есть аутентификация), с телом запроса, доходящим до
-`transfers-svc` байт-в-байт. `localhost:8084/webhooks/stripe` (сервис
-напрямую, в обход Gateway) по-прежнему работает и удобен для
-низкоуровневой проверки самого обработчика (см. "Проверка вручную" ниже),
-но не отражает реальный путь запроса от Stripe в продакшене.
+Port `8080` is the Gateway, not `transfers-svc` directly: `/webhooks/stripe`
+is now proxied through the Gateway (see "Gateway" below), publicly and with
+no JWT check (Stripe can't send a token — the webhook's own signature is
+itself the authentication), with the request body reaching `transfers-svc`
+byte-for-byte. `localhost:8084/webhooks/stripe` (the service directly,
+bypassing the Gateway) still works and is handy for low-level checks of the
+handler itself (see "Manual verification" below), but doesn't reflect the
+real path a request from Stripe takes in production.
 
-`stripe listen` держит туннель открытым и печатает **локальный** webhook
-signing secret (`whsec_...`, отдельный от продового/дашбордного) — его и
-нужно положить в `.env` как `STRIPE_WEBHOOK_SECRET`. Пока `stripe listen`
-не перезапущен, значение остаётся тем же.
+`stripe listen` keeps a tunnel open and prints a **local** webhook signing
+secret (`whsec_...`, separate from the production/dashboard one) — that's
+the value to put in `.env` as `STRIPE_WEBHOOK_SECRET`. As long as `stripe
+listen` isn't restarted, the value stays the same.
 
-С запущенными `transfers-svc` и `stripe listen` в соседнем терминале:
+With `transfers-svc` and `stripe listen` running in another terminal:
 ```bash
 stripe trigger payment_intent.succeeded
 ```
-шлёт настоящее подписанное событие на форвардящийся URL — в логе
-`stripe listen` виден код ответа (`200`), а в БД — обновлённый
+sends a real, signed event to the forwarding URL — `stripe listen`'s log
+shows the response code (`200`), and the DB shows an updated
 `deposits.status`.
 
-### Проверка вручную
+### Manual verification
 
-`STRIPE_WEBHOOK_SECRET` обязателен так же, как `STRIPE_SECRET_KEY`:
-`docker compose up transfers-svc` без него в `.env` — контейнер падает с
-логом `transfers-svc: STRIPE_WEBHOOK_SECRET environment variable is
-required`, ещё до подключения к Postgres.
+`STRIPE_WEBHOOK_SECRET` is mandatory the same way `STRIPE_SECRET_KEY` is:
+`docker compose up transfers-svc` with it missing from `.env` — the
+container fails with the log `transfers-svc: STRIPE_WEBHOOK_SECRET
+environment variable is required`, before even connecting to Postgres.
 
-Поддельная подпись:
+A forged signature:
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8084/webhooks/stripe \
   -H "Stripe-Signature: t=0,v1=deadbeef" \
   -d '{"type":"payment_intent.succeeded"}'
 ```
-`400`, запись в `processed_stripe_events` не появляется.
+`400`, no row appears in `processed_stripe_events`.
 
-### Тесты `POST /webhooks/stripe`
+### `POST /webhooks/stripe` tests
 
-`services/transfers-svc/webhook_test.go` — через
-`webhook.GenerateTestSignedPayload` (из `stripe-go/webhook`), то есть с
-настоящим вычислением HMAC-подписи, без единого реального обращения к
-Stripe: `TestStripeWebhookHandler_PaymentIntentSucceeded`,
+`services/transfers-svc/webhook_test.go` — via
+`webhook.GenerateTestSignedPayload` (from `stripe-go/webhook`), i.e. with a
+real HMAC signature computed, with not one real call to Stripe:
+`TestStripeWebhookHandler_PaymentIntentSucceeded`,
 `TestStripeWebhookHandler_PaymentIntentPaymentFailed`,
 `TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit`/
-`_SucceededNotYetCreditedDeposit`/`_PendingDepositIsIgnored` (см.
-«Возвраты» ниже), `TestStripeWebhookHandler_UnknownEventTypeIsIgnored`,
-`TestStripeWebhookHandler_InvalidSignature` (проверяет и `400`, и
-отсутствие записи в `processed_stripe_events`),
-`TestStripeWebhookHandler_DuplicateDeliveryIsNotReprocessed` (вторая
-доставка того же `event_id` — `200`, но `deposits.updated_at` не
-меняется и `processed_stripe_events` содержит ровно одну строку),
-`TestProcessStripeEvent_ProcessingFailureDoesNotRecordEvent` (доказывает
-именно то поведение с одной транзакцией на оба шага, что описано выше).
+`_SucceededNotYetCreditedDeposit`/`_PendingDepositIsIgnored` (see
+"Refunds" below), `TestStripeWebhookHandler_UnknownEventTypeIsIgnored`,
+`TestStripeWebhookHandler_InvalidSignature` (checks both the `400` and the
+absence of a row in `processed_stripe_events`),
+`TestStripeWebhookHandler_DuplicateDeliveryIsNotReprocessed` (a second
+delivery of the same `event_id` — `200`, but `deposits.updated_at` doesn't
+change and `processed_stripe_events` still has exactly one row),
+`TestProcessStripeEvent_ProcessingFailureDoesNotRecordEvent` (proves
+exactly the single-transaction-for-both-steps behavior described above).
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -run "TestStripeWebhook|TestProcessStripeEvent" -v
 ```
 
-### Зачисление: `succeeded` → `credited` — почему фоновый воркер, а не вебхук-хендлер или очередь задач
+### Crediting: `succeeded` → `credited` — why a background worker, not the webhook handler or a task queue
 
-Вебхук доводит депозит только до `succeeded` — Stripe подтвердил
-списание с карты. Деньги в ledger ещё не зачислены; между этими двумя
-фактами и живёт вся эта сага, а `succeeded`/`credited` разделены как
-раз для того, чтобы это состояние было видимым, а не спрятанным.
+The webhook only takes a deposit as far as `succeeded` — Stripe confirmed
+the card was charged. The money hasn't been credited in the ledger yet;
+this whole saga lives between those two facts, and `succeeded`/`credited`
+are kept separate precisely so that state is visible, not hidden.
 
-Зачисление (`ledger-svc.Deposit`) сознательно не происходит внутри
-`stripeWebhookHandler`: у Stripe есть таймаут на ответ вебхука, а
-кросс-сервисный вызов `ledger-svc` — не то, что стоит держать на пути
-`200 OK`, который и так должен уйти быстро (проверка подписи,
-дедупликация, один `UPDATE` — см. выше).
+Crediting (`ledger-svc.Deposit`) deliberately doesn't happen inside
+`stripeWebhookHandler`: Stripe has a timeout on the webhook response, and
+a cross-service call to `ledger-svc` isn't something worth holding up the
+`200 OK` for — that response is supposed to go out fast anyway (signature
+check, deduplication, one `UPDATE` — see above).
 
-Выбор стоял между двумя вариантами: фоновым воркером, опрашивающим
-`succeeded`-депозиты, и асинхронной задачей, поставленной обработчиком
-(что потребовало бы очереди задач — инфраструктуры, которой в этом
-репозитории попросту нет). Выбран воркер:
-- Совпадает с уже существующим паттерном этого сервиса — `transfers-svc`
-  уже гоняет `runReconciliationWorker` (`reconcile.go`, тикер каждые 30с)
-  именно для этого класса задач: "перечитать источник истины и привести
-  локальное состояние в соответствие".
-- Не требует новой инфраструктуры (очередь задач, ещё один Kafka-топик
-  для "сделай зачисление") ради единственного нового потребителя.
-- Естественно ретраится: поллер, а не событие "долети один раз" — если
-  зачисление не удалось на этом тике, оно просто повторится на
-  следующем, без отдельной логики ретраев/DLQ, которая уже понадобилась
-  бы очереди задач.
+The choice was between two options: a background worker polling
+`succeeded` deposits, or an async job queued by the handler (which would
+have required a task queue — infrastructure that simply doesn't exist in
+this repo). The worker was chosen:
+- It matches a pattern this service already has — `transfers-svc` already
+  runs `runReconciliationWorker` (`reconcile.go`, a tick every 30s) for
+  exactly this class of task: "reread the source of truth and bring local
+  state in line."
+- It needs no new infrastructure (a task queue, another Kafka topic for
+  "go credit this") for a single new consumer.
+- It retries naturally: a poller, not a deliver-once event — if crediting
+  fails on this tick, it simply retries on the next one, with no separate
+  retry/DLQ logic that a task queue would already have needed.
 
-Технически: `creditSucceededDeposits`
-(`services/transfers-svc/deposit_reconcile.go`) теперь вызывается на
-**каждом** тике того же самого воркера, рядом с существующей `reconcileOnce`
-(переводы) — тот же тикер, тот же процесс, две независимые заботы. Это
-буквально «расширение существующего воркера», а не новый воркер рядом.
-Для каждого `succeeded`-депозита: `ledger.Deposit(account_id, amount,
-reference=deposit_id)` (идемпотентен — см. выше, поэтому безопасно
-вызывать на каждом тике для одного и того же депозита, пока он не
-станет `credited`), затем `markDepositCreditedIfSucceeded` — `UPDATE
-... WHERE status = 'succeeded'` + запись `DepositCredited` в outbox, в
-одной транзакции (`services/transfers-svc/deposit.go`), тот же паттерн,
-что и `markTransferCompletedIfPending` для переводов. Условие `WHERE
-status = 'succeeded'` — та же защита от гонки с конкурентным вызовом
-(другая реплика transfers-svc, тот же тик), что и у переводов:
-проигравший просто не находит строку для обновления (`RowsAffected() ==
-0`) и молча уступает.
+Technically: `creditSucceededDeposits`
+(`services/transfers-svc/deposit_reconcile.go`) is now called on
+**every** tick of that same worker, alongside the existing `reconcileOnce`
+(transfers) — the same ticker, the same process, two independent concerns.
+This is literally "extending the existing worker," not a new worker
+alongside it. For every `succeeded` deposit: `ledger.Deposit(account_id,
+amount, reference=deposit_id)` (idempotent — see above, so it's safe to
+call on every tick for the same deposit until it becomes `credited`), then
+`markDepositCreditedIfSucceeded` — `UPDATE ... WHERE status = 'succeeded'`
++ writing `DepositCredited` to the outbox, in one transaction
+(`services/transfers-svc/deposit.go`), the same pattern as
+`markTransferCompletedIfPending` for transfers. The `WHERE status =
+'succeeded'` condition is the same protection against a race with a
+concurrent call (another transfers-svc replica, the same tick) as
+transfers have: the loser simply finds no row to update
+(`RowsAffected() == 0`) and silently backs off.
 
-### `DepositCredited` — событие в outbox и письмо
+### `DepositCredited` — an outbox event and an email
 
-`UPDATE deposits ... credited` и `INSERT INTO outbox (...,
-'DepositCredited', ...)` — в одной транзакции, тот же паттерн outbox, что
-уже используется для `TransferCompleted`/`Failed`/`Rejected` (см.
-«Outbox» выше). Контракт события —
+`UPDATE deposits ... credited` and `INSERT INTO outbox (...,
+'DepositCredited', ...)` — in one transaction, the same outbox pattern
+already used for `TransferCompleted`/`Failed`/`Rejected` (see "Outbox"
+above). The event contract is
 `proto/events/v1/deposit_events.proto`.
 
-**Сознательное решение: `DepositCredited` едет по тому же топику
-`transfer.events`**, через ту же таблицу `outbox`, а не по отдельному
-`deposit.events`. Депозит — тот же класс события, что и перевод (деньги
-подтверждённо двинулись), и у `transfer.events` уже есть механизм
-мультиплексирования нескольких типов сообщений через заголовок
-`event_type` — он и добавлен специально для этого (см. секцию про
-`event_type`-заголовок выше). Заводить вторую физическую таблицу outbox,
-второй Kafka-топик, второй relay/cleanup-воркер и второго consumer'а в
-notifications-svc ради одного дополнительного типа события — не
-оправдано для MVP; тот же выбор, что уже сделан для инфраструктуры
-депозитов в целом (см. «Почему депозиты живут в transfers-svc» выше).
+**A deliberate decision: `DepositCredited` travels on the same
+`transfer.events` topic**, through the same `outbox` table, not a separate
+`deposit.events`. A deposit is the same class of event as a transfer
+(money confirmed to have moved), and `transfer.events` already has a
+mechanism for multiplexing several message types via the `event_type`
+header — added specifically for this (see the section on the
+`event_type` header above). Standing up a second physical outbox table, a
+second Kafka topic, a second relay/cleanup worker, and a second consumer
+in notifications-svc for one additional event type isn't justified at MVP
+scale; the same choice already made for the deposit infrastructure as a
+whole (see "Why deposits live in transfers-svc" above).
 
-notifications-svc подписан на этот же `transfer.events` (никакого нового
-consumer'а не заводилось): `eventTypeDepositCredited = "DepositCredited"`
-добавлен в существующий `processTransferMessage`'s switch
-(`services/notifications-svc/kafka.go`), `handleDepositCredited` — той же
-формы, что и `handleTransferFailed` (один получатель, одно письмо,
-`claimEvent`/`finishTransferEvent` для идемпотентности), `buildDepositCreditedEmail`
-(`email.go`) — письмо "счёт пополнен", **отправленное только при
-`credited`**, не раньше.
+notifications-svc is subscribed to this same `transfer.events` (no new
+consumer was ever stood up): `eventTypeDepositCredited = "DepositCredited"`
+was added to the existing `processTransferMessage` switch
+(`services/notifications-svc/kafka.go`), `handleDepositCredited` has the
+same shape as `handleTransferFailed` (one recipient, one email,
+`claimEvent`/`finishTransferEvent` for idempotency), `buildDepositCreditedEmail`
+(`email.go`) — an "account topped up" email, **sent only on `credited`**,
+never earlier.
 
-### Тесты
+### Tests
 
 `services/transfers-svc/deposit_reconcile_test.go`:
-`TestCreditSucceededDeposits_Success` (статус меняется на `credited`,
-`ledger_transaction_id` заполнен, ровно одна строка `DepositCredited` в
-outbox), `TestCreditSucceededDeposits_LedgerErrorLeavesSucceeded` (сбой
-ledger-svc не портит депозит — он просто остаётся `succeeded` для
-следующего тика).
+`TestCreditSucceededDeposits_Success` (status changes to `credited`,
+`ledger_transaction_id` is filled in, exactly one `DepositCredited` row in
+the outbox), `TestCreditSucceededDeposits_LedgerErrorLeavesSucceeded` (a
+ledger-svc failure doesn't corrupt the deposit — it just stays
+`succeeded` for the next tick).
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -run TestCreditSucceeded -v
 ```
 
-### Reconciliation депозитов — три вида зависших
+### Deposit reconciliation — three kinds of stuck
 
 `reconcileDepositsOnce` (`services/transfers-svc/deposit_reconcile.go`)
-расширяет тот же воркер, что уже сверяет переводы (`reconcile.go`, см.
-«Reconciliation: закрываем pending переводы» выше) — три независимые
-категории на каждом тике:
+extends the same worker that already reconciles transfers (`reconcile.go`,
+see "Reconciliation: closing out pending transfers" above) — three
+independent categories on every tick:
 
-1. **`succeeded` долго не становится `credited`** — не отдельная
-   категория с собственным опросом, а тот же `creditSucceededDeposits` из
-   раздела выше: он и так пытается зачислить каждый `succeeded`-депозит
-   на каждом тике, так что "давно висит" и "только что стал succeeded"
-   обрабатываются идентично, без специального кода для "застрявших".
-2. **`pending` долго без вебхука** (`reconcilePendingDepositsWithIntent`)
-   — у депозита ЕСТЬ `stripe_payment_intent_id` (значит, `createDeposit`
-   успешно создал `PaymentIntent`), но статус не сдвинулся дольше
-   `DEPOSIT_RECONCILE_STALE_AFTER` (по умолчанию 2 минуты, как и у
-   переводов). Вебхук мог потеряться — опрос Stripe напрямую
-   (`PaymentIntent.Retrieve`) стандартная практика: вебхук — быстрый путь,
-   опрос — надёжный fallback. `succeeded`/`canceled` разрешают статус
-   (через `*IfPending`-варианты записи — гонка с настоящим вебхуком,
-   если он всё-таки долетит одновременно, разрешается так же, как и у
-   переводов: конкурентная запись просто не находит строку). Любой
-   другой статус Stripe (`requires_action`, `processing`, ...) оставляет
-   депозит как есть — платёж всё ещё в процессе.
-3. **`pending` без `stripe_payment_intent_id` старше N минут**
-   (`reconcileOrphanedPendingDeposits`) — мусор из шага `POST /deposits`:
-   `createDeposit` упал (или сам вызов Stripe не удался) между `INSERT`
-   и записью `intent_id`. Денег не двигалось ни в одну сторону — просто
-   помечается `failed` (`abandoned_before_payment_intent`), с
-   дополнительной защитой `AND stripe_payment_intent_id IS NULL` — на
-   случай, если исходный (медленный) вызов `createDeposit` всё же
-   дозавершится между чтением и записью реконсиляции.
+1. **`succeeded` staying `succeeded` too long instead of becoming
+   `credited`** — not a separate category with its own polling, it's the
+   same `creditSucceededDeposits` from the section above: it already tries
+   to credit every `succeeded` deposit on every tick, so "stuck for a
+   while" and "just became succeeded" are handled identically, with no
+   special code for the "stuck" case.
+2. **`pending` for too long with no webhook** (`reconcilePendingDepositsWithIntent`)
+   — the deposit DOES have a `stripe_payment_intent_id` (meaning
+   `createDeposit` successfully created the `PaymentIntent`), but the
+   status hasn't moved in longer than `DEPOSIT_RECONCILE_STALE_AFTER`
+   (default 2 minutes, same as transfers). The webhook might have been
+   lost — polling Stripe directly (`PaymentIntent.Retrieve`) is standard
+   practice: the webhook is the fast path, polling is the reliable
+   fallback. `succeeded`/`canceled` resolve the status (through the
+   `*IfPending` write variants — a race with the real webhook, if it does
+   arrive at the same time, resolves the same way it does for transfers:
+   the concurrent write simply finds no row). Any other Stripe status
+   (`requires_action`, `processing`, ...) leaves the deposit as is — the
+   payment is still in progress.
+3. **`pending` with no `stripe_payment_intent_id`, older than N minutes**
+   (`reconcileOrphanedPendingDeposits`) — garbage from the `POST /deposits`
+   step: `createDeposit` failed (or the Stripe call itself failed) between
+   the `INSERT` and writing `intent_id`. No money moved in either
+   direction — it's simply marked `failed` (`abandoned_before_payment_intent`),
+   with the extra guard `AND stripe_payment_intent_id IS NULL` — in case
+   the original (slow) `createDeposit` call does still complete between
+   the reconciliation's read and write.
 
-### Самый важный инвариант: сверка `succeeded` vs `credited`
+### The most important invariant: reconciling `succeeded` vs `credited`
 
-Ради чего вообще разделены статусы `succeeded` и `credited`: не должно
-существовать депозита, где Stripe списал деньги, а ledger не зачислил, и
-это осталось незамеченным. `creditDeposit`
-(`deposit_reconcile.go`) проверяет это на каждом тике для каждого
-`succeeded`-депозита: если `now() - updated_at` превышает
-`DEPOSIT_RECONCILE_STALE_AFTER`, пишется отдельная, явно помеченная
-строка лога —
+The whole reason the `succeeded` and `credited` statuses are kept
+separate: there must never be a deposit where Stripe took the money but
+the ledger never credited it, and that went unnoticed. `creditDeposit`
+(`deposit_reconcile.go`) checks exactly this on every tick for every
+`succeeded` deposit: if `now() - updated_at` exceeds
+`DEPOSIT_RECONCILE_STALE_AFTER`, a separate, explicitly tagged log line is
+written —
 ```
 transfers-svc: DIVERGENCE ALERT: deposit <id> has been 'succeeded' ... for over 2m0s without becoming 'credited' ...
 ```
-— независимо от исхода попытки зачисления в этом же тике. В реальном
-банке это был бы алерт с пейджингом; здесь наблюдаемый, легко grep'ается
-лог — ровно то, что в реальном банке называют сверкой (reconciliation):
-не просто "почини зависшее", а "докажи, что ничего не разошлось, и
-громко скажи, если разошлось".
+— regardless of the outcome of the crediting attempt on that same tick. In
+a real bank this would be a paging alert; here it's an observable, easily
+grep-able log line — exactly what a real bank calls reconciliation: not
+just "fix the stuck one," but "prove nothing has diverged, and say so
+loudly if it has."
 
-### Тесты reconciliation
+### Reconciliation tests
 
 `services/transfers-svc/deposit_reconcile_test.go`:
-`TestCreditDeposit_LogsDivergenceAlertWhenStale` (перехватывает
-`log.SetOutput` и проверяет, что алерт реально пишется — не просто что
-код для этого существует),
+`TestCreditDeposit_LogsDivergenceAlertWhenStale` (intercepts
+`log.SetOutput` and verifies the alert is actually written — not just
+that the code for it exists),
 `TestReconcilePendingDepositsWithIntent_ResolvesToSucceeded`/
 `_ResolvesToFailedOnCanceled`/`_StillInProgressLeftPending`/
 `_RespectsStaleness`, `TestReconcileOrphanedPendingDeposits_MarksFailed`/
@@ -1553,493 +1571,500 @@ DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?ssl
   go test ./services/transfers-svc/... -run "TestReconcilePendingDepositsWithIntent|TestReconcileOrphaned|TestCreditDeposit" -v
 ```
 
-### Возвраты (`charge.refunded`): обратная проводка, не удаление истории
+### Refunds (`charge.refunded`): a reversal entry, not deleted history
 
-`ledger` — append-only: исходные `entries` депозита никогда не
-удаляются и не редактируются. Компенсация возврата — это **новая**
-обратная проводка (`account_id` → genesis), а не стирание истории; так
-всегда видно и исходное зачисление, и то, что оно было отменено.
+The `ledger` is append-only: a deposit's original `entries` are never
+deleted or edited. Compensating a refund is a **new** reversal entry
+(`account_id` → genesis), not erasing history; that way both the original
+credit and the fact that it was reversed stay visible.
 
-Что именно происходит, зависит от того, докуда депозит успел дойти к
-моменту `charge.refunded` (`processChargeRefundedEvent`,
+What actually happens depends on how far the deposit got by the time
+`charge.refunded` arrives (`processChargeRefundedEvent`,
 `services/transfers-svc/webhook.go`):
-- **`credited`** — деньги уже в ledger-балансе пользователя. Stripe их
-  забрал обратно, значит книги должны это отразить вне зависимости от
-  того, что у пользователя сейчас на балансе (он мог уже потратить эти
-  деньги другими переводами) — `ledger.ReverseDeposit` проводит без
-  проверки баланса, счёт уходит в статус `refunded`.
-- **`succeeded`** (Stripe подтвердил, но зачислить ещё не успели) —
-  реверсировать нечего, зачислять эти деньги уже нельзя: депозит
-  помечается `failed` (`refunded_before_credit`).
-- всё остальное (`pending`, уже `failed`/`refunded`) — нечего делать,
-  просто лог.
+- **`credited`** — the money is already in the user's ledger balance.
+  Stripe took it back, so the books have to reflect that regardless of
+  what the user's balance is right now (they may have already spent that
+  money in other transfers) — `ledger.ReverseDeposit` posts with no
+  balance check, the row moves to a `refunded` status.
+- **`succeeded`** (Stripe confirmed, but crediting hadn't happened yet) —
+  there's nothing to reverse, and this money can no longer be credited:
+  the deposit is marked `failed` (`refunded_before_credit`).
+- everything else (`pending`, already `failed`/`refunded`) — nothing to
+  do, just a log line.
 
-**Известное ограничение MVP**: если баланс пользователя уже потрачен
-(например, переведён кому-то ещё) к моменту возврата, `ReverseDeposit`
-всё равно проводит его в минус — реальные банки в этом случае показывают
-отрицательный баланс/долг клиента, что требует полноценной обработки
-(лимиты, взыскание, блокировка), выходящей за рамки этого MVP. Здесь
-это сознательно не решается — только фиксируется как факт.
+**A known MVP limitation**: if the user's balance has already been spent
+(say, transferred to someone else) by the time the refund arrives,
+`ReverseDeposit` still posts it, pushing the balance negative — real banks
+show a negative balance/customer debt in this case, which requires full
+handling (limits, collections, freezing) beyond this MVP's scope. It's
+deliberately not solved here — only recorded as a fact.
 
-**Почему ledger-вызов идёт до, а не внутри транзакции дедупликации.**
-`processStripeEvent` для всех остальных типов событий оборачивает
-`INSERT INTO processed_stripe_events` и обновление `deposits` в одну
-транзакцию (см. выше — так retry после сбоя не теряется в ветке
-«дубль»). Для `charge.refunded` это не подходит буквально: вызов
-`ReverseDeposit` — сетевой запрос к ledger-svc, а держать открытую
-Postgres-транзакцию (с локом на строку) на время сетевого вызова —
-плохая практика (задержка или авария ledger-svc превращается в
-удержанный лок в БД). Поэтому здесь порядок другой: `ReverseDeposit`
-(идемпотентен по `reference`, безопасно повторить) выполняется **до**
-любой транзакции, а дедупликация + обновление `deposits.status` — уже
-после, отдельной короткой транзакцией. `reference` для реверса —
-**не** `deposit.ID` (это коллизия с `reference` исходного зачисления в
-идемпотентность-проверке ledger-svc), а `reversalReference(deposit.ID)`
-— детерминированный UUID, выведенный из `deposit.ID` через MD5 (простой
-суффикс-строка не подходит: `entries.reference` типизирован как `uuid`).
-Повторная доставка того же `charge.refunded` безопасна вдвойне: если
-локальная запись в прошлый раз не удалась, `ReverseDeposit` просто
-вернёт ту же проводку повторно; если удалась — статус уже не `credited`,
-и повторный вызов вообще не пытается реверсировать снова (см. тест
+**Why the ledger call happens before, not inside, the deduplication
+transaction.** For every other event type, `processStripeEvent` wraps the
+`INSERT INTO processed_stripe_events` and the `deposits` update in one
+transaction (see above — that's how a retry after a failure never gets
+lost in the "duplicate" branch). For `charge.refunded` that literally
+doesn't work: the `ReverseDeposit` call is a network request to
+ledger-svc, and holding a Postgres transaction open (with a row lock) for
+the duration of a network call is bad practice (a slowdown or an outage in
+ledger-svc turns into a held DB lock). So the order here is different:
+`ReverseDeposit` (idempotent by `reference`, safe to repeat) runs
+**before** any transaction, and deduplication + updating
+`deposits.status` happens afterward, in a separate short transaction. The
+`reference` for the reversal is **not** `deposit.ID` (that would collide
+with the original credit's `reference` in ledger-svc's idempotency check),
+it's `reversalReference(deposit.ID)` — a deterministic UUID derived from
+`deposit.ID` via MD5 (a plain suffix string wouldn't work:
+`entries.reference` is typed as `uuid`). A redelivery of the same
+`charge.refunded` is safe on both counts: if the local write failed last
+time, `ReverseDeposit` simply returns the same entry again; if it
+succeeded, the status is no longer `credited`, and the retry doesn't even
+try to reverse again (see the test
 `TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit`).
 
-### Тесты возвратов
+### Refund tests
 
 `services/transfers-svc/webhook_test.go`:
-`TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit` (реверс через
-фейковый ledger-клиент, `reference` реверса ≠ `deposit.ID`, повторная
-доставка не реверсирует снова),
+`TestStripeWebhookHandler_ChargeRefunded_CreditedDeposit` (a reversal
+through a fake ledger client, the reversal's `reference` ≠ `deposit.ID`, a
+redelivery doesn't reverse again),
 `TestStripeWebhookHandler_ChargeRefunded_SucceededNotYetCreditedDeposit`,
 `TestStripeWebhookHandler_ChargeRefunded_PendingDepositIsIgnored`.
-`services/ledger-svc/ledger_test.go`: `TestReverseDeposit_*` (см. выше).
+`services/ledger-svc/ledger_test.go`: `TestReverseDeposit_*` (see above).
 
-### `POST /withdrawals` — вывод денег, ТОЛЬКО СИМУЛЯЦИЯ
+### `POST /withdrawals` — withdrawing money, SIMULATION ONLY
 
-**Настоящий вывод денег на карту/счёт не реализован и не будет реализован
-в этом проекте.** Payout на реальную карту/счёт (Stripe Connect, ACH)
-требует лицензии money transmitter — это регуляторное требование, а не
-техническое; ни один pet-проект не может законно его получить, даже
-работая исключительно в тестовом режиме Stripe.
+**A real withdrawal to a card/account is not implemented and will not be
+implemented in this project.** A payout to a real card/account (Stripe
+Connect, ACH) requires a money transmitter license — a regulatory
+requirement, not a technical one; no pet project can legally obtain one,
+even running entirely in Stripe test mode.
 
-Что `createWithdrawal` (`services/transfers-svc/withdrawal.go`) делает
-по-настоящему: списывает деньги с internal-баланса пользователя через
-обычный, уже существующий `ledger-svc.ExecuteTransfer` (`account_id` →
-genesis — та же проверка достаточности средств, что и у любого перевода,
-и та же механика, никакого нового кода в ledger-svc для этого не
-понадобилось) и создаёт строку в новой таблице `withdrawals`
-(`services/transfers-svc/migrations/000009`) со статусом
-`payout_simulated`. Ни один вызов Stripe payout API нигде не происходит.
-В отличие от `deposits`, у `withdrawals` нет статуса `pending`: вся
-операция синхронна (обычный gRPC-вызов, а не внешний API с
-асинхронным подтверждением), поэтому строка пишется сразу с финальным
-статусом — `payout_simulated` или `failed` (`insufficient_funds`).
+What `createWithdrawal` (`services/transfers-svc/withdrawal.go`) actually
+does: debits the user's internal balance through the ordinary, already
+existing `ledger-svc.ExecuteTransfer` (`account_id` → genesis — the same
+sufficient-funds check as any transfer, and the same mechanics, no new
+code was needed in ledger-svc for this) and creates a row in a new
+`withdrawals` table (`services/transfers-svc/migrations/000009`) with
+status `payout_simulated`. Not a single call to the Stripe payout API ever
+happens anywhere. Unlike `deposits`, `withdrawals` has no `pending`
+status: the whole operation is synchronous (an ordinary gRPC call, not an
+external API with async confirmation), so the row is written straight
+away with its final status — `payout_simulated` or `failed`
+(`insufficient_funds`).
 
-**Это должно быть явно и на фронте**, когда экран для этого появится
-(следующий шаг) — пользователю нельзя дать повод думать, что деньги
-реально ушли на карту.
+**This must be made explicit on the frontend too**, once a screen for it
+exists (a future step) — a user must never be given a reason to think the
+money actually left for a card.
 
-### Тесты `POST /withdrawals`
+### `POST /withdrawals` tests
 
 `services/transfers-svc/withdrawal_test.go`: `TestCreateWithdrawal_Success`
-(проверяет, что `ExecuteTransfer` вызван `account_id` → genesis, статус
-`payout_simulated`), `TestCreateWithdrawal_InsufficientFunds` (статус
-`failed`, `ledger_transaction_id` не заполнен — деньги никуда не
-двинулись), `TestCreateWithdrawal_InvalidAmount`,
+(verifies `ExecuteTransfer` was called `account_id` → genesis, status
+`payout_simulated`), `TestCreateWithdrawal_InsufficientFunds` (status
+`failed`, `ledger_transaction_id` unfilled — no money moved anywhere),
+`TestCreateWithdrawal_InvalidAmount`,
 `TestCreateWithdrawal_AccountNotActive`.
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -run TestCreateWithdrawal -v
 ```
 
-### Gateway: маршрутизация `/deposits` и `/webhooks/stripe`
+### Gateway: routing `/deposits` and `/webhooks/stripe`
 
-`POST /deposits`, `GET /deposits/{id}` и `POST /webhooks/stripe` — новые
-top-level префиксы на Gateway (`gateway/main.go`, `newHandler`), а не
-вложенные под `/transfers`: `transfers-svc` сам регистрирует их как
-соседей `/` на своём собственном мультиплексоре (`POST /deposits`,
-`GET /deposits/{id}`, `POST /webhooks/stripe` — все без общего
-внутреннего префикса), так что проксирование должно пробрасывать путь
-**без изменений**, а не срезать префикс как для остальных маршрутов
-(`gateway/proxy.go`'s `newProxy`/`http.StripPrefix`) — иначе, например,
-`POST /deposits` после срезания превратился бы в пустой путь и попал бы
-на обработчик перевода, а не депозита.
+`POST /deposits`, `GET /deposits/{id}`, and `POST /webhooks/stripe` are
+new top-level prefixes on the Gateway (`gateway/main.go`, `newHandler`),
+not nested under `/transfers`: `transfers-svc` itself registers them as
+siblings of `/` on its own mux (`POST /deposits`,
+`GET /deposits/{id}`, `POST /webhooks/stripe` — all with no shared
+internal prefix), so proxying has to forward the path **unchanged**,
+rather than stripping a prefix the way the rest of the routes do
+(`gateway/proxy.go`'s `newProxy`/`http.StripPrefix`) — otherwise, say,
+`POST /deposits` would turn into an empty path after stripping and land
+on the transfer handler instead of the deposit one.
 
-Нюанс с завершающим слешем (та же природа, что и у комментария в
-`frontend/src/features/transfers/api.ts` про `POST /transfers/`): Go's
-`http.ServeMux` при регистрации `"/deposits/"` (с слешем — subtree-паттерн,
-нужен, чтобы поймать и `/deposits/{id}`) автоматически 301-редиректит
-голый `/deposits` (без слеша) на `/deposits/` — а 301 на POST опасен:
-`fetch()` при повторе запроса после редиректа превращает его в GET,
-молча теряя тело. Решение — зарегистрировать `/deposits` **дважды**:
-точным паттерном (без слеша, ловит только буквально `/deposits`, без
-редиректа) и subtree-паттерном (`/deposits/`, ловит `/deposits/{id}`).
-`/webhooks/stripe` регистрируется только точным паттерном — вложенных
-путей под ним нет, и Stripe не должен ни при каких условиях столкнуться
-с редиректом на свой вебхук.
+A trailing-slash nuance (the same nature as the comment in
+`frontend/src/features/transfers/api.ts` about `POST /transfers/`): Go's
+`http.ServeMux`, when registering `"/deposits/"` (with a slash — a subtree
+pattern, needed to also catch `/deposits/{id}`), automatically
+301-redirects a bare `/deposits` (no slash) to `/deposits/` — and a 301 on
+a POST is dangerous: `fetch()` retrying the request after a redirect turns
+it into a GET, silently dropping the body. The fix is registering
+`/deposits` **twice**: an exact pattern (no slash, catches only literally
+`/deposits`, no redirect) and a subtree pattern (`/deposits/`, catches
+`/deposits/{id}`). `/webhooks/stripe` is registered with only the exact
+pattern — there are no nested paths under it, and Stripe must never, under
+any circumstance, run into a redirect on its own webhook.
 
-`/webhooks/stripe` также добавлен в `publicPaths`
-(`gateway/middleware.go`) — точным совпадением строки, до какого-либо
-срезания префикса. JWT-мидлварь не читает и не трогает тело запроса ни
-для одного пути (только заголовки), так что сырые байты доходят до
-`stripeWebhookHandler` неизменными автоматически, без специального кода
-для этого — критично для проверки подписи (см. выше).
+`/webhooks/stripe` is also added to `publicPaths`
+(`gateway/middleware.go`) — an exact string match, before any prefix
+stripping. The JWT middleware never reads or touches the request body for
+any path (headers only), so the raw bytes reach `stripeWebhookHandler`
+unchanged automatically, with no special code needed for it — critical for
+the signature check (see above).
 
-**Тесты**: `gateway/gateway_test.go` — поднимает `newHandler` через
-`httptest.Server` и настоящий HTTP-раунд-трип (не мок): для
-`POST /deposits` без слеша проверяет отсутствие редиректа и что backend
-получил путь именно `/deposits` (не срезанный) с телом байт-в-байт; для
-`GET /deposits/{id}` — то же самое; для `/webhooks/stripe` — что запрос
-проходит **без** bearer-токена, что тело доходит неизменным даже с
-намеренно «неровным» форматированием JSON, и что клиентский
-`X-User-Id` всё равно вычищается (даже на публичном пути); плюс
-регрессионная проверка, что `/transfers/` по-прежнему срезается как
-раньше.
+**Tests**: `gateway/gateway_test.go` — brings up `newHandler` through
+`httptest.Server` and a real HTTP round trip (not a mock): for
+`POST /deposits` with no slash, checks there's no redirect and that the
+backend received the path exactly as `/deposits` (unstripped) with the
+body byte-for-byte; the same for `GET /deposits/{id}`; for
+`/webhooks/stripe` — that the request goes through **without** a bearer
+token, that the body arrives unchanged even with deliberately "ragged" JSON
+formatting, and that a client-supplied `X-User-Id` still gets stripped
+(even on a public path); plus a regression check that `/transfers/` still
+gets stripped the way it always did.
 ```bash
 cd gateway && go test ./... -v
 ```
 
-### Gateway: маршрутизация `/profile`
+### Gateway: routing `/profile`
 
-Тот же приём, что и у `/deposits` выше, для той же причины: `GET /profile`,
+The same trick as `/deposits` above, for the same reason: `GET /profile`,
 `PATCH /profile`, `POST /profile/avatar/upload-url`,
-`POST /profile/avatar/confirm` живут на `auth-svc`'ом мультиплексоре как
-соседи `/`, а не под внутренним `/profile`-префиксом — так что Gateway
-проксирует их **без срезания пути** (`newNoStripProxy`,
-`gateway/proxy.go`), с той же двойной регистрацией (`/profile` точным
-паттерном + `/profile/` subtree-паттерном), чтобы `PATCH /profile` без
-слеша не поймал 301 на `/profile/` — здесь это даже опаснее, чем у
-`/deposits`: редиректнутый `fetch()` демоутит `PATCH` до `GET`, тихо
-превращая обновление имени в чтение, которое ничего не меняет.
+`POST /profile/avatar/confirm` live on auth-svc's mux as siblings of `/`,
+not under an internal `/profile` prefix — so the Gateway proxies them
+**without stripping the path** (`newNoStripProxy`,
+`gateway/proxy.go`), with the same double registration (`/profile` as an
+exact pattern + `/profile/` as a subtree pattern), so `PATCH /profile`
+with no slash never catches a 301 to `/profile/` — here that's even more
+dangerous than with `/deposits`: a redirected `fetch()` demotes `PATCH`
+to `GET`, silently turning a name update into a read that changes nothing.
 
-`auth-svc` при этом остаётся доступен и по старому пути — `/auth/profile`
-через уже существующий (срезающий) маршрут `/auth`. Это два способа дойти
-до одних и тех же хендлеров, не миграция с одного на другой: `/profile` —
-короче и ближе к тому, как об этой сущности стоит думать с фронта (профиль
-— не про аутентификацию), но ничего не сломано под старым путём.
+`auth-svc` remains reachable on the old path too — `/auth/profile`
+through the already-existing (stripping) `/auth` route. These are two ways
+to reach the same handlers, not a migration from one to the other:
+`/profile` is shorter and closer to how this entity should be thought of
+from the frontend (a profile isn't about authentication), but nothing is
+broken under the old path.
 
-`/profile*` **не** добавлен в `publicPaths` — по умолчанию защищён,
-`X-User-Id` инжектируется из JWT, как и всё остальное за Gateway.
+`/profile*` is **not** added to `publicPaths` — protected by default,
+with `X-User-Id` injected from the JWT like everything else behind the
+Gateway.
 
-**Тесты**: `gateway/gateway_test.go` — `TestNewHandler_ProfileExactPath_NoRedirectAndUnstripped`
-(`PATCH /profile` без слеша: без редиректа, путь и тело доходят без
-изменений), `TestNewHandler_ProfileAvatarSubpath_NoRedirectAndUnstripped`,
+**Tests**: `gateway/gateway_test.go` — `TestNewHandler_ProfileExactPath_NoRedirectAndUnstripped`
+(`PATCH /profile` with no slash: no redirect, path and body arrive
+unchanged), `TestNewHandler_ProfileAvatarSubpath_NoRedirectAndUnstripped`,
 `TestNewHandler_ProfileRequiresJWT`,
-`TestNewHandler_ProfileStripsClientSuppliedUserID`, плюс регрессия
-`TestNewHandler_AuthProfileStillStrips` — старый путь `/auth/profile`
-по-прежнему срезается до `/profile`, как раньше.
+`TestNewHandler_ProfileStripsClientSuppliedUserID`, plus the regression
+`TestNewHandler_AuthProfileStillStrips` — the old `/auth/profile` path
+still gets stripped down to `/profile`, as before.
 
-### Gateway: WebSocket-эндпоинт `GET /ws`
+### Gateway: the `GET /ws` WebSocket endpoint
 
-WS живёт в Gateway, а не в отдельном сервисе, по той же причине, что и
-маршрутизация выше: Gateway — единственное место, которое уже проверяет
-JWT и знает личность пользователя (`jwtMiddleware`,
-`gateway/middleware.go`). Заводить отдельный сервис под WS значило бы
-либо дублировать проверку токена, либо гонять её через ещё один
-внутренний вызов — а стейтфул-соединения и так логично оканчивать там же,
-где оканчивается весь остальной HTTP.
+WS lives in the Gateway, not a separate service, for the same reason as
+the routing above: the Gateway is the one place that already verifies the
+JWT and knows the user's identity (`jwtMiddleware`,
+`gateway/middleware.go`). Standing up a separate service for WS would mean
+either duplicating the token check or routing it through yet another
+internal call — and it's naturally the right place for stateful
+connections to terminate anyway, the same place all the rest of the HTTP
+terminates.
 
-**Аутентификация — первым сообщением, а не query-параметром.** Браузерный
-WebSocket API не даёт задать `Authorization` на рукопожатии. Токен в
-`?token=...` был бы проще, но URL целиком попадает в логи прокси и
-серверов — токен утёк бы в логи. Вместо этого соединение принимается
-неаутентифицированным и остаётся в этом состоянии, пока клиент не
-пришлёт первым сообщением `{"type":"auth","token":"..."}`
-(`gateway/ws.go`, `wsServer.handleWS`). До этого момента сервер не
-отправляет в сокет вообще ничего. Ожидание ограничено таймаутом
-(`WS_AUTH_TIMEOUT`, по умолчанию 5с) — иначе один клиент мог бы держать
-открытыми произвольное число неаутентифицированных соединений безо
-всякого токена, просто не отправляя auth-сообщение. `/ws` из-за этого
-добавлен в `publicPaths` (`gateway/middleware.go`) — не потому что не
-требует аутентификации, а потому что аутентифицирует себя сам, другим
-путём: `jwtMiddleware` и `wsServer.handleWS` теперь используют общую
-`parseAccessToken` — ровно та же проверка подписи/`user_id`/срока
-действия, просто вызванная из двух разных мест (заголовок против первого
-сообщения).
+**Authentication happens on the first message, not a query parameter.**
+The browser's WebSocket API gives no way to set `Authorization` on the
+handshake. A token in `?token=...` would be simpler, but the whole URL
+lands in proxy and server logs — the token would leak into logs. Instead
+the connection is accepted unauthenticated and stays in that state until
+the client sends `{"type":"auth","token":"..."}` as its first message
+(`gateway/ws.go`, `wsServer.handleWS`). Until then the server sends
+absolutely nothing into the socket. The wait is bounded by a timeout
+(`WS_AUTH_TIMEOUT`, default 5s) — otherwise one client could hold open an
+arbitrary number of unauthenticated connections with no token at all,
+simply by never sending the auth message. That's why `/ws` is added to
+`publicPaths` (`gateway/middleware.go`) — not because it needs no
+authentication, but because it authenticates itself, a different way:
+`jwtMiddleware` and `wsServer.handleWS` now share one `parseAccessToken` —
+exactly the same signature/`user_id`/expiry check, just called from two
+different places (a header versus the first message).
 
-**Реестр соединений** (`wsRegistry`, `gateway/ws.go`) — `map[user_id] ->
-набор *websocket.Conn`, под одним `sync.Mutex` (не `sync.Map`: проверка
-лимита и вставка должны быть одной атомарной операцией, чего `sync.Map`
-без дополнительной синхронизации не даёт). У одного пользователя может
-быть несколько вкладок/устройств; вставка отклоняется, если у
-пользователя уже `WS_MAX_CONNS_PER_USER` соединений (по умолчанию 5) —
-иначе один клиент мог бы открыть их тысячами и исчерпать память процесса.
-Регистрация и снятие с регистрации логируются
-(`"gateway: ws connection registered/removed user=..."`) — этим и
-проверяется появление/исчезание соединения в реестре. Форма реестра
-специально рассчитана на то, что Kafka-консьюмер из следующего промпта
-будет читать из него же, чтобы разослать событие по сокетам конкретного
-пользователя — самой рассылки в этом промпте ещё нет, канал пока пуст.
+**The connection registry** (`wsRegistry`, `gateway/ws.go`) is
+`map[user_id] -> a set of *websocket.Conn`, under a single `sync.Mutex`
+(not `sync.Map`: the limit check and the insert have to be one atomic
+operation, which `sync.Map` doesn't give without extra synchronization on
+top). One user can have several tabs/devices; an insert is rejected once
+a user already has `WS_MAX_CONNS_PER_USER` connections (default 5) —
+otherwise one client could open thousands of them and exhaust the
+process's memory. Registration and deregistration are logged
+(`"gateway: ws connection registered/removed user=..."`) — that's how a
+connection appearing/disappearing from the registry is verified. The
+registry's shape is deliberately built for the Kafka consumer from a
+later step to read from it too, to fan an event out to a specific user's
+sockets — that fan-out itself doesn't exist yet at this step, the channel
+is still empty.
 
-**Heartbeat.** Раз в `WS_HEARTBEAT_INTERVAL` (по умолчанию 30с) сервер
-шлёт ping и ждёт pong не дольше `WS_PING_TIMEOUT` (по умолчанию 10с)
-(`wsServer.runHeartbeat`). Без этого «мёртвые» соединения — клиент
-отключился без close-фрейма, типичная ситуация при потере сети —
-копились бы в реестре и текли по памяти бесконечно. Не ответившее на
-ping соединение закрывается и снимается с регистрации.
+**Heartbeat.** Once every `WS_HEARTBEAT_INTERVAL` (default 30s) the
+server sends a ping and waits for a pong no longer than `WS_PING_TIMEOUT`
+(default 10s) (`wsServer.runHeartbeat`). Without this, "dead" connections
+— a client that disconnected with no close frame, a common case on
+network loss — would pile up in the registry and leak memory forever. A
+connection that doesn't answer a ping gets closed and deregistered.
 
-**Истечение токена в живом соединении — осознанное решение, а не
-умолчание: токен проверяется только при рукопожатии.** Access-токен живёт
-15 минут, а WS-соединение может висеть часами, так что почти любое
-соединение переживёт истечение своего токена. Это приемлемо ровно потому,
-что через WS не идут данные — только сигналы вида «обновись», а сами
-данные клиент всегда забирает обычным HTTP-запросом, где `jwtMiddleware`
-проверяет токен заново при каждом обращении. Требовать переаутентификацию
-по таймеру внутри уже открытого соединения было бы дополнительной
-сложностью без реальной пользы: скомпрометировать можно то, что через
-канал передаётся, а через него не передаётся ничего чувствительнее
-уведомления «сходи и обнови».
+**Token expiry on a live connection is a deliberate decision, not an
+oversight: the token is only checked at the handshake.** An access token
+lives 15 minutes, while a WS connection can hang around for hours, so
+almost any connection will outlive its own token's expiry. That's
+acceptable specifically because no data travels over WS — only signals
+like "go refresh," and the client always fetches the actual data over an
+ordinary HTTP request, where `jwtMiddleware` re-checks the token on every
+call. Requiring re-authentication on a timer inside an already-open
+connection would be extra complexity with no real benefit: what can be
+compromised is whatever travels over the channel, and nothing more
+sensitive than a "go refresh" notification ever does.
 
-**Graceful shutdown.** До этого промпта у Gateway не было обработки
-SIGTERM вообще — процесс просто убивался. Теперь `main()` слушает
-SIGINT/SIGTERM через `signal.NotifyContext` и вызывает
-`http.Server.Shutdown` с таймаутом `shutdownTimeout` (10с), как в
-`notifications-svc`. Но `Shutdown` не отслеживает hijacked-соединения — а
-апгрейд до WebSocket именно хайджекает TCP-сокет — поэтому этот таймаут
-их не закроет. Вместо этого тот же `context.Context` от
-`signal.NotifyContext` передаётся напрямую в `wsServer`
-(`newHandler(ctx, jwtSecret)`), и каждый обработчик `handleWS` параллельно
-слушает и его: как только контекст завершается, соединение получает
-настоящий close-фрейм (`websocket.StatusServiceRestart`), а не просто
-рвётся оборванным TCP — клиент видит close сразу и начинает переподключение,
-а не ждёт таймаута на своей стороне. Ждать в `main()` завершения всех
-WS-горутин не нужно: отправка close-фрейма — не работа, которую можно
-«не докончить», в отличие от Kafka-консьюмеров `notifications-svc`.
+**Graceful shutdown.** Before this step, the Gateway had no SIGTERM
+handling at all — the process was simply killed. Now `main()` listens for
+SIGINT/SIGTERM via `signal.NotifyContext` and calls `http.Server.Shutdown`
+with a `shutdownTimeout` (10s), like `notifications-svc`. But `Shutdown`
+doesn't track hijacked connections — and a WebSocket upgrade is exactly a
+TCP-socket hijack — so that timeout won't close them. Instead, the same
+`context.Context` from `signal.NotifyContext` is passed straight into
+`wsServer` (`newHandler(ctx, jwtSecret)`), and every `handleWS` handler
+listens on it too, in parallel: the moment the context is done, the
+connection gets a real close frame (`websocket.StatusServiceRestart`),
+rather than just getting torn down as a dropped TCP connection — the
+client sees the close immediately and starts reconnecting, instead of
+waiting out a timeout on its own side. `main()` doesn't need to wait for
+every WS goroutine to finish: sending a close frame isn't work that can be
+"left unfinished," unlike `notifications-svc`'s Kafka consumers.
 
-**Библиотека:** `github.com/coder/websocket` (активно поддерживаемый форк
-`nhooyr.io/websocket`), выбран вместо `gorilla/websocket` из-за
-context-native API (`Read`/`Ping`/`Close` принимают `context.Context`,
-что естественно ложится на паттерн graceful shutdown выше) и
-`Conn.CloseRead(ctx)` — готового способа вести пуш-only соединение
-(сервер → клиент) с автоматической обработкой ping/pong/close, без
-ручных `SetPingHandler`/`SetPongHandler`/read deadline.
+**Library:** `github.com/coder/websocket` (an actively maintained fork of
+`nhooyr.io/websocket`), chosen over `gorilla/websocket` for its
+context-native API (`Read`/`Ping`/`Close` take a `context.Context`, which
+maps naturally onto the graceful-shutdown pattern above) and
+`Conn.CloseRead(ctx)` — a ready-made way to run a push-only connection
+(server → client) with automatic ping/pong/close handling, with no manual
+`SetPingHandler`/`SetPongHandler`/read deadline.
 
-**Тесты**: `gateway/ws_test.go` — поднимает `newHandler` через
-`httptest.Server`, подключается настоящим WS-клиентом
-(`coder/websocket`'s `Dial`): без auth-сообщения соединение закрывается
-после таймаута; с невалидным токеном — закрывается сразу; с валидным —
-приходит `{"type":"connected"}`, соединение переживает несколько
-(укороченных под тест) heartbeat-интервалов и отвечает на ping; 6-е
-соединение одного пользователя (лимит в тесте укорочен до 2) отклоняется.
+**Tests**: `gateway/ws_test.go` — brings up `newHandler` through
+`httptest.Server`, connects with a real WS client
+(`coder/websocket`'s `Dial`): with no auth message the connection closes
+after the timeout; with an invalid token, it closes immediately; with a
+valid one, `{"type":"connected"}` arrives, the connection survives
+several (shortened for the test) heartbeat intervals and answers pings; a
+6th connection from the same user (the limit is shortened to 2 in the
+test) is rejected.
 ```bash
 cd gateway && go test ./... -v
 ```
 
-**Проверка вручную** (`websocat`, `JWT_SECRET` и токен — как в остальных
-ручных проверках выше):
+**Manual verification** (`websocat`, `JWT_SECRET` and a token — as in the
+other manual checks above):
 ```bash
-# без auth-сообщения — закрывается через ~5с
+# no auth message — closes after ~5s
 websocat ws://localhost:8080/ws
 
-# невалидный токен — закрывается сразу
+# invalid token — closes immediately
 websocat ws://localhost:8080/ws
 {"type":"auth","token":"garbage"}
 
-# валидный токен (из POST /auth/login) — остаётся открытым,
-# отвечает {"type":"connected"}, живёт дольше heartbeat-интервала
+# valid token (from POST /auth/login) — stays open,
+# answers {"type":"connected"}, outlives the heartbeat interval
 websocat ws://localhost:8080/ws
 {"type":"auth","token":"<access_token>"}
 
-# 6-е соединение тем же токеном — отклоняется
+# a 6th connection with the same token — rejected
 ```
-В логах Gateway при этом видны парные строки
+The matching pairs of lines are visible in the Gateway's logs at this point
 `ws connection registered user=...` / `ws connection removed user=...`.
 
-### Gateway: Kafka → WebSocket (`transfer.events` → сигналы в браузер)
+### Gateway: Kafka → WebSocket (`transfer.events` → signals to the browser)
 
-Реестр WS-соединений из предыдущего раздела до этого момента ничем не наполнялся —
-события `transfer.events` (`TransferCompleted`/`TransferFailed`/`TransferRejected`,
-`DepositCredited`) никуда не доходили. Этот раздел подключает Gateway консьюмером к
-тому же топику и превращает события в WS-пуши.
+Up to this point, the WS connection registry from the previous section was never
+populated by anything — `transfer.events` (`TransferCompleted`/`TransferFailed`/`TransferRejected`,
+`DepositCredited`) never reached it. This section wires the Gateway up as a consumer of
+that same topic and turns events into WS pushes.
 
-#### Проблема нескольких инстансов Gateway — и почему у каждого своя consumer group
+#### The multi-instance Gateway problem — and why each one gets its own consumer group
 
-Gateway масштабируется горизонтально: инстансов может быть N за балансировщиком, а
-WS-соединение конкретного пользователя живёт ровно на одном из них. Kafka-событие
-может прийти на инстанс, где этого пользователя нет вообще — тогда push не дойдёт,
-если ничего не предпринять.
+The Gateway scales horizontally: there can be N instances behind a load balancer, and a
+given user's WS connection lives on exactly one of them. A Kafka event can land on an
+instance that doesn't have that user at all — and the push would never arrive unless
+something is done about it.
 
-Решение: **у каждого инстанса своя, уникальная consumer group**
-(`newInstanceConsumerGroup`, `gateway/kafka.go` — `gateway-<hostname>-<случайные байты>`,
-генерируется заново при каждом старте процесса, никогда не переиспользуется). При общей
-группе Kafka поделила бы партиции `transfer.events` между инстансами, и каждый увидел бы
-только часть событий — ровно то, чего нельзя. С уникальной группой на инстанс каждый
-получает **все** события и решает **локально**, отправлять ли что-то: если пользователь
-из события сейчас не подключён к этому конкретному инстансу, `wsRegistry.send` — молчаливый
-no-op, не ошибка и не лог-запись (иначе на каждом инстансе на каждое чужое событие
-писалась бы строка в лог).
+The fix: **every instance gets its own, unique consumer group**
+(`newInstanceConsumerGroup`, `gateway/kafka.go` — `gateway-<hostname>-<random bytes>`,
+generated fresh on every process start, never reused). With a shared group, Kafka would
+split `transfer.events`'s partitions across instances, and each would only ever see part
+of the events — exactly what can't happen here. With a unique group per instance, every
+one of them gets **all** the events and decides **locally** whether to send anything: if
+the user named in the event isn't currently connected to this particular instance,
+`wsRegistry.send` is a silent no-op — not an error, not a log line (otherwise every
+instance would log a line for every event belonging to someone else).
 
-**Цена**: каждый инстанс обрабатывает весь поток `transfer.events`, а не свою долю. На
-масштабе pet-проекта это ничего не стоит. На реальном масштабе (десятки инстансов,
-большой объём событий) это тот момент, где вместо N полных консьюмеров Kafka ставят
-Redis pub/sub или отдельный realtime-слой (например, каждый инстанс Gateway подписан
-на Redis-канал `user:<id>`, а Kafka-консьюмер — один процесс, публикующий туда) — классический
-вопрос на собеседовании о компромиссе между простотой и стоимостью на масштабе.
+**The cost**: every instance processes the entire `transfer.events` stream, not its own
+share of it. At pet-project scale that costs nothing. At real scale (dozens of
+instances, high event volume), this is the point where, instead of N full Kafka
+consumers, teams reach for Redis pub/sub or a separate realtime layer (say, every
+Gateway instance subscribed to a Redis channel `user:<id>`, with a single Kafka consumer
+process publishing into it) — the classic interview question about trading simplicity
+for cost at scale.
 
-`auto.offset.reset = latest` (`kafka.LastOffset`, не `FirstOffset`) — вторая половина
-решения. Пропущенное во время рестарта уведомление не нужно нагонять: живого
-WS-соединения, которому его доставить, всё равно не было, а при реконнекте фронт
-перезапросит текущее состояние обычным HTTP (промпт 3). Та же логика, что у
-`newNotificationReader` в notifications-svc (`services/notifications-svc/kafka.go:114-130`)
-— и по той же причине: e-mail и WS-пуш — оба живые уведомления, не проекция, которую
-нужно восстановить с начала.
+`auto.offset.reset = latest` (`kafka.LastOffset`, not `FirstOffset`) is the other half
+of the fix. A notification missed during a restart doesn't need catching up on: there
+was no live WS connection to deliver it to anyway, and on reconnect the frontend
+re-fetches current state over ordinary HTTP (a later step). The same logic as
+`newNotificationReader` in notifications-svc (`services/notifications-svc/kafka.go:114-130`)
+— and for the same reason: an email and a WS push are both live notifications, not a
+projection that needs rebuilding from the start.
 
-Единственный, кто должен видеть **весь** топик с начала — кэш `account_id → user_id`
-(ниже): его читает свежий `FirstOffset`-ридер на `account.events` (компактированный
-топик), потому что это локальное состояние, которого у только что стартовавшего
-инстанса ещё нет вообще.
+The one thing that does need to see the **entire** topic from the start is the
+`account_id → user_id` cache (below): it's read by a fresh `FirstOffset` reader on
+`account.events` (a compacted topic), because that's local state a freshly started
+instance doesn't have at all yet.
 
-#### `account_id → user_id`: локальный кэш с TTL
+#### `account_id → user_id`: a local TTL cache
 
-События несут `sender_account_id`/`recipient_account_id` (переводы) или `account_id`
-(депозиты) — реестр соединений ключуется по `user_id`. Мост между ними — `accountCache`
-(`gateway/accountcache.go`): `map[account_id]{user_id, expiresAt}` под мьютексом.
-Наполняется двумя путями:
-- пассивно — консьюмер `account.events` читает `AccountCreated`, которое несёт
-  `account_id` и `user_id` вместе намеренно (см. `proto/events/v1/account_events.proto`,
-  тот же приём уже используется проекцией `user_contacts` в notifications-svc);
-- по промаху — прямой синхронный вызов `GET http://accounts-svc:8082/{id}`
-  (`services/accounts-svc/http.go`, уже существующий, ничем не аутентифицированный
-  эндпоинт — как и вообще любой internal-вызов между сервисами в этом репозитории,
-  ни mTLS, ни shared secret, ни interceptor нигде не заведены; это переиспользование
-  существующего пробела, а не новый).
+Events carry `sender_account_id`/`recipient_account_id` (transfers) or `account_id`
+(deposits) — the connection registry is keyed by `user_id`. The bridge between them is
+`accountCache` (`gateway/accountcache.go`): `map[account_id]{user_id, expiresAt}` under
+a mutex. Filled two ways:
+- passively — a consumer of `account.events` reads `AccountCreated`, which deliberately
+  carries `account_id` and `user_id` together (see
+  `proto/events/v1/account_events.proto`, the same trick the `user_contacts` projection
+  in notifications-svc already uses);
+- on a miss — a direct synchronous call to `GET http://accounts-svc:8082/{id}`
+  (`services/accounts-svc/http.go`, an already-existing, completely unauthenticated
+  endpoint — like literally every internal call between services in this repo; no mTLS,
+  no shared secret, no interceptor exists anywhere; this reuses an existing gap, not a
+  new one).
 
-TTL (по умолчанию час, `ACCOUNT_CACHE_TTL`) — не про устаревание: владение счётом не
-меняется. Он только ограничивает память на долгоживущем процессе; вытесненная запись
-просто стоит один лишний HTTP-запрос при следующем упоминании этого `account_id` в
-событии.
+The TTL (default one hour, `ACCOUNT_CACHE_TTL`) isn't about staleness: account
+ownership never changes. It only bounds memory on a long-lived process; an evicted entry
+just costs one extra HTTP request the next time that `account_id` shows up in an event.
 
-#### Формат сообщений: сигнал, а не данные
+#### Message format: a signal, not data
 
 `{"type":"balance.changed"}`, `{"type":"transfer.updated","transfer_id":"..."}`,
-`{"type":"deposit.updated","deposit_id":"..."}` — и ничего больше. Ни суммы, ни нового
-баланса. Причины: порядок доставки не гарантирован (событие может дойти после более
-позднего или не дойти вовсе, если в момент отправки инстанс держал соединение, а к
-моменту события — уже нет), а значит клиент не может доверять значению, лежащему в
-самом сообщении, — оно устареет молча. Сигнал вместо данных заставляет клиента
-перезапросить авторитетное значение обычным HTTP, где и авторизация, и консистентность
-уже есть.
+`{"type":"deposit.updated","deposit_id":"..."}` — and nothing more. No amount, no new
+balance. Reasons: delivery order isn't guaranteed (an event can arrive after a later one,
+or not arrive at all, if the instance was holding the connection at send time but no
+longer is by the time the event fires), meaning the client can't trust a value sitting
+directly in the message — it could go stale silently. A signal instead of data forces
+the client to re-fetch the authoritative value over ordinary HTTP, where both
+authorization and consistency already exist.
 
-Разбор по событиям (`signalsForTransferEvent`/`signalsForDepositEvent`,
-`gateway/notify.go` — чистые функции без Kafka/WS/HTTP внутри, специально ради
-тестируемости следующего пункта):
+Breakdown by event (`signalsForTransferEvent`/`signalsForDepositEvent`,
+`gateway/notify.go` — pure functions with no Kafka/WS/HTTP inside, deliberately for the
+next point's testability):
 
-| Событие | Кому | Что |
+| Event | To whom | What |
 |---|---|---|
-| `TransferCompleted` | отправителю и получателю, каждому своё | `balance.changed` + `transfer.updated{transfer_id}` (деньги действительно двинулись у обоих) |
-| `TransferFailed` / `TransferRejected` | только отправителю | только `transfer.updated{transfer_id}` (баланс не менялся) |
-| `DepositCredited` | владельцу счёта | `balance.changed` + `deposit.updated{deposit_id}` |
+| `TransferCompleted` | sender and recipient, each their own | `balance.changed` + `transfer.updated{transfer_id}` (money genuinely moved for both) |
+| `TransferFailed` / `TransferRejected` | sender only | only `transfer.updated{transfer_id}` (the balance never changed) |
+| `DepositCredited` | the account owner | `balance.changed` + `deposit.updated{deposit_id}` |
 
-#### Безопасность: получатель неуспешного перевода не резолвится вообще
+#### Security: a failed transfer's recipient is never resolved at all
 
-Правило спринта 7 — «получатель не видит чужие неуспешные переводы»
-(`README.md`, notifications-svc — уже описано выше) — здесь соблюдается не
-постфактум-фильтрацией, а структурно: `signalsForTransferEvent` вызывает
-`resolve(recipientAccountID)` **только если** `eventType == TransferCompleted`. Для
-`TransferFailed`/`TransferRejected` `recipient_account_id` вообще не передаётся в
-`resolve` — не то что сигнал не уходит, сама попытка узнать, кто это, не совершается.
-Рассылки «всем» в коде нет нигде: `wsSignal` всегда называет ровно одного адресата,
-`wsRegistry.send` всегда шлёт только в соединения этого одного `user_id`.
+The sprint 7 rule — "a recipient never sees someone else's failed transfers"
+(`README.md`, notifications-svc — already described above) — is honored here not by
+after-the-fact filtering, but structurally: `signalsForTransferEvent` calls
+`resolve(recipientAccountID)` **only if** `eventType == TransferCompleted`. For
+`TransferFailed`/`TransferRejected`, `recipient_account_id` is never even passed into
+`resolve` — it's not just that no signal goes out, the very attempt to find out who that
+is never happens. There's no "broadcast to everyone" anywhere in the code: `wsSignal`
+always names exactly one recipient, `wsRegistry.send` always sends only to that one
+`user_id`'s connections.
 
-**Тесты**: `gateway/notify_test.go` — `TestSignalsForTransferEvent_Completed_BothPartiesGetOwnSignalsOnly`
-(оба получают только своё, JSON каждого сообщения проверен на отсутствие лишних полей),
-`TestSignalsForTransferEvent_Failed_OnlySenderNotified_RecipientNeverResolved` и
-`..._Rejected_...` (шпион-резолвер доказывает, что `recipient_account_id` не был
-даже запрошен — это прямой тест на DoD-кейс «заблокированный фродом перевод → сигнал
-только A, B ничего»). `gateway/ws_test.go`'s
-`TestWSRegistry_Send_DeliversOnlyToTargetUsersLocalConnections` — та же гарантия на
-уровне доставки: два соединения пользователя A получают пуш, соединение пользователя B
-не получает ничего даже после ожидания.
+**Tests**: `gateway/notify_test.go` — `TestSignalsForTransferEvent_Completed_BothPartiesGetOwnSignalsOnly`
+(both get only their own, each message's JSON checked for no extra fields),
+`TestSignalsForTransferEvent_Failed_OnlySenderNotified_RecipientNeverResolved` and
+`..._Rejected_...` (a spy resolver proves `recipient_account_id` was never even
+requested — a direct test of the DoD case "a transfer blocked by fraud → a signal to A
+only, nothing to B"). `gateway/ws_test.go`'s
+`TestWSRegistry_Send_DeliversOnlyToTargetUsersLocalConnections` — the same guarantee at
+the delivery level: two of user A's connections get the push, user B's connection gets
+nothing even after waiting.
 ```bash
 cd gateway && go test ./... -v
 ```
 
-#### Проверка вручную
+#### Manual verification
 
-Через полный `docker compose up`: два `websocat`-сеанса с реальными токенами (из
-`POST /auth/login`) пользователей A и B, перевод A → B через `POST /transfers` — оба
-получают свои `balance.changed`/`transfer.updated`, ни один не видит данных другого.
-Заблокированный fraud-проверкой перевод — сигнал только у A. В логе Gateway на старте
-видна строка с сгенерированной consumer group (`gateway: kafka consumer group
-gateway-<hostname>-<...>`) — у каждого поднятого инстанса она своя.
+Through a full `docker compose up`: two `websocat` sessions with real tokens (from
+`POST /auth/login`) for users A and B, a transfer A → B via `POST /transfers` — both get
+their own `balance.changed`/`transfer.updated`, neither sees the other's data. A
+transfer blocked by the fraud check — a signal to A only. The Gateway's log on startup
+shows a line with its generated consumer group (`gateway: kafka consumer group
+gateway-<hostname>-<...>`) — every running instance has its own.
 
-### Трейсинг: сквозной trace_id через все сервисы (OpenTelemetry + Jaeger)
-Запрос на перевод проходит Gateway → transfers-svc → fraud-svc → ledger-svc. До этого спринта связать логи этих сервисов между собой можно было только вручную по времени — и только если повезло и параллельных запросов не было. Теперь один перевод — это один трейс с общим trace_id, где видно каждый хоп, каждый SQL-запрос и сколько что заняло.
+### Tracing: an end-to-end trace_id across every service (OpenTelemetry + Jaeger)
+A transfer request goes through Gateway → transfers-svc → fraud-svc → ledger-svc. Before this sprint, correlating these services' logs was only possible manually, by timestamp — and only if you got lucky and there were no concurrent requests. Now one transfer is one trace with a shared trace_id, showing every hop, every SQL query, and how long each one took.
 
-- **`jaeger`** — all-in-one (коллектор + хранилище + UI в одном контейнере). UI: **http://localhost:16686**.
-- **`pkg/tracing`** — единственное место, где настраивается OpenTelemetry. Каждый сервис вызывает `tracing.Init(ctx, "<своё имя>")` один раз в `main()`.
+- **`jaeger`** — all-in-one (collector + storage + UI in a single container). UI: **http://localhost:16686**.
+- **`pkg/tracing`** — the one place OpenTelemetry gets configured. Every service calls `tracing.Init(ctx, "<its own name>")` once in `main()`.
 
-### Никакой сервис не зависит от Jaeger
-У `jaeger` нет ни одного `depends_on` со стороны сервисов, а ошибка `tracing.Init` логируется, но **не фатальна**. Банк, который отказывается стартовать, потому что недоступна система наблюдаемости, обменял реальную аварию на воображаемую. Если Jaeger не поднят — глобальный провайдер остаётся no-op из OTel API, все `otelhttp`/`otelgrpc`/`otelpgx` хуки превращаются в дешёвые нерекордящие спаны, и всё работает как раньше, просто без трейсов. То же самое получают тесты (они собирают хендлеры напрямую, минуя `main()`), и то же самое даёт `OTEL_SDK_DISABLED=true`.
+### No service depends on Jaeger
+`jaeger` has zero `depends_on` entries from any service, and a `tracing.Init` error is logged but **not fatal**. A bank that refuses to start because its observability system is unavailable has traded a real outage for an imaginary one. If Jaeger isn't up, the global provider stays a no-op from the OTel API, every `otelhttp`/`otelgrpc`/`otelpgx` hook turns into a cheap, non-recording span, and everything works exactly as before, just without traces. Tests get the same thing (they wire up handlers directly, bypassing `main()`), and so does `OTEL_SDK_DISABLED=true`.
 
-### Автоинструментация
-| Что | Чем | Где включается |
+### Auto-instrumentation
+| What | Via | Wired up where |
 |---|---|---|
-| HTTP-сервер | `otelhttp` | `tracing.Handler(mux, "<svc>")` в каждом `main()` |
-| HTTP-клиент | `otelhttp` | `tracing.Transport(nil)` — reverse-proxy Gateway и `accountCache` |
-| gRPC-сервер | `otelgrpc` | `grpc.NewServer(tracing.GRPCServerOption())` |
-| gRPC-клиент | `otelgrpc` | `grpc.NewClient(..., tracing.GRPCClientOption())` |
-| Postgres | `otelpgx` | `pkg/pgha.NewPool` — одно место на все семь пулов |
+| HTTP server | `otelhttp` | `tracing.Handler(mux, "<svc>")` in every `main()` |
+| HTTP client | `otelhttp` | `tracing.Transport(nil)` — the Gateway's reverse proxy and `accountCache` |
+| gRPC server | `otelgrpc` | `grpc.NewServer(tracing.GRPCServerOption())` |
+| gRPC client | `otelgrpc` | `grpc.NewClient(..., tracing.GRPCClientOption())` |
+| Postgres | `otelpgx` | `pkg/pgha.NewPool` — one place for all seven pools |
 
-Postgres подключён именно в `pkg/pgha`, а не в семи `main()`: инструментация, про которую надо помнить в семи местах, — это инструментация, которой в одном из них не окажется.
+Postgres is wired up specifically in `pkg/pgha`, not in seven separate `main()`s: instrumentation that has to be remembered in seven places is instrumentation that's missing from one of them.
 
-### Почему Gateway — единственное место, где трейс может оборваться
-Типичная ошибка формулируется как «свой reverse-proxy копирует не все заголовки, и трейс обрывается на первом хопе». Здесь всё чуть тоньше, и понимать разницу важно: **Gateway — корень трейса**. Запрос от браузера не содержит `traceparent` вообще, так что копировать нечего — `httputil.ReverseProxy` честно скопирует все входящие заголовки и всё равно не передаст ничего. Заголовок нужно **создать** из серверного спана, который Gateway только что открыл, и это делает `Transport`:
+### Why the Gateway is the one place a trace can break
+The typical mistake is framed as "a custom reverse proxy doesn't copy all the headers, and the trace breaks at the first hop." Here it's a little more subtle, and the distinction matters: **the Gateway is the root of the trace**. A request from the browser carries no `traceparent` at all, so there's nothing to copy — `httputil.ReverseProxy` will faithfully copy every incoming header and still forward nothing. The header has to be **created** from the server span the Gateway just opened, and that's what `Transport` does:
 
 ```go
 func tracedReverseProxy(target *url.URL) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = tracing.Transport(nil)  // ← вот эта строка
+	proxy.Transport = tracing.Transport(nil)  // ← this line right here
 	return proxy
 }
 ```
 
-Без неё поломка тихая и очень характерная: в Jaeger появляется трейс из одного спана Gateway, **отдельный** корневой трейс transfers-svc и ещё один у fraud-svc — три несвязанных трейса на каждый запрос, каждый из которых по отдельности выглядит нормально.
+Without it, the breakage is silent and has a very specific signature: Jaeger shows a trace made of a single Gateway span, a **separate** root trace for transfers-svc, and another one for fraud-svc — three disconnected traces per request, each of which looks fine on its own.
 
-### Что НЕ попадает в спаны
-Трейс — такой же канал утечки, как лог, и Jaeger в этом compose-стеке не защищён ничем: ни аутентификации, ни TLS, ни политики хранения. Правило и его обоснование живут в `pkg/tracing/attributes.go`, рядом с ключами атрибутов, а не в отдельном документе, который разойдётся с кодом. Кратко:
+### What does NOT go into spans
+A trace is as much a leak channel as a log, and Jaeger in this compose stack is protected by nothing at all: no authentication, no TLS, no retention policy. The rule and its reasoning live in `pkg/tracing/attributes.go`, next to the attribute keys themselves, not in a separate document that would drift from the code. In short:
 
-- **никаких credentials**: JWT, access/refresh-токены, идентификаторы сессий, пароли и их хеши, секрет подписи JWT;
-- **никаких email'ов**, имён и всего, что идентифицирует человека;
-- **никаких карточных данных** и **никакого Stripe `client_secret`** — он авторизует подтверждение платежа, то есть является credential, несмотря на то что лежит в теле ответа;
-- **никаких номеров счетов** (`account_number`) — это то, что пользователь диктует вслух. Внутренние UUID счетов класть можно и нужно: они псевдонимны, вне этой базы бессмысленны, и без них трейс невозможно связать со строкой, которую он трогал.
+- **no credentials of any kind**: JWTs, access/refresh tokens, session identifiers, passwords and their hashes, the JWT signing secret;
+- **no emails**, names, or anything that identifies a person;
+- **no card data** and **no Stripe `client_secret`** — it authorizes confirming a payment, meaning it is a credential, regardless of the fact that it sits in a response body;
+- **no account numbers** (`account_number`) — that's the thing a user reads out loud to someone. Internal account UUIDs can and should be included: they're pseudonymous, meaningless outside this database, and without them a trace can't be tied back to the row it touched.
 
-Правило строже, чем «не логируй секреты», потому что автоинструментация кладёт данные без спроса: `otelhttp` записывает URL, и секрет в query-параметре оказался бы на спане, хотя ни одна строка этого репозитория его туда не клала. Аудит проведён — в этом кодбейсе секретов в URL нет: код верификации, пароли и токены передаются в теле JSON, WS-токен приходит отдельным сообщением после подключения, а единственные query-параметры (`limit`, `cursor` в `GET /transfers`) не содержат ничего чувствительного. По той же причине в `otelpgx` **сознательно не включён** `WithIncludeQueryParameters`: он прикрепляет к спану все bind-аргументы, а среди них — хеши паролей (`users`), email'ы (проекция `user_contacts`) и токены. Один булев флаг отправил бы всё это в незащищённый Jaeger, и ни одно место в коде при этом не выглядело бы виноватым.
+The rule is stricter than "don't log secrets," because auto-instrumentation records data without asking: `otelhttp` logs the URL, and a secret in a query parameter would land on a span even though not one line of this repo ever put it there. An audit was done — there are no secrets in URLs anywhere in this codebase: verification codes, passwords, and tokens all travel in a JSON body, the WS token arrives as a separate message after connecting, and the only query parameters (`limit`, `cursor` on `GET /transfers`) carry nothing sensitive. For the same reason, `otelpgx` **deliberately does not enable** `WithIncludeQueryParameters`: it attaches every bind argument to the span, and among them are password hashes (`users`), emails (the `user_contacts` projection), and tokens. One boolean flag would ship all of that into an unprotected Jaeger, and no single line of code would look guilty for it.
 
-### Суммы в спанах — осознанное решение
-`neobank.amount_minor` кладётся в спан. Это именно решение, а не недосмотр: сумма коммерчески чувствительна, а вместе с меткой времени она — слабый идентификатор. Тем не менее она включена, потому что трейс движения денег без суммы не отвечает на вопросы, ради которых трейсинг и заводят: «перевод отклонили из-за суммы или из-за velocity-правила?», «ledger записал то же, что transfers-svc собирался записать?». Записывается как голое целое число, без валюты и без номера счёта рядом — утёкший спан говорит «600000», а не «600000 EUR со счёта X на счёт Y».
+### Amounts in spans — a deliberate decision
+`neobank.amount_minor` is put on the span. This is a decision, not an oversight: an amount is commercially sensitive, and paired with a timestamp it's a weak identifier. It's included anyway, because a trace of money moving with no amount on it fails to answer the questions tracing exists for in the first place: "was the transfer rejected for its amount, or for a velocity rule?", "did the ledger record what transfers-svc meant to record?" It's stored as a bare integer, with no currency and no account number next to it — a leaked span says "600000," not "€6000 from account X to account Y."
 
-### Ошибки и то, что ошибкой НЕ является
-`tracing.Fail(ctx, "<тип>", err)` ставит спану статус error и кладёт низкокардинальный `neobank.error.type` — по нему в Jaeger фильтруется «покажи все проваленные переводы». Ради этого трейсинг и нужен, поэтому важно, что именно попадает в эту категорию:
+### Errors, and what is NOT an error
+`tracing.Fail(ctx, "<type>", err)` sets the span's status to error and attaches a low-cardinality `neobank.error.type` — that's what lets Jaeger filter "show me every failed transfer." That's the whole point of tracing, so it matters exactly what falls into this category:
 
-- **Ошибка**: `fraud_check_unavailable` (fraud-svc недоступен, перевод завис в pending), `settlement_uncertain` (неизвестно, прошёл ли платёж в ledger — тот самый случай, который потом разгребает reconciliation-воркер), `ledger_execute_failed`, `create_transfer_failed`.
-- **НЕ ошибка**: отклонение фродом и `insufficient_funds` в ledger. Система отработала правильно и ровно так, как задумано. Если пометить их error, каждый заблокированный перевод попадёт в Jaeger в одно ведро с настоящими сбоями — а это как раз то различие, которое нужно тому, кто ищет проблемы. Новость несут атрибуты `neobank.fraud.decision` и `neobank.ledger.outcome`, ничего при этом не объявляя сломанным.
+- **An error**: `fraud_check_unavailable` (fraud-svc unreachable, the transfer stuck in pending), `settlement_uncertain` (unknown whether the payment went through in the ledger — the exact case the reconciliation worker later cleans up), `ledger_execute_failed`, `create_transfer_failed`.
+- **NOT an error**: a fraud rejection, and `insufficient_funds` from the ledger. The system did exactly what it was supposed to do. Marking these as errors would dump every blocked transfer into Jaeger in the same bucket as real failures — and that's exactly the distinction someone hunting for problems needs. The story is told by the `neobank.fraud.decision` and `neobank.ledger.outcome` attributes instead, with nothing declared broken.
 
-### Семплирование
-Локально — 100% (`AlwaysSample`). **В продакшене так нельзя**: это стоимость и объём хранилища, линейные по трафику. Обычный ответ — `ParentBased(TraceIDRatioBased(x))` плюс tail-based семплер, который сохраняет все трейсы с ошибками независимо от процента.
+### Sampling
+Locally — 100% (`AlwaysSample`). **That's not viable in production**: storage cost and volume scale linearly with traffic. The usual answer is `ParentBased(TraceIDRatioBased(x))` plus a tail-based sampler that keeps every trace containing an error regardless of the percentage.
 
-`ParentBased` стоит здесь уже сейчас, и это не украшение: решение о семплировании принимается **один раз, в корне** (Gateway) и едет вниз во флаге `sampled` заголовка `traceparent`. Без `ParentBased` каждый сервис бросал бы свой кубик, и при любом проценте ниже 100 получались бы наполовину засемплированные трейсы — то есть бесполезные.
+`ParentBased` is already in place here, and it's not decoration: the sampling decision is made **once, at the root** (the Gateway) and travels downstream in the `sampled` flag of the `traceparent` header. Without `ParentBased`, every service would roll its own dice, and at any percentage below 100 the result would be half-sampled traces — meaning useless ones.
 
-### Проверка вручную
+### Manual verification
 ```
 docker compose up -d
 
-# сделать перевод через UI (или curl, см. «Перевод денег через ledger»),
-# затем открыть http://localhost:16686 и выбрать service=gateway
+# make a transfer through the UI (or curl, see "Moving money through the ledger"),
+# then open http://localhost:16686 and pick service=gateway
 
-# что должно быть в списке сервисов — все шесть, под настоящими именами
+# what should be in the service list — all six, under their real names
 curl -s http://localhost:16686/api/services
 # {"data":["jaeger-all-in-one","auth-svc","accounts-svc","gateway",
 #          "ledger-svc","fraud-svc","transfers-svc"], ...}
 
-# найти трейс по transfer_id (тег лежит на спане transfers-svc, не Gateway)
+# find the trace by transfer_id (the tag lives on the transfers-svc span, not the Gateway's)
 curl -s 'http://localhost:16686/api/traces?service=transfers-svc&lookback=1h&limit=5&tags=%7B%22neobank.transfer.id%22%3A%22<TRANSFER_ID>%22%7D'
 ```
 
-Успешный перевод — один трейс, 55 спанов, корректная вложенность (сокращённо):
+A successful transfer — one trace, 55 spans, correct nesting (abridged):
 
 ```
 gateway            POST /transfers/                              118.39ms
-  gateway            POST /                                      118.31ms   ← клиентский спан прокси
+  gateway            POST /                                      118.31ms   ← the proxy's client span
     transfers-svc      POST /                                    116.63ms
       transfers-svc      AccountsService/GetAccountByUserID         2.18ms
         accounts-svc       AccountsService/GetAccountByUserID       0.79ms
@@ -2051,13 +2076,13 @@ gateway            POST /transfers/                              118.39ms
       transfers-svc      LedgerService/ExecuteTransfer             13.61ms
         ledger-svc         LedgerService/ExecuteTransfer           12.32ms
           ledger-svc         query BEGIN                            0.43ms
-          ledger-svc         query INSERT                           0.59ms   ← две записи
-          ledger-svc         query INSERT                           0.56ms   ← двойной записи
+          ledger-svc         query INSERT                           0.59ms   ← one of the two entries
+          ledger-svc         query INSERT                           0.56ms   ← the other half of the pair
           ledger-svc         query COMMIT                           8.19ms
       transfers-svc      query UPDATE / INSERT / COMMIT             ...
 ```
 
-Заблокированный фродом перевод — **ветка обрывается на fraud, до ledger дело не доходит** (32 спана, `ledger-svc` в трейсе отсутствует вовсе):
+A transfer blocked by fraud — **the branch cuts off at fraud, ledger is never reached** (32 spans, `ledger-svc` is entirely absent from the trace):
 
 ```
       transfers-svc      FraudService/CheckTransfer                 8.98ms
@@ -2066,7 +2091,7 @@ gateway            POST /transfers/                              118.39ms
       transfers-svc      query COMMIT
 ```
 
-с атрибутами:
+with attributes:
 
 ```
 fraud-svc:neobank.fraud.decision       = reject
@@ -2075,257 +2100,255 @@ transfers-svc:neobank.transfer.status  = rejected
 transfers-svc:neobank.amount_minor     = 600000
 ```
 
-### Кардинальность имён операций
-Имена спанов становятся списком операций в Jaeger, поэтому `/deposits/<uuid>` схлопывается в `POST /deposits/{id}` (`tracing.SpanName`). Без этого каждый запрос добавлял бы в выпадающий список новую вечную запись. `otelhttp` сам так не умеет: он оборачивает mux снаружи, то есть на момент создания спана маршрутизация ещё не произошла и шаблон маршрута неизвестен.
+### Operation-name cardinality
+Span names become the operation list in Jaeger, so `/deposits/<uuid>` collapses to `POST /deposits/{id}` (`tracing.SpanName`). Without this, every request would add a new, permanent entry to the dropdown. `otelhttp` can't do this on its own: it wraps the mux from the outside, meaning routing hasn't happened yet at the moment the span is created, and the route template is unknown.
 
-Из трейсов исключены `/healthz` (docker-проба раз в 5 секунд на сервис — они бы составили подавляющее большинство спанов и вытеснили настоящие трейсы) и `/ws` (спан живёт столько же, сколько запрос, а WebSocket-запрос живёт часами — это не полезный трейс, а один огромный незакрывающийся спан).
+Excluded from traces: `/healthz` (a docker probe every 5 seconds per service — these would make up the overwhelming majority of spans and crowd out real traces) and `/ws` (a span lives as long as the request, and a WebSocket request lives for hours — that's not a useful trace, it's one giant span that never closes).
 
-### Что сломалось по дороге
-`resource.Merge` отказывается сливать ресурсы с разными schema URL и **возвращает ошибку**, а не выбирает один из них. `pkg/tracing` собирался с `semconv/v1.26.0`, а `resource.Default()` в SDK 1.45 — с `v1.43.0`. Результат: все семь сервисов писали в лог одну строчку `tracing disabled: conflicting Schema URL` и работали дальше совершенно нормально, не отдавая ни одного спана; Jaeger знал ровно один сервис — самого себя. Снаружи это выглядело как полностью здоровый стек, и единственным симптомом было отсутствие. Регрессионный тест — `TestInit_SucceedsWithoutACollector` в `pkg/tracing`: он проверяет ровно то, что сломалось (что `Init` не возвращает ошибку), и коллектор ему для этого не нужен, потому что OTLP-экспортёр подключается лениво.
+### What broke along the way
+`resource.Merge` refuses to merge resources with different schema URLs and **returns an error** instead of picking one. `pkg/tracing` was built against `semconv/v1.26.0`, while `resource.Default()` in SDK 1.45 uses `v1.43.0`. The result: all seven services logged one line, `tracing disabled: conflicting Schema URL`, and kept running completely normally, emitting zero spans; Jaeger knew about exactly one service — itself. From the outside this looked like a fully healthy stack, and the only symptom was an absence. The regression test is `TestInit_SucceedsWithoutACollector` in `pkg/tracing`: it checks exactly what broke (that `Init` doesn't return an error), and it needs no collector for that, because the OTLP exporter connects lazily.
 
-### Асинхронная часть: перенос контекста через базу
-Синхронная цепочка — простая часть. Система асинхронная: `transfers-svc` пишет событие в outbox, релей публикует его в Kafka через секунды, `notifications-svc` консьюмит и шлёт письмо. Раньше трейс обрывался на записи в outbox — то есть ровно там, где начинается самое интересное для отладки.
+### The async side: carrying context through the database
+The synchronous chain is the easy part. The system is asynchronous: `transfers-svc` writes an event to the outbox, the relay publishes it to Kafka seconds later, `notifications-svc` consumes it and sends an email. The trace used to break at the outbox write — exactly where the most interesting debugging starts.
 
-**Автоинструментация это не решает, и важно понимать почему.** Любая стандартная обёртка над Kafka пробрасывает контекст, инжектируя его в заголовки *в момент публикации*, из спана, живого на публикующей горутине. Здесь такого спана нет: между исходной операцией и публикацией стоит таблица. Транзакция закоммичена, HTTP-спан закрыт, ответ ушёл в браузер — и только потом отдельная горутина релея, которая про тот запрос никогда не слышала, читает строку и публикует её. Инжектировать нечего и неоткуда.
+**Auto-instrumentation doesn't solve this, and it matters to understand why.** Any standard Kafka wrapper propagates context by injecting it into headers *at publish time*, from a span alive on the publishing goroutine. No such span exists here: a table sits between the original operation and the publish. The transaction has committed, the HTTP span has closed, the response has already gone to the browser — and only afterward does a separate relay goroutine, which never heard of that request, read the row and publish it. There's nothing to inject, and nowhere to inject it from.
 
-Контекст переносит через разрыв единственное, что этот разрыв пересекает: сама строка в базе.
+The only thing that crosses that gap is what carries the context across it: the row in the database itself.
 
 ```
-                 HTTP-спан закрыт        │        релей просыпается
- запрос ──► транзакция ──► COMMIT ───────┼──────────► SELECT ──► Kafka ──► консьюмер
+                 HTTP span closed        │        the relay wakes up
+ request ──► transaction ──► COMMIT ─────┼──────────► SELECT ──► Kafka ──► consumer
               │                          │              │
               └─ trace_context ──────────┼──────────────┘
-                 (в той же транзакции)   │   (восстановление, span link)
+                 (same transaction)      │   (restored, as a span link)
 ```
 
-`ALTER TABLE <outbox> ADD COLUMN trace_context JSONB` во всех трёх outbox-таблицах. `outbox.InsertEvent` сериализует текущий контекст (`propagator.Inject` в map-carrier → JSON) **в той же транзакции**, что и само событие: контекст ровно настолько же долговечен, что и событие, и события без записи о происхождении существовать не может. JSONB, а не TEXT, чтобы это читалось из psql без единой строчки кода:
+`ALTER TABLE <outbox> ADD COLUMN trace_context JSONB` on all three outbox tables. `outbox.InsertEvent` serializes the current context (`propagator.Inject` into a map carrier → JSON) **in the same transaction** as the event itself: the context is exactly as durable as the event, and an event can't exist with no record of its own origin. JSONB, not TEXT, so this reads straight out of psql with not one line of code:
 
 ```sql
 SELECT event_type, trace_context->>'traceparent' FROM outbox WHERE published_at IS NULL;
 ```
 
-Колонка nullable, и это часть контракта: строки, записанные до её появления, и строки, записанные при выключенном трейсинге, законно не имеют контекста. Отсутствие трейса — это отсутствие трейса, а не ошибка.
+The column is nullable, and that's part of the contract: rows written before it existed, and rows written while tracing was disabled, legitimately have no context. No trace is no trace, not an error.
 
-### Связь спанов: link, а не parent
-Самое содержательное решение спринта, поэтому подробно.
+### Linking spans: a link, not a parent
+The most substantive decision of this sprint, so it gets a full explanation.
 
-Родительский спан (HTTP-запрос на перевод) давно завершился, когда релей публикует событие. Сделать публикацию его дочерним спаном технически можно — контекст лежит прямо в строке, `Extract` вернёт валидный `SpanContext`, и достаточно передать его в `Start`. **Так делать не надо.**
+The parent span (the transfer's HTTP request) finished long ago by the time the relay publishes the event. Making the publish its child span is technically possible — the context sits right there in the row, `Extract` returns a valid `SpanContext`, and passing it to `Start` is all it would take. **Don't do this.**
 
-Длительность родительского спана по определению *содержит* длительности дочерних. Запрос занял 50 мс; публикация происходит через секунду, а после недоступности Kafka — через минуты. В результате Jaeger нарисует ровно то, что ему сказали: полоса длиной 50 мс, а дочерний спан начинается через три секунды после того, как она кончилась. Это не косметика — это ломает всё, что считается по родителю: p99 запроса, «сколько заняла обработка», любой aggregate по длительности. И читателю трейса приходится держать в голове, что вложенность здесь значит не то, что обычно.
+A parent span's duration, by definition, *contains* its children's durations. The request took 50ms; the publish happens a second later, and after a Kafka outage, minutes later. The result is Jaeger drawing exactly what it was told: a 50ms-long bar, with a child span starting three seconds after it ended. That's not cosmetic — it breaks everything computed off the parent: request p99, "how long did processing take," any duration aggregate. And the reader of the trace has to remember that nesting here doesn't mean what it usually means.
 
-**Span link** говорит ровно то, что есть на самом деле: это отдельная работа, причинно связанная с тем трейсом. Реализация — `tracing.StartLinkedRoot`:
+A **span link** says exactly what's actually true: this is separate work, causally related to that trace. Implemented as `tracing.StartLinkedRoot`:
 
-- `trace.WithNewRoot()` — новый трейс, даже если на горутине релея случайно живёт свой спан (без этого весь релей выродился бы в один бесконечный трейс, к которому подвешено каждое опубликованное событие — это отдельно проверяется тестом);
-- `trace.WithLinks(link)` — ссылка на исходный трейс.
+- `trace.WithNewRoot()` — a new trace, even if the relay's goroutine happens to have a span of its own alive (without this, the entire relay would degenerate into one endless trace with every published event hanging off it — checked separately by a test);
+- `trace.WithLinks(link)` — a link back to the originating trace.
 
-В Jaeger видно и то, и другое, и переход работает в обе стороны.
+Jaeger shows both, and the jump works in both directions.
 
-**Что кладётся в заголовки Kafka — контекст ДОСТАВКИ, а не исходного запроса.** То есть консьюмеры становятся обычными дочерними спанами публикации, в одном трейсе с ней. Это правильно: они действительно вызваны этой публикацией и следуют за ней близко по времени, так что вложенность честна. Итого на один перевод — два трейса:
+**What goes into the Kafka headers is the context of the DELIVERY, not the original request.** That means consumers become ordinary child spans of the publish, in the same trace as it. That's correct: they really are triggered by that publish and follow it closely in time, so the nesting is honest here. So one transfer ends up as two traces:
 
 ```
-трейс A: gateway → transfers → fraud → ledger          (синхронный запрос)
+trace A: gateway → transfers → fraud → ledger          (the synchronous request)
              ▲
              │ link
-трейс B: relay publish → notifications-svc → письмо    (доставка события)
-                       → gateway → WebSocket-пуш
+trace B: relay publish → notifications-svc → email     (event delivery)
+                       → gateway → WebSocket push
 ```
 
-### Консьюмеры
-`notifications-svc`, `gateway` (WS-пуш) и `accounts-svc` в начале обработки сообщения достают контекст из заголовков (`traceContextFromMessage` → `tracing.ExtractMap`) и открывают спан от него. Хелпер продублирован в трёх сервисах, а не вынесен в общий пакет — по той же причине, по которой продублирована константа `event_type`: общее здесь — формат на проводе, а не код.
+### Consumers
+`notifications-svc`, `gateway` (the WS push), and `accounts-svc` pull the context out of the headers (`traceContextFromMessage` → `tracing.ExtractMap`) at the start of message handling and open a span from it. The helper is duplicated across three services rather than pulled into a shared package — for the same reason the `event_type` constant is duplicated: what's shared here is the wire format, not the code.
 
-Ретраи и DLQ — отдельные спаны с номером попытки:
+Retries and the DLQ get their own spans with an attempt number:
 
 ```
-notifications handle transfer.events            (весь путь сообщения, включая ретраи)
+notifications handle transfer.events            (the message's whole path, retries included)
   attempt          neobank.retry.attempt = 1
   attempt          neobank.retry.attempt = 2
   attempt          neobank.retry.attempt = 3
   dlq publish      neobank.dlq.sent = true      [ERROR]
 ```
 
-Уход в DLQ — это **и есть** провал доставки, поэтому спан помечается ошибкой (в отличие от отказа фрода, который ошибкой не является: там система отработала правильно).
+Landing in the DLQ **is** a delivery failure, so that span is marked as an error (unlike a fraud rejection, which isn't one: there the system did exactly what it should).
 
-### Reconciliation в трейсе
-Воркеры реконсиляции просыпаются по таймеру — у их спанов нет родителя по построению, никто их не вызывал. Поэтому `transfers` и `deposits` тоже получили колонку `trace_context`, заполняемую при создании строки, а воркер линкуется на неё при разрешении.
+### Reconciliation in the trace
+Reconciliation workers wake up on a timer — their spans have no parent by construction, nothing ever called them. So `transfers` and `deposits` also got a `trace_context` column, filled in when the row is created, with the worker linking to it when it resolves the row.
 
-Это даёт самую наглядную демонстрацию в проекте: **история зависшего перевода видна целиком** — исходный запрос, точка, где он остановился, не дойдя до терминального состояния, и через минуты отдельный трейс воркера, который довёл его до конца.
+This produces the single clearest demonstration in the whole project: **the entire story of a stuck transfer becomes visible** — the original request, the exact point it stalled short of a terminal state, and, minutes later, a separate trace of the worker that finally finished the job.
 
-`RECONCILE_STALE_AFTER` вынесен в `.env` (по умолчанию пусто ⇒ 2 минуты из кода) — исключительно чтобы это можно было показать, не ожидая две минуты на каждую попытку.
+`RECONCILE_STALE_AFTER` is exposed via `.env` (empty by default ⇒ 2 minutes from the code) purely so this could be demonstrated without waiting two minutes for every attempt.
 
-### Проверка вручную
+### Manual verification
 ```
-# 1. Обычный перевод. В Jaeger найти трейс запроса, затем в спане
-#    "outbox publish TransferCompleted" второго трейса — ссылку на первый.
+# 1. An ordinary transfer. In Jaeger, find the request's trace, then on the
+#    second trace's "outbox publish TransferCompleted" span — the link back to the first.
 
-# 2. Зависший перевод: без fraud-svc перевод остаётся pending
+# 2. A stuck transfer: with fraud-svc down, a transfer stays pending
 docker compose stop fraud-svc
 curl -s -X POST http://localhost:8080/transfers/ -H "Authorization: Bearer $TOKEN" \
   -H "Idempotency-Key: stuck-1" -H 'Content-Type: application/json' \
   -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":2500}'
 # {"status":"pending","message":"fraud check unavailable, transfer still pending"}
 docker compose start fraud-svc
-# подождать RECONCILE_STALE_AFTER + тик воркера (30s)
+# wait out RECONCILE_STALE_AFTER + one worker tick (30s)
 ```
 
-Трейс доставки (проверено, 17 спанов):
+The delivery trace (verified, 17 spans):
 
 ```
-transfers-svc      outbox publish TransferCompleted     1007.27ms  --link--> трейс запроса
+transfers-svc      outbox publish TransferCompleted     1007.27ms  --link--> the request's trace
   transfers-svc      query UPDATE                          1.06ms            (published_at)
   notifications-svc  notifications handle transfer.events  35.87ms
     notifications-svc  attempt                             34.74ms
-      notifications-svc  query INSERT / SELECT / UPDATE      ...             (claimEvent, письмо)
-  gateway            gateway handle transfer.events         1.28ms           (WebSocket-пуш)
+      notifications-svc  query INSERT / SELECT / UPDATE      ...             (claimEvent, the email)
+  gateway            gateway handle transfer.events         1.28ms           (the WebSocket push)
 ```
 
-1007 мс у корневого спана — это не работа, а ожидание: релей опрашивает outbox раз в секунду. Именно эта задержка и есть то, что делает parent-связь неверной.
+The 1007ms on the root span isn't work, it's waiting: the relay polls the outbox once a second. That exact delay is precisely what would make a parent link wrong.
 
-Трейс реконсиляции (проверено):
+The reconciliation trace (verified):
 
 ```
-reconcile transfer   --link--> трейс исходного запроса (25.4s назад)
+reconcile transfer   --link--> the original request's trace (25.4s earlier)
   neobank.reconcile.trigger            = stale_pending
   neobank.reconcile.stale_for_seconds  = 25.37
   neobank.reconcile.resolution         = failed
   neobank.transfer.status              = failed
 ```
 
-### Что осталось за скоупом
-Контекст не переносится через `auth_outbox`→`user.events`→`accounts-svc`→`ledger-svc` для регистрации (механизм тот же и работает, но цепочка не является предметом DoD), и `withdrawals` не имеет колонки `trace_context` — у неё нет воркера реконсиляции, который бы её читал.
+### What's left out of scope
+Context doesn't propagate through `auth_outbox`→`user.events`→`accounts-svc`→`ledger-svc` for registration (the mechanism is the same and works, but that chain isn't part of this step's DoD), and `withdrawals` has no `trace_context` column — it has no reconciliation worker that would ever read one.
 
-## Фронтенд: экран пополнения (`/deposit`)
+## Frontend: the deposit screen (`/deposit`)
 
-`frontend/src/features/deposits/` — форма суммы → `POST /deposits` →
-Stripe Elements (`PaymentElement`) → `stripe.confirmPayment` с
-`redirect: 'if_required'` (не уводит со страницы для большинства карт,
-включая большинство сценариев 3D Secure — Stripe.js обрабатывает вызов
-инлайн). Публичный ключ (`pk_test_...`) — `VITE_STRIPE_PUBLISHABLE_KEY`
-(`frontend/.env`, см. `.env.example`), `loadStripe(...)` вызывается один
-раз на уровне модуля (`features/deposits/stripe.ts`), а не при каждом
-рендере.
+`frontend/src/features/deposits/` — an amount form → `POST /deposits` →
+Stripe Elements (`PaymentElement`) → `stripe.confirmPayment` with
+`redirect: 'if_required'` (doesn't navigate away for most cards,
+including most 3D Secure scenarios — Stripe.js handles the challenge
+inline). The publishable key (`pk_test_...`) is `VITE_STRIPE_PUBLISHABLE_KEY`
+(`frontend/.env`, see `.env.example`); `loadStripe(...)` is called once
+at module scope (`features/deposits/stripe.ts`), not on every render.
 
-**Честность про момент зачисления** — самая важная часть этого экрана.
-Успешный `confirmPayment` на клиенте означает только «Stripe принял
-платёж» (`deposits.status = 'succeeded'`) — баланс ещё не изменился,
-это отдельный факт, который наступает позже, когда фоновый воркер
-проведёт проводку в ledger (`status = 'credited'`, см. «Зачисление:
-succeeded → credited» выше). Поэтому экран **не показывает** «баланс
-пополнен» сразу после `confirmPayment` — только «платёж принят,
-зачисление в течение минуты», и дальше опрашивает `GET /deposits/{id}`
-(`features/deposits/useDepositStatusPolling.ts`) каждые 2 секунды, пока
-статус не станет `credited` (тогда `invalidateQueries` на
-`['accounts','me']` и `['transfers','history']` — те же ключи, что уже
-инвалидирует `TransferForm` после перевода, — и баланс на дашборде
-обновляется сам, без F5) или `failed`/`refunded`. Если за 60 секунд
-(вдвое больше `reconcileInterval` — см. `reconcile.go` — то есть с
-запасом на один пропущенный тик воркера) зачисление так и не случилось,
-спиннер останавливается и показывается «зачисление обрабатывается,
-проверьте баланс позже» — вместо бесконечной загрузки.
+**Honesty about the moment of crediting** is the most important part of
+this screen. A successful client-side `confirmPayment` only means "Stripe
+accepted the payment" (`deposits.status = 'succeeded'`) — the balance
+hasn't changed yet; that's a separate fact that arrives later, when the
+background worker posts the ledger entry (`status = 'credited'`, see
+"Crediting: succeeded → credited" above). So the screen **does not show**
+"balance topped up" right after `confirmPayment` — only "payment
+accepted, crediting within a minute," and then polls `GET /deposits/{id}`
+(`features/deposits/useDepositStatusPolling.ts`) every 2 seconds until
+the status becomes `credited` (at which point `invalidateQueries` runs on
+`['accounts','me']` and `['transfers','history']` — the same keys
+`TransferForm` already invalidates after a transfer — and the dashboard
+balance updates itself, no F5 needed) or `failed`/`refunded`. If 60
+seconds pass (twice `reconcileInterval` — see `reconcile.go` — leaving
+room for one missed worker tick) with crediting never happening, the
+spinner stops and shows "crediting is being processed, check your balance
+later" instead of loading forever.
 
-Отказ карты (`error` от `confirmPayment`) возвращает пользователя на шаг
-ввода суммы с понятным сообщением — новая попытка обязательно означает
-новый `POST /deposits` (новый `PaymentIntent`, новый `client_secret`):
-старый `client_secret` никогда не переиспользуется, ровно как требует
-задача.
+A declined card (an `error` from `confirmPayment`) sends the user back to
+the amount-entry step with a clear message — a new attempt always means a
+new `POST /deposits` (a new `PaymentIntent`, a new `client_secret`): the
+old `client_secret` is never reused, exactly as required.
 
-### История операций: единая лента переводов, депозитов и выводов
+### Operation history: a unified feed of transfers, deposits, and withdrawals
 
-`GET /transfers` (имя осталось прежним, хотя теперь отдаёт не только
-переводы — см. `services/transfers-svc/history.go`'s `historyEntry`)
-теперь возвращает объединённую, честно cursor-пагинированную ленту
-операций: переводы, депозиты и (симулированные) выводы, отсортированные
-по времени, с полем `type` для различения. Реализовано не одним
-гетерогенным SQL UNION (пришлось бы дополнять NULL несовместимые колонки
-трёх разных таблиц), а слиянием на уровне Go: каждый источник
-(`getTransferHistoryPage` — уже существующий 2-way UNION по
-sender/recipient; новые `getDepositHistoryPage`/`getWithdrawalHistoryPage`
-— по одной колонке `account_id`) независимо запрашивается на тот же
-курсор `(created_at, id)`, результаты объединяются, пересортировываются
-и обрезаются до `limit`. Это точно, а не приближённо — тем же
-рассуждением, что и у существующего 2-way UNION для переводов
-(см. комментарий на `transferHistoryQueryFirstPage`): топ-`limit`
-слияния N независимо отсортированных источников всегда содержится в
-топ-`limit` каждого источника по отдельности.
+`GET /transfers` (the name stayed the same, even though it now returns
+more than transfers — see `services/transfers-svc/history.go`'s
+`historyEntry`) now returns a merged, genuinely cursor-paginated feed of
+operations: transfers, deposits, and (simulated) withdrawals, sorted by
+time, with a `type` field to tell them apart. Implemented not as one
+heterogeneous SQL UNION (which would have meant padding out incompatible
+columns across three different tables with NULLs), but as a merge at the
+Go level: each source (`getTransferHistoryPage` — the existing 2-way
+UNION over sender/recipient; the new
+`getDepositHistoryPage`/`getWithdrawalHistoryPage` — a single
+`account_id` column each) is queried independently against the same
+`(created_at, id)` cursor, and the results are merged, re-sorted, and cut
+down to `limit`. This is exact, not approximate — by the same reasoning
+as the existing 2-way UNION for transfers (see the comment on
+`transferHistoryQueryFirstPage`): the top-`limit` of a merge of N
+independently sorted sources is always contained within each source's own
+top-`limit`.
 
-`hasMore` требует ИЛИ, а не только «превысил ли объединённый пул
-`limit`»: если один источник в одиночку уже вернул `hasMore=true` (у
-него есть ещё строки за пределами top-`limit`, которые в объединённый
-пул даже не попали), финальная страница должна сигнализировать
-`hasMore=true`, даже если сам объединённый пул после слияния оказался
-ровно `limit` строк, а не больше. (См. тест
-`TestGetOperationHistoryPage_HasMoreReflectsEachBranch`.)
+`hasMore` requires an OR, not just "did the merged pool exceed `limit`":
+if one source on its own already returned `hasMore=true` (it has more
+rows past its own top-`limit` that never even made it into the merged
+pool), the final page has to signal `hasMore=true`, even if the merged
+pool after merging came out to exactly `limit` rows, not more. (See the
+test `TestGetOperationHistoryPage_HasMoreReflectsEachBranch`.)
 
-На фронтенде — `features/transfers/components/OperationHistory.tsx`
-(бывший `TransferHistory.tsx`): каждая строка получила бейдж типа
-(«Перевод» / «Депозит» / «Вывод») и явную пометку «· симуляция» для
-выводов (`payout_simulated` пока недостижим из UI — вывод не имеет
-формы создания, только показ, если запись когда-либо появится через
-API напрямую). Заодно исправлена расходившаяся с бэкендом константа
-`direction === 'sent'` (бэкенд всегда отдавал `'outgoing'`/`'incoming'`
-— см. `services/transfers-svc/http.go`) — раньше сравнение никогда не
-совпадало ни при каком реальном ответе.
+On the frontend — `features/transfers/components/OperationHistory.tsx`
+(formerly `TransferHistory.tsx`): every row got a type badge ("Transfer"
+/ "Deposit" / "Withdrawal") and an explicit "· simulated" tag for
+withdrawals (`payout_simulated` is currently unreachable from the UI — a
+withdrawal has no creation form, only a display, should a row ever show
+up through the API directly). This also fixed a constant that had
+drifted from the backend, `direction === 'sent'` (the backend has always
+returned `'outgoing'`/`'incoming'` — see `services/transfers-svc/http.go`)
+— the comparison previously never matched on any real response.
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -run "TestGetDepositHandler|TestGetDepositHistoryPage|TestGetWithdrawalHistoryPage|TestGetOperationHistoryPage" -v
 ```
 
-### Тестовые карты Stripe
+### Stripe test cards
 
-Проверено локально (тест-мод Stripe, через `stripe listen` — см. выше):
+Verified locally (Stripe test mode, via `stripe listen` — see above):
 
-- `4242 4242 4242 4242`, любой будущий срок действия, любой CVC, любой
-  индекс — успешная оплата (`payment_intent.succeeded`).
-- `4000 0000 0000 0002` — гарантированный отказ
+- `4242 4242 4242 4242`, any future expiry, any CVC, any index —
+  a successful payment (`payment_intent.succeeded`).
+- `4000 0000 0000 0002` — a guaranteed decline
   (`payment_intent.payment_failed`, `card_declined`).
 
-Не проверялась вживую, но задокументирована как опция (в задаче
-явно сказано, что проверка 3D Secure необязательна): `4000 0025 0000
-3155` — требует прохождения 3D Secure challenge; с
-`redirect: 'if_required'` Stripe.js обрабатывает его инлайн (модальное
-окно поверх страницы), без перехода на `return_url`.
+Not verified live, but documented as an option (the task explicitly says
+testing 3D Secure is optional): `4000 0025 0000
+3155` — requires completing a 3D Secure challenge; with
+`redirect: 'if_required'`, Stripe.js handles it inline (a modal over the
+page), with no navigation to `return_url`.
 
-## fraud-svc: подключение к Postgres, схема
+## fraud-svc: connecting to Postgres, the schema
 
-`fraud-svc` получил Postgres-соединение и схему (`pgx/v5` + `golang-migrate`, тот же паттерн, что и у `ledger-svc`/`accounts-svc`/`transfers-svc`: миграции встроены через `//go:embed migrations/*.sql` и накатываются автоматически при старте, таблица версий миграций — namespaced `schema_migrations_fraud_svc`, т.к. все сервисы делят одну физическую БД `neobank`). Логика проверок появилась следующим шагом (см. «fraud-svc: rule-based скоринг переводов» ниже), а интеграция в поток перевода — ещё одним шагом после (см. «fraud-check перед ledger» в самом низу).
+`fraud-svc` got a Postgres connection and a schema (`pgx/v5` + `golang-migrate`, the same pattern as `ledger-svc`/`accounts-svc`/`transfers-svc`: migrations are embedded via `//go:embed migrations/*.sql` and applied automatically at startup, with a namespaced migrations-version table, `schema_migrations_fraud_svc`, since every service shares one physical `neobank` database). The check logic itself arrived in a later step (see "fraud-svc: rule-based transfer scoring" below), and its integration into the transfer flow in a step after that (see "fraud check before the ledger" at the very bottom).
 
-Две таблицы:
-- **`fraud_rules`** — конфигурация правил (`rule_type` — `amount_threshold` / `velocity_count` / `velocity_sum`, уникален; `enabled`; `threshold_value` — сумма в центах или количество, в зависимости от типа правила; `window_seconds` — окно для velocity-правил, `NULL` для порога по разовой сумме). Мутируемая таблица, редактируется вручную/будущим admin-API.
-- **`fraud_checks`** — лог всех проверок, append-only (`transfer_id`, `account_id`, `amount`, `decision` — `approve`/`reject`, `triggered_rule`, `details` JSONB с посчитанными значениями). Индекс `idx_fraud_checks_account_id_created_at` на `(account_id, created_at)` — под него заточены velocity-правила (посчитать переводы/сумму по счёту за последние N секунд). Лог нужен для аудируемости: когда пользователь спросит «почему мой перевод заблокировали», ответ должен быть в данных, а не в догадках; та же таблица — будущие данные для ML-скоринга (за скоупом этого шага).
+Two tables:
+- **`fraud_rules`** — rule configuration (`rule_type` — `amount_threshold` / `velocity_count` / `velocity_sum`, unique; `enabled`; `threshold_value` — an amount in cents or a count, depending on the rule type; `window_seconds` — the window for velocity rules, `NULL` for a single-amount threshold). A mutable table, edited by hand or by a future admin API.
+- **`fraud_checks`** — an append-only log of every check (`transfer_id`, `account_id`, `amount`, `decision` — `approve`/`reject`, `triggered_rule`, `details` as JSONB with the computed values). The `idx_fraud_checks_account_id_created_at` index on `(account_id, created_at)` is built for exactly what the velocity rules need (counting transfers/summing amounts for an account over the last N seconds). The log exists for auditability: when a user asks "why was my transfer blocked," the answer has to be in the data, not a guess; the same table is future training data for ML scoring too (out of scope for this step).
 
-Три дефолтных правила засеяны миграцией `000003_seed_default_fraud_rules` (значения — отправная точка для MVP, меняются через саму таблицу `fraud_rules`, без новой миграции):
-| `rule_type` | `threshold_value` | `window_seconds` | Смысл |
+Three default rules are seeded by migration `000003_seed_default_fraud_rules` (the values are an MVP starting point, changed through the `fraud_rules` table itself, with no new migration needed):
+| `rule_type` | `threshold_value` | `window_seconds` | Meaning |
 |---|---|---|---|
-| `amount_threshold` | 500000 (€5,000 в центах) | `NULL` | разовый перевод необычно большой суммы |
-| `velocity_count` | 5 | 300 (5 мин) | больше 5 переводов за 5 минут — похоже на скомпрометированную сессию/скрипт |
-| `velocity_sum` | 1000000 (€10,000 в центах) | 3600 (1 час) | вывод счёта серией переводов, каждый из которых по отдельности ниже порога разовой суммы |
+| `amount_threshold` | 500000 (€5,000 in cents) | `NULL` | an unusually large single transfer |
+| `velocity_count` | 5 | 300 (5 min) | more than 5 transfers in 5 minutes — looks like a compromised session/script |
+| `velocity_sum` | 1000000 (€10,000 in cents) | 3600 (1 hour) | draining an account via a series of transfers, each individually below the single-amount threshold |
 
-`GET /healthz` теперь проверяет реальное соединение с Postgres (`SELECT 1` с таймаутом 2с, `503` при ошибке) — как и у остальных Postgres-сервисов, вместо DB-less обработчика из `pkg/health`.
+`GET /healthz` now checks a real Postgres connection (`SELECT 1` with a 2s timeout, `503` on error) — like the other Postgres-backed services, instead of the DB-less handler from `pkg/health`.
 
-## fraud-svc: rule-based скоринг переводов (`CheckTransfer`)
+## fraud-svc: rule-based transfer scoring (`CheckTransfer`)
 
-`fraud-svc` теперь считает решения, а не только хранит схему. gRPC-контракт — `proto/fraud/v1/fraud.proto` (`fraud.v1.FraudService.CheckTransfer(transfer_id, account_id, amount) → {decision, triggered_rule, reason}`), сервер поднят на отдельном порту (`GRPC_PORT`, дефолт `9085`) параллельно с уже существующим HTTP (`8085`) — тот же паттерн, что у `accounts-svc` (HTTP и gRPC на разных портах в одном процессе, `grpc.NewServer()` без опций, стандартный `grpc.health.v1.Health` + `reflection.Register`). `transfers-svc` теперь его вызывает — см. «fraud-check перед ledger (transfers-svc → fraud-svc)» в конце этого раздела.
+`fraud-svc` now computes decisions, not just holds a schema. The gRPC contract is `proto/fraud/v1/fraud.proto` (`fraud.v1.FraudService.CheckTransfer(transfer_id, account_id, amount) → {decision, triggered_rule, reason}`), and the server runs on a separate port (`GRPC_PORT`, default `9085`) alongside the already-existing HTTP one (`8085`) — the same pattern as `accounts-svc` (HTTP and gRPC on different ports in one process, a plain `grpc.NewServer()` with no options, standard `grpc.health.v1.Health` + `reflection.Register`). `transfers-svc` now calls it — see "fraud check before the ledger (transfers-svc → fraud-svc)" at the end of this section.
 
-### Принцип: rule-based, не ML
+### Principle: rule-based, not ML
 
-Правила из `fraud_rules` проверяются в фиксированном порядке — `amount_threshold` → `velocity_count` → `velocity_sum` — и **первое сработавшее правило сразу даёт `reject`**, дальше проверка не идёт. Это делает решение объяснимым: `triggered_rule` всегда называет ровно одно правило, а не «какую-то комбинацию» нескольких. Отключённые правила (`enabled = false`) пропускаются целиком.
+Rules from `fraud_rules` are checked in a fixed order — `amount_threshold` → `velocity_count` → `velocity_sum` — and **the first rule that fires immediately yields `reject`**; nothing further is checked. This keeps the decision explainable: `triggered_rule` always names exactly one rule, never "some combination" of several. Disabled rules (`enabled = false`) are skipped entirely.
 
-- **`amount_threshold`**: `amount > threshold_value` → reject. Разовый перевод выше порога.
-- **`velocity_count`**: количество одобренных проверок этого `account_id` за `window_seconds`, **плюс сама эта проверка** (т.е. «а если одобрить и её»), превышает `threshold_value` → reject.
-- **`velocity_sum`**: то же самое, но сумма одобренных переводов за окно (плюс сумма текущего) вместо количества.
+- **`amount_threshold`**: `amount > threshold_value` → reject. A single transfer above the threshold.
+- **`velocity_count`**: the count of this `account_id`'s approved checks within `window_seconds`, **plus this very check** (i.e. "what if this one were approved too"), exceeds `threshold_value` → reject.
+- **`velocity_sum`**: the same, but the sum of approved transfers over the window (plus this one's amount) instead of a count.
 
-Источник данных для обоих velocity-правил — **собственная** таблица `fraud_checks` (`WHERE decision = 'approve'`), не БД `transfers-svc`: каждый сервис владеет своими данными и считает по ним, чужая БД не источник для чужой логики.
+The data source for both velocity rules is fraud-svc's **own** `fraud_checks` table (`WHERE decision = 'approve'`), never `transfers-svc`'s database: every service owns its own data and computes off it — someone else's database is never the source for someone else's logic.
 
-Наблюдаемое значение для каждого фактически проверенного правила (включая то, которое сработало) кладётся в `details` (JSONB) вместе с порогом и окном — постфактум видно не только что заблокировано, но и что именно было насчитано.
+The observed value for every rule actually checked (including the one that fired) is put into `details` (JSONB) alongside the threshold and window — after the fact it's visible not just what was blocked, but exactly what was computed.
 
-### Fail-closed, а не fail-open
+### Fail-closed, not fail-open
 
-Если `fraud-svc` не может посчитать решение (ошибка Postgres на любом шаге — чтение правил, подсчёт velocity, запись лога), `checkTransfer` возвращает ошибку, а RPC — grpc-статус `codes.Internal`, а **не** молчаливый `approve`. Чтение правил, velocity-подсчёты и запись в `fraud_checks` обёрнуты в одну транзакцию: либо решение целиком посчитано и залогировано, либо не сделано ничего — частичной записи без итогового решения не бывает. Что делать при недоступном fraud-svc (пропустить перевод, отклонить, поставить в очередь) — решает вызывающий (`transfers-svc`), не сам fraud-svc.
+If `fraud-svc` can't compute a decision (a Postgres error at any step — reading rules, computing velocity, writing the log), `checkTransfer` returns an error, and the RPC returns the gRPC status `codes.Internal`, **not** a silent `approve`. Reading rules, computing velocity, and writing to `fraud_checks` are wrapped in one transaction: either the decision is fully computed and logged, or nothing happens at all — there's no such thing as a partial write with no final decision. What to do when fraud-svc is unavailable (let the transfer through, reject it, queue it) is the caller's (`transfers-svc`'s) decision, not fraud-svc's own.
 
-### Каждая проверка — строка в `fraud_checks`
+### Every check is a row in `fraud_checks`
 
-И `approve`, и `reject` пишутся в лог, не только отклонённые — это то, что вообще делает возможным подсчёт velocity-правил (им нужна полная история одобренных проверок), и то же самое, что нужно для аудируемости из предыдущего шага.
+Both `approve` and `reject` are logged, not just rejections — that's what makes computing the velocity rules possible at all (they need the full history of approved checks), and it's the same thing auditability from the previous step needs.
 
-### Проверка вручную
+### Manual verification
 ```bash
 grpcurl -plaintext localhost:9085 list
 
@@ -2337,64 +2360,64 @@ grpcurl -plaintext -d '{"transfer_id": "<uuid>", "account_id": "<uuid>", "amount
   localhost:9085 fraud.v1.FraudService/CheckTransfer
 # {"decision": "reject", "triggeredRule": "amount_threshold", "reason": "amount_threshold: observed 600000 exceeds threshold 500000"}
 ```
-Проверено вручную (через образ `fullstorydev/grpcurl` в docker-сети `neo-bank_default`, поскольку локально `grpcurl` не установлен): оба вызова выше отработали как описано, и `SELECT * FROM fraud_checks WHERE account_id = '<uuid>'` показал обе строки — `approve` и `reject` — с ожидаемыми `decision`/`triggered_rule`.
+Manually verified (through the `fullstorydev/grpcurl` image on the `neo-bank_default` docker network, since `grpcurl` isn't installed locally): both calls above behaved as described, and `SELECT * FROM fraud_checks WHERE account_id = '<uuid>'` showed both rows — `approve` and `reject` — with the expected `decision`/`triggered_rule`.
 
-### Тесты
+### Tests
 
-`services/fraud-svc/fraud_test.go` — юнит-тесты на реальном Postgres (конвенция репозитория: `DATABASE_URL`, тест скипается, если переменная не задана), по одному сценарию на каждое правило: перевод выше порога → `reject`/`amount_threshold`; 6-й перевод в пятиминутном окне → `reject`/`velocity_count`; сумма выше лимита в часовом окне → `reject`/`velocity_sum`; обычный перевод → `approve`; отключённое правило пропускается; отменённый контекст (симуляция сбоя БД без реального отключения Postgres) → ошибка и **ни одной** записи в `fraud_checks` (fail-closed, без частичной записи).
+`services/fraud-svc/fraud_test.go` — unit tests against a real Postgres (repo convention: `DATABASE_URL`, the test skips itself if the variable isn't set), one scenario per rule: a transfer above the threshold → `reject`/`amount_threshold`; a 6th transfer inside the five-minute window → `reject`/`velocity_count`; a sum above the limit inside the one-hour window → `reject`/`velocity_sum`; an ordinary transfer → `approve`; a disabled rule is skipped; a canceled context (simulating a DB failure without actually disconnecting Postgres) → an error and **not a single** row written to `fraud_checks` (fail-closed, no partial write).
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/fraud-svc/... -v
 ```
 
-## fraud-check перед ledger (transfers-svc → fraud-svc)
+## fraud check before the ledger (transfers-svc → fraud-svc)
 
-`transfers-svc` теперь вызывает `fraud-svc.CheckTransfer` как часть создания перевода, **после** того как pending-запись уже вставлена, но **до** вызова `ledger-svc.ExecuteTransfer`:
+`transfers-svc` now calls `fraud-svc.CheckTransfer` as part of creating a transfer, **after** the pending row has already been inserted, but **before** calling `ledger-svc.ExecuteTransfer`:
 
 ```
-createTransfer() → pending-запись создана
+createTransfer() → pending row created
         ↓
-checkTransferFraud() → approve   → settleTransfer() как раньше (completed/failed/uncertain)
-                      → reject   → status='rejected', ledger вообще НЕ вызывается
-                      → uncertain (fraud-svc недоступен) → запись остаётся pending, ledger НЕ вызывается
+checkTransferFraud() → approve   → settleTransfer() as before (completed/failed/uncertain)
+                      → reject   → status='rejected', ledger is NEVER called
+                      → uncertain (fraud-svc unavailable) → the row stays pending, ledger is NOT called
 ```
 
-Порядок специально такой, а не «сначала fraud, потом создать запись»: у отклонённого перевода остаётся строка с причиной (пользователь видит в истории, что было и почему заблокировано), но при этом деньги гарантированно не двигались, потому что до вызова ledger дело просто не доходит. Это же делает reject-путь compensation-free — откатывать нечего, потому что трогать было нечего; правильная saga экономит на компенсации, ставя рискованный шаг (ledger) последним.
+The order is deliberately this way, not "check fraud first, then create the row": a rejected transfer keeps a row with a reason (the user sees in their history what happened and why it was blocked), while the money is guaranteed never to have moved, because the ledger call is simply never reached. This is also what makes the reject path compensation-free — there's nothing to roll back, because nothing was ever touched; a well-designed saga saves on compensation by putting its riskiest step (the ledger) last.
 
-### `rejected` — новый статус, отдельно от `failed`
+### `rejected` — a new status, separate from `failed`
 
-`failed` — техническая неудача или недостаток средств (уровень `ledger-svc`); `rejected` — заблокировано fraud-проверкой. Это разные вещи и для пользователя, и для аналитики, поэтому не схлопнуты в один статус: миграция `000003_add_rejected_transfer_status` добавляет `'rejected'` в CHECK на `transfers.status`. Отдельной колонки под причину не заведено — `failure_reason` переиспользован: он и раньше хранил «почему не completed» (коды `ledger-svc`), теперь при `rejected` там лежит `triggered_rule` от fraud (например, `"amount_threshold"`). Колонка `status` сама по себе всегда однозначно говорит, какой словарь смотреть — заводить `rejection_reason` ради чисто косметического разделения означало бы трогать все `RETURNING`/`SELECT` в файле ради нулевой смысловой пользы.
+`failed` is a technical failure or insufficient funds (the `ledger-svc` level); `rejected` means blocked by the fraud check. These are different things both to the user and for analytics, so they aren't collapsed into one status: migration `000003_add_rejected_transfer_status` adds `'rejected'` to the CHECK on `transfers.status`. No separate column was added for the reason — `failure_reason` was reused: it already stored "why it wasn't completed" (`ledger-svc`'s codes), and now on `rejected` it holds fraud's `triggered_rule` (e.g. `"amount_threshold"`). The `status` column alone always tells you unambiguously which vocabulary to read it against — adding a `rejection_reason` for purely cosmetic separation would have meant touching every `RETURNING`/`SELECT` in the file for zero semantic benefit.
 
-### Fail-closed vs fail-open — осознанный выбор
+### Fail-closed vs fail-open — a deliberate choice
 
-Если `fraud-svc` недоступен или сам вернул ошибку (`codes.Internal` — единственный код, который он вообще возвращает, других деловых кодов у него, в отличие от `ledger-svc`, нет), у `transfers-svc` есть буквально два варианта:
+If `fraud-svc` is unreachable, or it returns an error itself (`codes.Internal` — the only code it ever returns; unlike `ledger-svc`, it has no other business codes), `transfers-svc` literally has two options:
 
-- **fail-open** — пропустить перевод без проверки. Доступнее (перевод не встаёт колом, если fraud-svc упал), но это дыра: злоумышленник, зная, что можно уронить fraud-svc (или просто попасть в окно реального сбоя), проводит перевод вообще без всякой проверки.
-- **fail-closed** — не пропускать. Безопаснее, но перевод не завершается, пока fraud-svc не ответит.
+- **fail-open** — let the transfer through with no check. More available (a transfer never gets stuck if fraud-svc goes down), but it's a hole: an attacker who knows fraud-svc can be taken down (or simply hits the window of a real outage) pushes a transfer through with no check at all.
+- **fail-closed** — don't let it through. Safer, but the transfer doesn't complete until fraud-svc responds.
 
-Выбран **fail-closed**: перевод остаётся `pending` (никакой записи не делается — та же логика, что и у неопределённого исхода `ledger-svc`), клиенту — `202` с `"message": "fraud check unavailable, transfer still pending"`. Деньги в этом случае не двигались вообще: `ledger-svc` ещё не вызывался, поэтому даже откатывать нечего. Настоящий банк выберет именно так: «недоступна проверка на мошенничество» — это состояние, в котором деньги должны стоять на месте, а не состояние, которое молча пропускают ради доступности. Та же причина, по которой `checkTransferFraud` не делает по кодам ошибок разбор наподобие `settleTransfer` (там `ledger-svc` кодирует бизнес-исходы через grpc-статусы, здесь у `fraud-svc` такого нет — любая ошибка равнозначна «не смог посчитать», и это ровно то, что должно приводить к fail-closed, а не к угадыванию).
+**Fail-closed** was chosen: the transfer stays `pending` (no row is written — the same logic as `ledger-svc`'s undetermined outcome), and the client gets `202` with `"message": "fraud check unavailable, transfer still pending"`. In this case, no money moved at all: `ledger-svc` was never even called, so there's nothing to roll back either. A real bank would choose exactly this way: "the fraud check is unavailable" is a state where money must stand still, not one that gets silently waved through for the sake of availability. The same reason `checkTransferFraud` doesn't do a code-by-code breakdown the way `settleTransfer` does (there `ledger-svc` encodes business outcomes through gRPC statuses; here `fraud-svc` has nothing like that — any error means "couldn't compute a decision," and that's exactly what should lead to fail-closed rather than guessing).
 
-### Идемпотентность
+### Idempotency
 
-Fraud-проверка вызывается **строго после** того, как переключатель исходов `createTransfer` в `http.go` уже обработал все ранние `return` (включая `createTransferReplayed`) — то есть ровно там же, где сегодня уже стоит вызов `settleTransfer`. Повтор с тем же `Idempotency-Key` короткоживущим путём возвращает текущее состояние существующей записи и не доходит до вызова fraud вообще — тем же механизмом, что уже не даёт повтору вызвать `ledger` дважды. Если запись всё ещё `pending` из-за неопределённого исхода fraud-проверки, повтор так и будет возвращать тот же `pending`-снимок, не пытаясь перепроверить fraud — но зависшей она не останется: reconciliation-воркер (см. «Reconciliation: закрываем pending переводы» ниже) разрешает и этот случай тоже, проверяя `ledger-svc` напрямую, независимо от того, что вызвало неопределённость.
+The fraud check is called **strictly after** `createTransfer`'s outcome switch in `http.go` has already handled every early `return` (including `createTransferReplayed`) — i.e. at exactly the same point the call to `settleTransfer` already sits at today. A retry with the same `Idempotency-Key` returns the existing row's current state through the short-lived path and never even reaches the fraud call — the same mechanism that already keeps a retry from calling `ledger` twice. If the row is still `pending` because of an undetermined fraud-check outcome, a retry will keep returning that same `pending` snapshot, never trying to recheck fraud — but it won't stay stuck forever: the reconciliation worker (see "Reconciliation: closing out pending transfers" below) resolves this case too, checking `ledger-svc` directly, regardless of what caused the uncertainty.
 
-### Проверка вручную
+### Manual verification
 ```bash
-# легитимный перевод — approve, деньги переходят
+# a legitimate transfer — approve, the money moves
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
   -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":1000}'
 # {"status":"completed","ledger_transaction_id":"..."}
 
-# перевод выше порога — reject, ledger не вызывается
+# a transfer above the threshold — reject, the ledger is never called
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
   -H "Idempotency-Key: <uuid>" \
   -d '{"recipient_iban":"IE34ZZZZ00004234567890","amount":600000}'
 # {"status":"rejected","failure_reason":"amount_threshold"}
 
-# fraud-svc недоступен
+# fraud-svc unavailable
 docker compose stop fraud-svc
 curl -s -X POST http://localhost:8080/transfers/ \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
@@ -2403,137 +2426,137 @@ curl -s -X POST http://localhost:8080/transfers/ \
 # 202 {"status":"pending","message":"fraud check unavailable, transfer still pending"}
 docker compose start fraud-svc
 ```
-Проверено вручную на полном стеке (два реальных пользователя через `/auth/register` → `/auth/verify-email` → `/auth/login`, отправитель профинансирован через `cmd/devtopup`): легитимный перевод — `completed`, в `fraud_checks` строка `approve`; перевод на 600000 — `rejected`/`amount_threshold`, балансы обеих сторон не изменились, `ledger_transaction_id` пуст; шесть быстрых мелких переводов подряд — 6-й `rejected`/`velocity_count`; остановленный `fraud-svc` — `202 pending`, баланс не изменился, `fraud_checks` для этого перевода пуст; повтор того же `Idempotency-Key` (и после reject, и после fraud-недоступности) — тот же ответ, счётчик строк `fraud_checks` для этого `transfer_id` не увеличился.
+Manually verified on the full stack (two real users via `/auth/register` → `/auth/verify-email` → `/auth/login`, the sender funded through `cmd/devtopup`): a legitimate transfer — `completed`, with an `approve` row in `fraud_checks`; a 600000 transfer — `rejected`/`amount_threshold`, neither side's balance changed, `ledger_transaction_id` is empty; six quick small transfers in a row — the 6th is `rejected`/`velocity_count`; with `fraud-svc` stopped — `202 pending`, the balance is unchanged, `fraud_checks` for this transfer is empty; a retry of the same `Idempotency-Key` (both after a reject and after fraud-unavailability) — the same response, the row count in `fraud_checks` for this `transfer_id` doesn't grow.
 
-### Тесты
+### Tests
 
-`services/transfers-svc/transfer_test.go` — `fakeFraudClient` (тот же паттерн, что `fakeAccountsClient`/`fakeLedgerClient`: встраивает реальный интерфейс как nil, переопределяет только `CheckTransfer`). `TestCheckTransferFraud_Approved`/`_Rejected`/`_Uncertain` (таблично по `codes.Internal`/`codes.Unavailable`, доказывая, что fail-closed срабатывает на **любой** ошибке, не только на документированной)/`_UnexpectedDecision` (незнакомое значение `decision` — тоже fail-closed, а не молчаливый approve). Обработчик HTTP отдельно не тестируется — в репозитории вообще нет тестов на уровне HTTP-хендлера/gRPC-сервера (только на уровень бизнес-логики ниже), и гарантия «повтор не вызывает fraud дважды» здесь структурная (ранний `return` до места вызова), а не отдельный тест — то же самое, что уже верно для `settleTransfer`.
+`services/transfers-svc/transfer_test.go` — `fakeFraudClient` (the same pattern as `fakeAccountsClient`/`fakeLedgerClient`: embeds the real interface as nil, overrides only `CheckTransfer`). `TestCheckTransferFraud_Approved`/`_Rejected`/`_Uncertain` (table-driven over `codes.Internal`/`codes.Unavailable`, proving fail-closed fires on **any** error, not just the documented one)/`_UnexpectedDecision` (an unfamiliar `decision` value — also fail-closed, not a silent approve). The HTTP handler isn't tested separately — the repo has no tests at all at the HTTP-handler/gRPC-server level (only at the business-logic level below it), and the guarantee "a retry never calls fraud twice" is structural here (an early `return` before the call site), not a separate test — the same as is already true for `settleTransfer`.
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/transfers-svc/... -v
 ```
 
-## Reconciliation: закрываем pending переводы (transfers-svc)
+## Reconciliation: closing out pending transfers (transfers-svc)
 
-Это настоящая saga-проблема потока перевода — не reject от fraud (там ledger вообще не трогается, компенсировать нечего), а тот самый обрыв связи после вызова `ledger-svc.ExecuteTransfer`, помеченный TODO ещё в разделе «Честная граница» выше: `transfers-svc` вызвал `ledger`, `ledger` провёл проводку и закоммитил её, а ответ не дошёл (таймаут, сеть, сам `transfers-svc` упал между вызовом и записью `completed`). Запись висит в `pending` навсегда — деньги реально переведены, а система об этом не знает.
+This is the real saga problem in the transfer flow — not a fraud reject (the ledger is never touched there, nothing to compensate), but exactly the broken-connection case after calling `ledger-svc.ExecuteTransfer`, flagged with a TODO back in "An honest boundary" above: `transfers-svc` called `ledger`, `ledger` posted the entry and committed it, and the response never arrived (a timeout, a network blip, or `transfers-svc` itself crashing between the call and writing `completed`). The row hangs in `pending` forever — the money genuinely moved, and the system has no idea.
 
-### Почему это не «откатить»
+### Why this isn't "roll it back"
 
-Компенсация в saga — не откат БД. Проводка в `entries` append-only и физически не удаляется. Компенсировать можно только двумя способами: **подтвердить** (если проводка реально прошла — записать `completed`, догнав реальность) или **провести обратную проводку** (если решено отменить нечто, что состоялось). Здесь нужен только первый способ — а если проводки не было вообще, компенсировать вообще нечего, деньги никуда не уходили. Обратные проводки (reversal) сюда не входят: они понадобятся в спринте 9 для Stripe-возвратов, где отменяется уже состоявшийся перевод, а не выясняется его судьба.
+Compensation in a saga isn't a DB rollback. An `entries` row is append-only and never physically deleted. There are only two ways to compensate: **confirm** it (if the entry really went through — write `completed`, catching up with reality) or **post a reversal entry** (if something that already happened is being undone). Only the first is needed here — and if the entry never happened at all, there's nothing to compensate at all, no money ever moved. Reversal entries aren't part of this: they'll be needed in sprint 9 for Stripe refunds, where an already-completed transfer is being undone, rather than its fate being figured out.
 
-### `ledger-svc.GetTransactionByReference` — источник истины, а не догадка
+### `ledger-svc.GetTransactionByReference` — a source of truth, not a guess
 
-Чтобы спросить «а провёл ли ledger вообще перевод с таким id», сначала нужно этот id туда донести. `ExecuteTransferRequest` получил необязательное поле `reference` (`proto/ledger/v1/ledger.proto`) — `transfers-svc` передаёт туда `transfer.ID` (`settleTransfer` в `transfer.go`), `ledger-svc` сохраняет его на обеих проводках (`entries.reference UUID`, миграция `000004_add_reference_to_entries`, индекс `idx_entries_reference`). Значение необязательное и по умолчанию `NULL` — `cmd/devtopup`/`cmd/seed` его не передают, и это ничего не меняет в их поведении.
+To ask "did the ledger actually execute a transfer with this id," that id has to reach the ledger first. `ExecuteTransferRequest` got an optional `reference` field (`proto/ledger/v1/ledger.proto`) — `transfers-svc` passes `transfer.ID` into it (`settleTransfer` in `transfer.go`), and `ledger-svc` stores it on both entries (`entries.reference UUID`, migration `000004_add_reference_to_entries`, index `idx_entries_reference`). The value is optional and defaults to `NULL` — `cmd/devtopup`/`cmd/seed` never pass it, and that changes nothing about their behavior.
 
-`GetTransactionByReference(reference) → {found, transaction_id}` — `found = false` такой же полноценный, ожидаемый ответ, как и `found = true`, а не ошибка: reference мог никогда не использоваться, или перевод с ним никогда не выполнялся. Оба случая исчерпывают то, что может быть верно про зависший `pending`.
+`GetTransactionByReference(reference) → {found, transaction_id}` — `found = false` is just as complete and expected a response as `found = true`, not an error: the reference might never have been used, or a transfer with it might never have executed. Both cases exhaust everything that can possibly be true about a stuck `pending`.
 
-### Воркер: `runReconciliationWorker` (`services/transfers-svc/reconcile.go`)
+### The worker: `runReconciliationWorker` (`services/transfers-svc/reconcile.go`)
 
-Тикер раз в 30 секунд (`reconcileInterval`, константа — тюнить нечего) ищет переводы в `pending` старше настраиваемого порога (`getStalePendingTransfers`, `transfer.go`) — порог задаётся через `RECONCILE_STALE_AFTER` (`time.ParseDuration`, дефолт `2m`, не установлен в `docker-compose.yml` — только через код). Для каждого — `GetTransactionByReference(transfer_id)`:
-- **найдена** → перевод реально прошёл: `status = 'completed'`, `ledger_transaction_id` заполняется. Компенсация не нужна — это просто «догнать реальность».
-- **не найдена** → `ledger` её не проводил: `status = 'failed'`, `failure_reason = 'timeout_unresolved'`. Денег не двигалось, компенсировать нечего.
-- ошибка транспорта (`ledger-svc` сам недоступен) → ничего не пишется, лог, следующий тик попробует снова — тот же fail-closed принцип, что и у `checkTransferFraud`/`settleTransfer`: не знаешь — не пиши.
+A ticker once every 30 seconds (`reconcileInterval`, a constant — nothing to tune) looks for `pending` transfers older than a configurable threshold (`getStalePendingTransfers`, `transfer.go`) — the threshold is set via `RECONCILE_STALE_AFTER` (`time.ParseDuration`, default `2m`, not set in `docker-compose.yml` — code-only). For each one — `GetTransactionByReference(transfer_id)`:
+- **found** → the transfer really did go through: `status = 'completed'`, `ledger_transaction_id` gets filled in. No compensation needed — this is just "catch up with reality."
+- **not found** → `ledger` never posted it: `status = 'failed'`, `failure_reason = 'timeout_unresolved'`. No money moved, nothing to compensate.
+- a transport error (`ledger-svc` itself unreachable) → nothing is written, just a log line, the next tick tries again — the same fail-closed principle as `checkTransferFraud`/`settleTransfer`: don't know, don't write.
 
-Как и консьюмер Kafka в `accounts-svc`, воркер живёт всё время жизни процесса без graceful shutdown (`context.Background()` из `main()`) — тот же паттерн, что и у большинства фоновых циклов в этом репозитории. Консьюмеры `notifications-svc` — исключение, см. «notifications-svc: устойчивость консьюмера» ниже.
+Like the Kafka consumer in `accounts-svc`, the worker lives for the process's entire lifetime with no graceful shutdown (`context.Background()` from `main()`) — the same pattern most background loops in this repo follow. `notifications-svc`'s consumers are the exception, see "notifications-svc: consumer resilience" below.
 
-### Гонка с обычным обработчиком запроса
+### A race with the ordinary request handler
 
-Между тем, как воркер прочитал список зависших `pending` (`getStalePendingTransfers`), и тем, как он решит его записать, тот же самый перевод может успеть разрешиться по обычному пути — например, клиент повторил запрос с тем же `Idempotency-Key`, и на этот раз `settleTransfer` действительно достучался до `ledger-svc`. Поэтому оба писателя воркера — `markTransferCompletedIfPending`/`markTransferFailedIfPending` (`transfer.go`) — это те же `UPDATE`, что и `markTransferCompleted`/`markTransferFailed`, но с добавленным `AND status = 'pending'`: если строка уже не `pending` к моменту записи, `UPDATE` не совпадает ни с одной строкой (`RowsAffected() == 0`), и воркер просто не резолвит её повторно — уже зафиксированный результат (какой бы он ни был) остаётся как есть, а не перезаписывается устаревшим представлением воркера.
+Between the moment the worker reads the list of stuck `pending` rows (`getStalePendingTransfers`) and the moment it decides to write one, that same transfer can resolve through the ordinary path — say, the client retried the request with the same `Idempotency-Key`, and this time `settleTransfer` genuinely reached `ledger-svc`. That's why both of the worker's writers — `markTransferCompletedIfPending`/`markTransferFailedIfPending` (`transfer.go`) — are the same `UPDATE`s as `markTransferCompleted`/`markTransferFailed`, but with `AND status = 'pending'` added: if the row is no longer `pending` by the time it writes, the `UPDATE` matches no row at all (`RowsAffected() == 0`), and the worker simply doesn't resolve it again — whatever result was already recorded stays as is, never overwritten by the worker's stale view.
 
-### Логи
+### Logs
 
-Каждое разрешение зависшего перевода логируется явно (`reconcileTransfer`, `transfer.go`) — с `transfer_id`, итоговым статусом и (для `completed`) `ledger_transaction_id`:
+Every resolution of a stuck transfer is logged explicitly (`reconcileTransfer`, `transfer.go`) — with the `transfer_id`, the final status, and (for `completed`) the `ledger_transaction_id`:
 ```
 transfers-svc: reconcile: transfer 85abb5f7-... resolved to completed (ledger_transaction_id=0f34b0e1-...) — ledger-svc had already executed it, the original response was never received
 transfers-svc: reconcile: transfer d88ce967-... resolved to failed (reason=timeout_unresolved) — ledger-svc never executed it, no money moved
 ```
-Тики без единого разрешения ничего не логируют — иначе лог захламлялся бы каждые 30 секунд без всякой пользы.
+A tick that resolves nothing logs nothing — otherwise the log would fill up with noise every 30 seconds for no benefit.
 
-### Как симулировался обрыв для проверки
+### How the broken connection was simulated to verify this
 
-Ни `docker network disconnect`, ни `iptables` не дают надёжно оборвать именно **ответ**, оставив сам вызов и коммит в `ledger-svc` нетронутыми — слишком тонкое по времени состояние гонки, чтобы воспроизводить его через реальную сеть. Вместо этого — временный `os.Getenv("SIMULATE_CRASH_AFTER_LEDGER_CALL") == "true"` прямо в `settleTransfer`, сразу после успешного `ExecuteTransfer` и до `markTransferCompleted`: `log.Fatalf(...)`, честно убивающий процесс в тот самый момент, когда `ledger-svc` уже закоммитил, а `transfers-svc` — ещё нет. Добавлено, использовано для проверки ниже, затем убрано целиком — это одноразовый инструмент для этой проверки, не постоянная часть кода (в отличие от `cmd/devtopup`, которым реально пользуются повторно).
+Neither `docker network disconnect` nor `iptables` can reliably break just the **response** while leaving the actual call and commit inside `ledger-svc` untouched — too fine a timing window to reproduce over a real network. Instead, a temporary `os.Getenv("SIMULATE_CRASH_AFTER_LEDGER_CALL") == "true"` right inside `settleTransfer`, right after a successful `ExecuteTransfer` and before `markTransferCompleted`: `log.Fatalf(...)`, genuinely killing the process at the exact moment `ledger-svc` has already committed but `transfers-svc` hasn't yet. Added, used for the verification below, then removed entirely — a one-time tool for this check, not a permanent part of the code (unlike `cmd/devtopup`, which is genuinely reused).
 
-**Проверено вручную на полном стеке:**
-1. `SIMULATE_CRASH_AFTER_LEDGER_CALL=true`, `RECONCILE_STALE_AFTER=5s` (временно, только на время проверки) → перезапуск `transfers-svc`.
-2. Обычный перевод через Gateway → клиент получает `502` (соединение оборвалось вместе с процессом), контейнер `transfers-svc` — `Exited (1)`, в логе `SIMULATED CRASH after ledger call for transfer <id>`.
-3. `SELECT status FROM transfers WHERE id = '<id>'` → `pending`; `SELECT * FROM entries WHERE reference = '<id>'` → обе проводки уже на месте (реальные деньги реально перешли).
-4. Убрать `SIMULATE_CRASH_AFTER_LEDGER_CALL`, перезапустить `transfers-svc` — воркер снова работает. Через один тик (≤35 c при пороге 5 c) перевод сам стал `completed` с правильным `ledger_transaction_id`; баланс отправителя (`GET /accounts/me`) уменьшился ровно на сумму перевода.
-5. Обратный случай: вручную вставлена `pending`-запись без единой проводки в `ledger` (`INSERT INTO transfers (...) VALUES (..., 'pending', now() - interval '1 minute')`) — на следующем тике стала `failed`/`timeout_unresolved`.
-6. `RECONCILE_STALE_AFTER` и код возвращены к дефолту (`2m`, без переменной в `docker-compose.yml`), `SIMULATE_CRASH_AFTER_LEDGER_CALL` полностью удалён из `transfer.go` — обычный перевод после отката по-прежнему `completed` с первого раза.
+**Manually verified on the full stack:**
+1. `SIMULATE_CRASH_AFTER_LEDGER_CALL=true`, `RECONCILE_STALE_AFTER=5s` (temporary, only for the duration of the check) → restart `transfers-svc`.
+2. An ordinary transfer through the Gateway → the client gets a `502` (the connection died along with the process), the `transfers-svc` container is `Exited (1)`, the log shows `SIMULATED CRASH after ledger call for transfer <id>`.
+3. `SELECT status FROM transfers WHERE id = '<id>'` → `pending`; `SELECT * FROM entries WHERE reference = '<id>'` → both entries are already there (real money genuinely moved).
+4. Remove `SIMULATE_CRASH_AFTER_LEDGER_CALL`, restart `transfers-svc` — the worker runs again. Within one tick (≤35s at a 5s threshold) the transfer became `completed` on its own with the correct `ledger_transaction_id`; the sender's balance (`GET /accounts/me`) dropped by exactly the transfer amount.
+5. The opposite case: a `pending` row inserted by hand with no matching entry in `ledger` at all (`INSERT INTO transfers (...) VALUES (..., 'pending', now() - interval '1 minute')`) — became `failed`/`timeout_unresolved` on the next tick.
+6. `RECONCILE_STALE_AFTER` and the code were both reverted to the default (`2m`, no variable in `docker-compose.yml`), `SIMULATE_CRASH_AFTER_LEDGER_CALL` was removed entirely from `transfer.go` — an ordinary transfer after reverting is still `completed` on the first try.
 
-### Тесты
+### Tests
 
-`services/ledger-svc/ledger_test.go`: `TestExecuteTransfer_WithReference` (reference сохраняется на обеих проводках, `getTransactionByReference` находит правильный `transaction_id`), `TestGetTransactionByReference_NotFound`, `TestExecuteTransfer_EmptyReferenceLeavesEntriesUnreferenced` (пустой reference → `NULL`, а не пустая строка — иначе все переводы без reference коллизировали бы на одном значении для поиска).
+`services/ledger-svc/ledger_test.go`: `TestExecuteTransfer_WithReference` (the reference is stored on both entries, `getTransactionByReference` finds the correct `transaction_id`), `TestGetTransactionByReference_NotFound`, `TestExecuteTransfer_EmptyReferenceLeavesEntriesUnreferenced` (an empty reference → `NULL`, not an empty string — otherwise every transfer with no reference would collide on the same lookup value).
 
-`services/transfers-svc/reconcile_test.go`: `TestGetStalePendingTransfers` (порог по возрасту), `TestReconcileTransfer_LedgerExecutedIt`/`_LedgerNeverExecutedIt`/`_TransportErrorLeavesRowUntouched` (три исхода через `fakeLedgerClient.getTransactionByReferenceFunc`), `TestMarkTransferCompletedIfPending_SkipsAlreadyResolved`/`TestMarkTransferFailedIfPending_SkipsAlreadyResolved` — доказывают саму гонку: заранее резолвят перевод в один терминальный статус, затем вызывают «противоположный» `*IfPending` и проверяют, что `RowsAffected = 0` и строка не тронута.
+`services/transfers-svc/reconcile_test.go`: `TestGetStalePendingTransfers` (the age threshold), `TestReconcileTransfer_LedgerExecutedIt`/`_LedgerNeverExecutedIt`/`_TransportErrorLeavesRowUntouched` (three outcomes via `fakeLedgerClient.getTransactionByReferenceFunc`), `TestMarkTransferCompletedIfPending_SkipsAlreadyResolved`/`TestMarkTransferFailedIfPending_SkipsAlreadyResolved` — prove the actual race: resolve a transfer to one terminal status ahead of time, then call the "opposite" `*IfPending` and verify `RowsAffected = 0` and the row is untouched.
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/ledger-svc/... ./services/transfers-svc/... -v
 ```
 
-## notifications-svc: письма о переводах (`transfer.events` → Mailpit)
+## notifications-svc: transfer emails (`transfer.events` → Mailpit)
 
-Третий консьюмер (`runTransferEventsConsumer`, та же группа `notifications-svc`, свой ридер на топик `transfer.events`) превращает три типа событий в четыре письма через Mailpit. Отправка — тот же подход, что в auth-svc: stdlib `net/smtp`, `Auth = nil`, тело собирается `fmt.Sprintf`, никакого шаблонизатора; env `SMTP_ADDR`/`SMTP_FROM` с теми же дефолтами (`mailpit:1025`, `noreply@neobank.local`), так что оба сервиса кладут почту в один ящик. Переход на Brevo/SES — смена этих значений и добавление `smtp.Auth`, а не переписывание логики выше.
+A third consumer (`runTransferEventsConsumer`, the same `notifications-svc` group, its own reader on the `transfer.events` topic) turns three event types into four kinds of email through Mailpit. Sending uses the same approach as auth-svc: the stdlib `net/smtp`, `Auth = nil`, the body built with `fmt.Sprintf`, no templating engine; the `SMTP_ADDR`/`SMTP_FROM` env vars share the same defaults (`mailpit:1025`, `noreply@neobank.local`), so both services drop mail into the same mailbox. Moving to Brevo/SES means changing these values and adding `smtp.Auth`, not rewriting the logic above.
 
-### Кому и о чём: три события — четыре письма
+### Who gets what: three events — four emails
 
-У перевода две стороны, и они узнают о разном:
+A transfer has two sides, and they learn about different things:
 
-| Событие | Отправителю | Получателю |
+| Event | To the sender | To the recipient |
 |---|---|---|
-| `TransferCompleted` | «transfer sent» | «transfer received» |
-| `TransferFailed` | «transfer failed» | — |
-| `TransferRejected` | «transfer declined» | — |
+| `TransferCompleted` | "transfer sent" | "transfer received" |
+| `TransferFailed` | "transfer failed" | — |
+| `TransferRejected` | "transfer declined" | — |
 
-`TransferCompleted` — единственное событие, порождающее **два** письма: деньги ушли у одного и пришли к другому, оба факта адресату интересны. `TransferFailed` и `TransferRejected` означают, что денег не двигалось вовсе, — получателю не о чем знать, и его контакт даже не резолвится (лишний запрос плюс лишнее ожидание проекции ради адреса, который будет выброшен). Это же согласуется с решением спринта 7: получатель не видит чужие неуспешные переводы.
+`TransferCompleted` is the only event that produces **two** emails: money left one side and arrived at the other, and both facts matter to their respective recipient. `TransferFailed` and `TransferRejected` mean no money ever moved — there's nothing for the recipient to know about, and their contact isn't even resolved (an extra request plus extra waiting on the projection for an address that would just get thrown away). This also matches sprint 7's decision: a recipient never sees someone else's failed transfers.
 
-События несут только `sender_account_id`/`recipient_account_id` (UUID) — ни email, ни номера счёта. Адрес берётся из собственной проекции `user_contacts` по `account_id`; ради номера счёта в миграции `000003` добавлена колонка `account_number` (`AccountCreated` нёс её на wire всегда, но до этого спринта не персистилась).
+Events carry only `sender_account_id`/`recipient_account_id` (UUIDs) — no email, no account number. The address comes from the service's own `user_contacts` projection keyed by `account_id`; for the account number, migration `000003` added an `account_number` column (`AccountCreated` always carried it on the wire, but it went unpersisted before this sprint).
 
-### Чего в письме нет — и почему это не забывчивость
+### What's not in the email — and why that's not an oversight
 
-**В письме про заблокированный фродом перевод нет ни имени правила, ни порога.** `TransferRejected` несёт `triggered_rule`, обработчик его читает — и пишет только в лог. `buildTransferDeclinedEmail` **физически не принимает** такой параметр: назвать правило («velocity_count») или лимит («свыше 5 000.00 за один перевод») значит выдать инструкцию, как остаться под ним. Ровно та же логика, что в UI спринта 6 (`REJECTED_REASON_LABELS` в `TransferForm.tsx` — маппинг без fallback на сырую строку), только письмо ещё и пересылаемо и вечно. Отсутствие параметра — это способ сделать так, чтобы будущая правка не смогла раскрыть правило по невнимательности.
+**The email about a fraud-blocked transfer contains neither the rule's name nor its threshold.** `TransferRejected` carries `triggered_rule`, the handler reads it — and writes it only to the log. `buildTransferDeclinedEmail` **physically doesn't accept** such a parameter: naming the rule ("velocity_count") or the limit ("over €5,000.00 in a single transfer") would hand out instructions on how to stay under it. Exactly the same logic as sprint 6's UI (`REJECTED_REASON_LABELS` in `TransferForm.tsx` — a mapping with no fallback to the raw string), except an email is also forwardable and permanent. The missing parameter is what guarantees a future edit can't accidentally leak the rule.
 
-**В письме получателю нет ни email отправителя, ни чьего-либо баланса** — `buildTransferReceivedEmail` не получает ни того, ни другого. Получателю достаточно суммы, ID перевода и номера счёта, с которого пришли деньги.
+**The recipient's email contains neither the sender's email nor anyone's balance** — `buildTransferReceivedEmail` receives neither. The recipient only needs the amount, the transfer ID, and the account number the money came from.
 
-**Коды ошибок ledger'а не показываются сырыми.** `failureReasonSentences` переводит `insufficient_funds` в «There were not enough funds in your account.»; неизвестный код — не строка `Reason: ledger_internal_error`, а отсутствие строки `Reason` вовсе.
+**The ledger's error codes are never shown raw.** `failureReasonSentences` translates `insufficient_funds` into "There were not enough funds in your account."; an unrecognized code gets no `Reason: ledger_internal_error` string — it gets no `Reason` line at all.
 
-### `event_type` в Kafka-заголовке: дискриминатор, которого нет в payload
+### `event_type` in the Kafka header: a discriminator that doesn't exist in the payload
 
-`transfer.events` — первый топик в репозитории с несколькими типами сообщений, и распознать их по телу **невозможно**. `TransferCompleted`, `TransferFailed` и `TransferRejected` совпадают по номерам и типам полей 1–5, а поле 6 — `string` во всех трёх (`ledger_transaction_id` / `reason` / `triggered_rule`). Значит `proto.Unmarshal` любого из них в любой другой **проходит без ошибки**: `TransferFailed`, прочитанный как `TransferCompleted`, тихо кладёт `insufficient_funds` в `LedgerTransactionId`. Это не гипотетическая опасность — это то, что случилось бы при первом же наивном консьюмере.
+`transfer.events` is the first topic in the repo carrying several message types, and telling them apart by body is **impossible**. `TransferCompleted`, `TransferFailed`, and `TransferRejected` share the same field numbers and types for fields 1–5, and field 6 is a `string` in all three (`ledger_transaction_id` / `reason` / `triggered_rule`). That means `proto.Unmarshal` of any one of them into any other **succeeds with no error**: a `TransferFailed` read as a `TransferCompleted` silently ends up with `insufficient_funds` sitting in `LedgerTransactionId`. This isn't a hypothetical danger — it's exactly what would have happened with the first naive consumer written against this topic.
 
-Решение — заголовок, а не поле в proto: `pkg/outbox/relay.go` теперь ставит `Headers: [{event_type: <outbox.event_type>}]`. Колонка `event_type` в outbox-таблице существовала с самого начала и тратилась только на логи; относить её на wire в релее дёшево (три строки в общем пакете), не требует regen protobuf, не трогает ни одного продюсера и не может разойтись с тем, что записано в той же транзакции, что и бизнес-изменение. Заголовок аддитивен — консьюмеры `user.events`/`account.events` его просто не смотрят.
+The fix is a header, not a proto field: `pkg/outbox/relay.go` now sets `Headers: [{event_type: <outbox.event_type>}]`. The `event_type` column has existed in the outbox table from the start and was only ever spent on logs; carrying it onto the wire in the relay is cheap (three lines in the shared package), needs no protobuf regen, touches not a single producer, and can never drift from what was written in the same transaction as the business change. The header is additive — the `user.events`/`account.events` consumers simply never look at it.
 
-`notifications-svc` при этом **не импортирует `pkg/outbox`**: нужна ровно одна строка, а этот пакет — сторона *записи* (положить событие в outbox в одной транзакции с бизнес-изменением и отрелеить), тогда как notifications-svc никакой outbox-таблицей не владеет и ничего не публикует. Чистый консьюмер, зависящий от библиотеки публикации, перевернул бы слои. Литерал продублирован в `kafka.go` и запинен с обеих сторон (`TestHeaderEventType_IsWireContract` в `pkg/outbox`, `TestEventTypeHeader_MatchesProducer` в notifications-svc) — без этого переименование на стороне продюсера просто молча выключило бы письма.
+`notifications-svc`, meanwhile, **does not import `pkg/outbox`**: it needs exactly one string constant, and that package is the *write* side (put an event in the outbox in the same transaction as a business change, and relay it), while notifications-svc owns no outbox table and publishes nothing. A pure consumer depending on the publishing library would invert the layers. The literal is duplicated in `kafka.go` and pinned on both sides (`TestHeaderEventType_IsWireContract` in `pkg/outbox`, `TestEventTypeHeader_MatchesProducer` in notifications-svc) — without that, a rename on the producer side would just silently turn off emails.
 
-Что делает консьюмер с каждым вариантом заголовка (актуально начиная с введения retry/DLQ ниже — раньше «обработчик вернул ошибку» и «обработчик успешен после ретрая» были одним и тем же «не коммитить» без границы попыток):
+What the consumer does for each header case (relevant starting with the retry/DLQ introduced below — before that, "the handler returned an error" and "the handler succeeded after a retry" were both just "don't commit," with no boundary around attempts):
 
-| Заголовок | Действие | Коммит оффсета |
+| Header | Action | Offset commit |
 |---|---|---|
-| известный тип, обработчик успешен (сразу или после ретрая) | письмо(а) + `finishEvent` | да |
-| известный тип, `proto.Unmarshal` падает на каждой попытке | `transferMaxAttempts` ретраев, затем DLQ | да — см. «Ограниченный retry и DLQ» |
-| известный тип, обработчик падает на каждой попытке | `transferMaxAttempts` ретраев, затем DLQ | да — см. ниже |
-| заголовка нет (`""`) | сразу поднимается как ошибка, идёт через тот же retry/DLQ путь (детерминированно неудачный — заголовок не появится ни на одной попытке) | да |
-| неизвестное значение | тот же путь, что и выше | да |
+| known type, handler succeeds (immediately or after a retry) | email(s) + `finishEvent` | yes |
+| known type, `proto.Unmarshal` fails on every attempt | `transferMaxAttempts` retries, then the DLQ | yes — see "Bounded retry and the DLQ" |
+| known type, handler fails on every attempt | `transferMaxAttempts` retries, then the DLQ | yes — see below |
+| no header (`""`) | immediately raised as an error, goes through the same retry/DLQ path (deterministically doomed — the header will never appear on any attempt) | yes |
+| unrecognized value | the same path as above | yes |
 
-У безголового сообщения соблазнительно вытащить `event_id`, распаковав его как `TransferCompleted` (поля 1–5 же совпадают) — не делаем: это ровно та случайная кросс-распаковка, ради устранения которой заголовок и вводился. В DLQ и в лог идут partition и offset, которыми оператор и так полез бы смотреть сообщение.
+For a headerless message it's tempting to pull `event_id` out by unmarshaling it as `TransferCompleted` (fields 1–5 do line up) — we don't: that's exactly the accidental cross-unmarshal the header exists to eliminate. The DLQ and the log instead carry the partition and offset, which is what an operator would reach for to inspect the message anyway.
 
-### Ограниченный retry и DLQ: один сломанный перевод не должен останавливать остальные
+### Bounded retry and the DLQ: one broken transfer shouldn't stop the rest
 
-`handleTransferMessageWithRetry` (`kafka.go`) — граница, которая решает «попробовать ещё раз» или «сдаться и пойти дальше», и именно то, чего не хватало в описанном выше «не коммитить»: `Reader` из `kafka-go` не переспрашивает одно и то же сообщение внутри работающего процесса — `FetchMessage` всегда идёт вперёд независимо от того, закоммичен ли предыдущий оффсет. Раньше это означало, что сообщение N, за которым последовало успешно закоммиченное N+1, терялось молча, как только коммитился более поздний оффсет — не бесконечный retry, не блокировка партиции, а тихая потеря.
+`handleTransferMessageWithRetry` (`kafka.go`) is the boundary that decides "try again" versus "give up and move on," and it's exactly what was missing from the "don't commit" approach described above: `kafka-go`'s `Reader` never re-asks for the same message within a running process — `FetchMessage` always moves forward regardless of whether the previous offset was committed. Before this, that meant message N, followed by a successfully committed N+1, was lost silently the moment the later offset got committed — not an infinite retry, not a blocked partition, just a quiet loss.
 
-Теперь `processTransferMessage` (unmarshal + диспетчеризация + обработчик, одним куском) перевызывается для одного и того же сообщения до `transferMaxAttempts` раз (5) с экспоненциальной задержкой (`transferRetryBaseDelay` = 500 мс, удваивается, потолок `transferRetryMaxDelay` = 8 с). Повторный вызов безопасен благодаря `claimEvent`: попытка, дошедшая до захвата события, при неудаче оставляет строку барьера в `processing`, а следующая попытка реклеймит ту же строку, а не считает событие уже обработанным — та же политика «дубль важнее потери», что уже применяется к падению во время отправки, теперь покрывает и повторяемый транзиентный сбой.
+Now `processTransferMessage` (unmarshal + dispatch + handler, all as one unit) gets re-invoked for the same message up to `transferMaxAttempts` times (5), with exponential backoff (`transferRetryBaseDelay` = 500ms, doubling, capped at `transferRetryMaxDelay` = 8s). Re-invoking it is safe thanks to `claimEvent`: an attempt that reaches the point of claiming the event leaves the barrier row at `processing` if it then fails, and the next attempt reclaims that same row instead of treating the event as already handled — the same "duplicate beats loss" policy already applied to a crash mid-send now covers a repeatable transient failure too.
 
-Если все попытки исчерпаны — сообщение ядовитое: payload, который никогда не распарсится, адрес, который SMTP отказывается принимать навсегда, или зависимость, недоступная на протяжении всего окна ретраев. Вместо потери (как раньше при ошибке `proto.Unmarshal`) или зависания этой горутины на нём навсегда (блокируя все уведомления за ним), сообщение целиком — тот же ключ, то же значение, те же исходные заголовки — публикуется в `transfer.events.dlq` (`sendToDLQ`) с добавленными заголовками `dlq_reason`/`dlq_source_partition`/`dlq_source_offset`; если `event_id` успел определиться (unmarshal прошёл), строка барьера закрывается как `skipped`; оффсет коммитится. Ничего не теряется — DLQ хранит исходные байты для ручного разбора; `event_id` не всегда есть — у сообщения без заголовка или с нераспознанным типом его получить неоткуда без той самой кросс-распаковки, которую заголовок и должен предотвратить, так что для этих случаев барьерной строки не остаётся вовсе, только запись в DLQ и закоммиченный оффсет.
+If every attempt is exhausted, the message is poison: a payload that will never parse, an address SMTP permanently refuses, or a dependency that stays down for the entire retry window. Instead of it being lost (as an earlier `proto.Unmarshal` failure would have been) or this goroutine hanging on it forever (blocking every notification behind it), the whole message — the same key, the same value, the same original headers — is published to `transfer.events.dlq` (`sendToDLQ`) with `dlq_reason`/`dlq_source_partition`/`dlq_source_offset` headers added; if `event_id` was determined (unmarshal succeeded), the barrier row is closed as `skipped`; the offset commits. Nothing is lost — the DLQ keeps the original bytes for manual inspection; `event_id` isn't always available — a message with no header, or an unrecognized type, has no way to yield one without the exact cross-unmarshal the header exists to prevent, so for these cases no barrier row exists at all, just a DLQ entry and a committed offset.
 
-### Отсутствующий контакт — не ядовитое сообщение
+### A missing contact isn't a poison message
 
-`waitForContactByAccountID` при исчерпании своего ограниченного ожидания (~3 с, `contactWaitAttempts`×`contactWaitDelay`) возвращает `found = false` без ошибки — **не** ошибку, которая попала бы в `handleTransferMessageWithRetry`. Это осознанно: перевод, обогнавший проекцию (`AccountCreated` ещё не обработан), — повод подождать, а не повод считать сообщение битым. Постоянно неразрешимый `account_id` означает сломанную проекцию, а не испорченный payload, и DLQ, созданный для «оператор может починить и переиграть», — не то место, куда это стоит класть. Такое событие по-прежнему коммитится сразу, статус — `sent`/`skipped` в зависимости от того, нашлась ли хотя бы одна сторона (см. таблицу ниже). Битый UUID — другой случай: Postgres отвечает `22P02`, это уже ошибка обработчика, и она корректно уходит в retry/DLQ путь.
+`waitForContactByAccountID`, once its bounded wait is exhausted (~3s, `contactWaitAttempts`×`contactWaitDelay`), returns `found = false` with no error — **not** an error that would land in `handleTransferMessageWithRetry`. This is deliberate: a transfer that outran the projection (`AccountCreated` hasn't been processed yet) is a reason to wait, not a reason to treat the message as broken. A permanently unresolvable `account_id` means a broken projection, not a corrupted payload, and the DLQ — built for "an operator can fix it and replay" — isn't where this belongs. Such an event still commits right away, with a status of `sent`/`skipped` depending on whether at least one side was found (see the table below). A malformed UUID is a different case: Postgres returns `22P02`, which is a genuine handler error, and it correctly falls through the retry/DLQ path.
 
-### Барьер идемпотентности: `processing` → отправка → `sent`
+### The idempotency barrier: `processing` → send → `sent`
 
-Kafka даёт at-least-once, и релей из outbox тоже (публикация идёт до отметки `published_at`) — одно событие может прийти дважды. Но **отправку письма нельзя внести в транзакцию БД**: внешний побочный эффект не откатывается. Exactly-once здесь недостижим в принципе; выбирается только направление ошибки.
+Kafka gives at-least-once, and so does the outbox relay (the publish happens before the `published_at` mark) — one event can arrive twice. But **sending an email can't be folded into a DB transaction**: an external side effect doesn't roll back. Exactly-once is unreachable here in principle; only the direction of the error can be chosen.
 
-`claimEvent` (`contacts.go`) — один атомарный оператор:
+`claimEvent` (`contacts.go`) is a single atomic statement:
 
 ```sql
 INSERT INTO notifications_processed_events (event_id, status)
@@ -2542,104 +2565,104 @@ ON CONFLICT (event_id) DO UPDATE SET status = notifications_processed_events.sta
 RETURNING status
 ```
 
-`DO UPDATE` здесь — намеренный no-op: строке присваивается её же значение. Его единственная задача — заставить `RETURNING` сработать на ветке конфликта; `ON CONFLICT DO NOTHING` возвращает ноль строк и не может сообщить, что там уже лежало. Возвращается пред-существующий статус: `sent`/`skipped` → пропустить, `processing` → работать.
+`DO UPDATE` here is a deliberate no-op: the row is assigned its own existing value. Its only job is to make `RETURNING` fire on the conflict branch; `ON CONFLICT DO NOTHING` returns zero rows and can't report what was already there. The pre-existing status comes back: `sent`/`skipped` → skip, `processing` → do the work.
 
-Почему одним оператором, а не парой `isEventProcessed` + `markEventProcessed`, как у проекционных обработчиков: там побочный эффект — upsert, и гонка между чтением и записью безвредна (сделать дважды = сделать один раз). Здесь побочный эффект — письмо, оно себя не дедуплицирует, поэтому проверка и захват обязаны быть одним оператором.
+Why a single statement instead of a pair like `isEventProcessed` + `markEventProcessed`, the way the projection handlers do it: there the side effect is an upsert, and a race between the read and the write is harmless (doing it twice equals doing it once). Here the side effect is an email — it doesn't deduplicate itself, so the check and the claim have to be one atomic statement.
 
-**`processing` означает «работать» — это выбор, а не запасной вариант.** Падение между возвратом из `smtp.SendMail` и `finishEvent` оставляет строку, которая честно говорит «неизвестно, ушло ли письмо». Повторить — риск дубля; пропустить — риск тишины. Для уведомлений о деньгах второе «вам поступило 25.00 EUR» — лёгкое раздражение, а пропавшее — клиент, который не знает, что деньги пришли. **Дубль важнее потери.**
+**`processing` meaning "go do the work" is a choice, not a fallback.** A crash between returning from `smtp.SendMail` and `finishEvent` leaves a row that honestly says "unknown whether the email went out." Retrying risks a duplicate; skipping risks silence. For money notifications, the former — a second "you received €25.00" — is a minor annoyance; the latter is a customer who never learns money arrived. **A duplicate beats a loss.**
 
-Закрывает событие `finishEvent` — именно `UPDATE`, и подменять его на `markEventProcessed` нельзя: у того `ON CONFLICT DO NOTHING`, строка после `claimEvent` уже существует, и он бы тихо не сделал ничего, оставив `processing` навсегда и превратив каждую переигровку в новый комплект писем. Самый вероятный способ сломать это через полгода, поэтому две функции намеренно оставлены раздельными, а не «объединены».
+`finishEvent` closes out the event — specifically an `UPDATE`, and it can't be swapped for `markEventProcessed`: that one uses `ON CONFLICT DO NOTHING`, and since the row already exists after `claimEvent`, it would silently do nothing, leaving `processing` forever and turning every replay into a fresh batch of emails. The most likely way to break this six months from now, which is why the two functions are deliberately kept separate rather than "merged."
 
-Одного барьер не делает: **не сериализует конкурентные реплики.** Захват воркера A коммитится сразу, воркер B через миллисекунду видит `processing` и тоже идёт работать. Сегодня недостижимо (одна реплика, а Kafka в группе отдаёт партицию одному консьюмеру), но это свойство политики «`processing` → работать», а не SQL, и лучше знать о нём заранее.
+There's one thing the barrier doesn't do: **it doesn't serialize concurrent replicas.** Worker A's claim commits right away; worker B, a millisecond later, sees `processing` and also goes to do the work. Unreachable today (a single replica, and Kafka hands a partition to one consumer per group), but this is a property of the "`processing` → do the work" policy, not the SQL, and it's better to know about it in advance.
 
-### Одна строка барьера на два письма — и что это стоит
+### One barrier row for two emails — and its cost
 
-У `TransferCompleted` два побочных эффекта и **одна** строка в `notifications_processed_events`. Плюс: «обработано ли событие» — один недвусмысленный факт. Минус, честно: строка не отличает «отправлено оба» от «отправлено одно». Падение между двумя письмами оставляет `processing`, и переигровка отправит **оба** — отправитель получит дубль. Это то же направление («дубль важнее потери»), а альтернатива (строка барьера на каждого адресата) обменяла бы его на схему, где «одна строка на событие» уже не выполняется.
+`TransferCompleted` has two side effects and **one** row in `notifications_processed_events`. The upside: "was this event processed" is one unambiguous fact. The honest downside: the row can't tell "both sent" apart from "one sent." A crash between the two emails leaves `processing`, and a replay sends **both** — the sender gets a duplicate. That's the same direction ("a duplicate beats a loss"), and the alternative (a barrier row per recipient) would trade it for a scheme where "one row per event" no longer holds.
 
-Отправителю пишем первым — он инициатор и ждёт подтверждения, так что если из двух писем успеет уйти одно, пусть это будет его.
+The sender is emailed first — they're the initiator waiting for confirmation, so if only one of the two emails manages to go out, it should be theirs.
 
-### Порядок с оффсетом: одна попытка против всех пяти
+### Ordering with the offset: one attempt versus all five
 
-Оффсет коммитится **после** обработки, не до, — иначе падение до отправки потеряло бы событие безвозвратно. Раньше (до retry/DLQ) «не коммитить» на деле означало почти ничего — `Reader` из `kafka-go` не переспрашивает одно сообщение внутри процесса, `FetchMessage` всегда идёт вперёд, так что непрокоммиченное сообщение просто терялось, как только коммитился более поздний оффсет. Теперь у каждого сообщения есть настоящая граница попыток — `transferMaxAttempts` (5) внутри `handleTransferMessageWithRetry`, — и коммит происходит либо когда одна из попыток дошла до `finishEvent`, либо когда все попытки исчерпаны и сообщение ушло в DLQ. Разница между «одна попытка» и «все пять» — вот что определяет письма и статус строки барьера:
+The offset commits **after** processing, not before — otherwise a crash before sending would lose the event for good. Before retry/DLQ existed, "don't commit" effectively meant almost nothing — `kafka-go`'s `Reader` never re-asks for a message within the process, `FetchMessage` always moves forward, so an uncommitted message was simply lost the moment a later offset got committed. Now every message has a real boundary around its attempts — `transferMaxAttempts` (5) inside `handleTransferMessageWithRetry` — and the commit happens either once one of those attempts reaches `finishEvent`, or once every attempt is exhausted and the message has gone to the DLQ. The difference between "one attempt" and "all five" is what determines the emails and the barrier row's status:
 
-| Ситуация | Письма | Строка барьера | Коммит |
+| Situation | Emails | Barrier row | Commit |
 |---|---|---|---|
-| SMTP лежит на попытке №k, k < 5 | нет (пока) | `processing` | нет — следующая попытка через `transferRetryDelay(k)` |
-| SMTP лежит на всех 5 попытках | нет | `skipped` (закрыта после DLQ) | да — событие в `transfer.events.dlq` |
-| SMTP моргнул, какая-то попытка прошла | есть | `sent` | да |
-| Письмо №1 ушло, №2 упало, retry исчерпан | одно (дубль возможен при последующем ретрае) | `skipped` (закрыта после DLQ) | да |
-| Контакт не нашёлся за ~3 с | что резолвилось | `sent` / `skipped` | **да**, сразу — не ошибка, не входит в retry/DLQ (см. «Отсутствующий контакт» выше) |
-| Ошибка Postgres на поиске контакта (битый UUID, `22P02`) | нет (пока) | `processing` | нет — тот же retry/DLQ путь, что и SMTP |
-| `claimEvent` вернул `sent`/`skipped` | нет | не меняется | да — штатная ветка переигровки |
+| SMTP is down on attempt #k, k < 5 | none (yet) | `processing` | no — the next attempt fires after `transferRetryDelay(k)` |
+| SMTP is down on all 5 attempts | none | `skipped` (closed after the DLQ) | yes — the event goes to `transfer.events.dlq` |
+| SMTP blinked, some attempt succeeded | sent | `sent` | yes |
+| Email #1 went out, #2 failed, retries exhausted | one (a duplicate is possible on a later retry) | `skipped` (closed after the DLQ) | yes |
+| Contact not found within ~3s | whatever resolved | `sent` / `skipped` | **yes**, immediately — not an error, doesn't enter retry/DLQ (see "A missing contact" above) |
+| A Postgres error looking up the contact (a malformed UUID, `22P02`) | none (yet) | `processing` | no — the same retry/DLQ path as SMTP |
+| `claimEvent` returned `sent`/`skipped` | none | unchanged | yes — the ordinary replay branch |
 
-Ненайденный контакт коммитится осознанно, как и раньше: любой счёт в системе создаётся accounts-svc в ответ на `UserActivated`, поэтому вечно неразрешимый `account_id` означает сломанную проекцию, а не «внешний счёт», — и это ровно то, что «Отсутствующий контакт — не ядовитое сообщение» выше объясняет подробнее. Если из двух сторон нашлась одна — письмо уходит ей (у получателя просто исчезает строка *From account*), статус `sent`; если ни одной — писем нет, статус `skipped`, то есть «решили не отправлять», а не «не смогли».
+An unresolved contact commits deliberately, same as before: every account in the system is created by accounts-svc in response to `UserActivated`, so a permanently unresolvable `account_id` means a broken projection, not "an external account" — exactly what "A missing contact isn't a poison message" above explains in more detail. If one of the two sides was found, the email goes out to them (the recipient's email simply loses its *From account* line), status `sent`; if neither was found, no emails go out at all, status `skipped`, meaning "chose not to send," not "couldn't."
 
-### Почему `LastOffset`, а не `FirstOffset`
+### Why `LastOffset`, not `FirstOffset`
 
-Самая дорогая ошибка этого спринта была бы в одной строке конфигурации ридера. Ридеры разделены по намерению:
+The most expensive mistake of this sprint would have lived in a single line of reader config. The readers are split by intent:
 
-- `newProjectionReader` (`user.events`, `account.events`) — `FirstOffset`. `user_contacts` — это состояние: переигровка компактного лога пересобирает его, повторный upsert ничего не стоит.
-- `newNotificationReader` (`transfer.events`) — **`LastOffset`, и иначе нельзя.** Топик не компактится, живёт по обычному time-retention и копится с 5-го спринта. `FirstOffset` на новой группе переиграл бы всю историю, и барьер идемпотентности не остановил бы **ни одного** события: в `notifications_processed_events` нет строк на те `event_id`. Каждый пользователь получил бы письмо про каждый свой перевод за недели, по два на каждый успешный. Письмо — побочный эффект во внешнем мире, а не обновление состояния: «пересобрать» его нельзя, и история — ровно то, что переигрывать НЕ надо.
+- `newProjectionReader` (`user.events`, `account.events`) — `FirstOffset`. `user_contacts` is state: replaying a compacted log rebuilds it, and a repeat upsert costs nothing.
+- `newNotificationReader` (`transfer.events`) — **`LastOffset`, and it can't be anything else.** This topic isn't compacted, runs on ordinary time-based retention, and has been accumulating since sprint 5. `FirstOffset` on a new group would replay the entire history, and the idempotency barrier wouldn't stop **a single one** of those events: `notifications_processed_events` has no rows for those `event_id`s. Every user would get an email for every transfer of theirs from weeks back, two for every successful one. An email is a side effect out in the real world, not a state update: it can't be "rebuilt," and history is exactly what must NOT be replayed.
 
-`StartOffset` действует только пока у группы нет закоммиченного оффсета на партиции, так что после первого старта это ничего не стоит — краш, рестарт и ручной сброс оффсета одинаково продолжают с закоммиченного места. Цена — ровно один пропуск: перевод, завершившийся во время самого первого запуска, до первого коммита, письма не получит. Один раз, на одном деплое, в обмен на неразосланный спам по всей истории на том же деплое.
+`StartOffset` only takes effect while the group has no committed offset on the partition, so after the first startup it costs nothing — a crash, a restart, and a manual offset reset all resume from the committed position identically. The cost is exactly one skip: a transfer that completed during the very first run, before the first commit, gets no email. Once, on one deploy, in exchange for never spamming an entire history's worth of emails on that same deploy.
 
-### `transfer.events` — `delete`, а не `compact`
+### `transfer.events` — `delete`, not `compact`
 
-`kafka-init` теперь создаёт и `transfer.events`, с `cleanup.policy=delete` — брокерским дефолтом, записанным явно, потому что альтернатива здесь активно неверна. Ключ этого топика — `sender_account_id`, и компакция хранила бы только **последнее** событие на отправителя, молча выбросив всю остальную его историю переводов. `user.events`/`account.events` компактятся именно потому, что они — снимки состояния по `user_id`; `transfer.events` — лог дискретных фактов, и компакция на нём была бы потерей данных, переодетой в политику хранения.
+`kafka-init` now creates `transfer.events` too, with `cleanup.policy=delete` — the broker's default, written explicitly, because the alternative here is actively wrong. This topic's key is `sender_account_id`, and compaction would only keep the **last** event per sender, silently discarding the rest of their transfer history. `user.events`/`account.events` get compacted precisely because they're state snapshots keyed by `user_id`; `transfer.events` is a log of discrete facts, and compacting it would be data loss dressed up as a retention policy.
 
-Предсоздавать, а не полагаться на авто-создание, нужно ещё и потому, что `depends_on: kafka-init` у notifications-svc до этого покрывал два топика из трёх: на свежем стеке, где ещё не было ни одного перевода, третий ридер упирался бы в несуществующий топик, а путь ошибки `FetchMessage` — цикл без паузы. Заодно добавлен `fetchErrorBackoff` (1 с) во все три цикла на остаточные случаи вроде рестарта брокера.
+Pre-creating it instead of relying on auto-creation is also needed because `depends_on: kafka-init` on notifications-svc previously only covered two topics out of three: on a fresh stack with not a single transfer yet, the third reader would hit a nonexistent topic, and `FetchMessage`'s error path was a tight loop with no pause. `fetchErrorBackoff` (1s) was added to all three loops at the same time, for residual cases like a broker restart.
 
-### Формат суммы
+### Amount formatting
 
-`formatMinorUnits` — зеркало `frontend/src/features/accounts/money.ts`: `abs/100` и `abs%100` целочисленно (никогда не `float64(minorUnits)/100`), ручная группировка тысяч, ровно два знака. `123456` → `1,234.56`. Одно отличие — **без символа валюты**: `" EUR"` приписывает `formatAmount`, потому что `€` не ASCII, а все письма ASCII-only — это и позволяет не ставить MIME charset-заголовок, ровно как в письмах auth-svc. Предпосылка проверяется тестом, а не подразумевается.
+`formatMinorUnits` mirrors `frontend/src/features/accounts/money.ts`: `abs/100` and `abs%100` as integer math (never `float64(minorUnits)/100`), manual thousands grouping, exactly two decimal places. `123456` → `1,234.56`. One difference — **no currency symbol**: `formatAmount` appends `" EUR"`, because `€` isn't ASCII, and every email here is ASCII-only — that's exactly what lets it skip a MIME charset header, the same as auth-svc's emails. That assumption is checked by a test, not just assumed.
 
-### Проверка вручную
+### Manual verification
 
-Полный прогон DoD. Пересобрать нужно и transfers-svc — релей, ставящий заголовок, живёт в его процессе:
+A full DoD run-through. transfers-svc needs rebuilding too — the relay that sets the header lives in its process:
 
 ```bash
 docker compose up -d --build
-# зарегистрировать и подтвердить alice@example.com и bob@example.com,
-# пополнить счёт alice (см. «Dev-инструменты»)
+# register and verify alice@example.com and bob@example.com,
+# top up alice's account (see "Dev tools")
 
-# 1. Успешный перевод между двумя пользователями → ДВА письма
+# 1. A successful transfer between two users → TWO emails
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_iban":"<IBAN bob>","amount":123456}'
+  -d '{"recipient_iban":"<Bob's IBAN>","amount":123456}'
 
 curl -s http://localhost:8025/api/v1/messages \
   | jq -r '.total, (.messages[] | "\(.To[0].Address)  \(.Subject)")'
 # 2
 # bob@example.com    Neo-Bank: transfer received
 # alice@example.com  Neo-Bank: transfer sent
-#   в обоих телах — 1,234.56 EUR; у alice строка "To account", у bob — "From account"
+#   both bodies show 1,234.56 EUR; alice's has a "To account" line, bob's has "From account"
 
-# 2. Заблокированный фродом → ОДНО письмо отправителю, без раскрытия правила
+# 2. Fraud-blocked → ONE email to the sender, with no rule disclosed
 curl -s -X DELETE http://localhost:8025/api/v1/messages
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_iban":"<IBAN bob>","amount":600000}'
-# {"status":"rejected","failure_reason":"amount_threshold"}  <- API говорит; письмо не должно
+  -d '{"recipient_iban":"<Bob's IBAN>","amount":600000}'
+# {"status":"rejected","failure_reason":"amount_threshold"}  <- the API says this; the email shouldn't
 
 curl -s http://localhost:8025/api/v1/messages | jq -r '.total, (.messages[]|.To[0].Address)'
 # 1
-# alice@example.com          <- получателю не пришло ничего
+# alice@example.com          <- the recipient got nothing
 
 curl -s "http://localhost:8025/api/v1/message/<ID>" | jq -r .Text \
   | grep -Ei 'amount_threshold|velocity|500000|threshold|limit'
-# (пусто — ни имени правила, ни порога)
+# (empty — neither the rule's name nor its threshold)
 ```
 
-Тест redelivery — новых писем нет, строка одна и `sent`:
+A redelivery test — no new emails, one row, still `sent`:
 
 ```bash
 docker compose exec postgres psql -U neobank -d neobank \
   -c "SELECT event_id, status FROM notifications_processed_events ORDER BY processed_at DESC LIMIT 3;"
-#  <uuid успешного перевода> | sent
-#   ^ ОДНА строка, несмотря на ДВА отправленных письма
+#  <the successful transfer's uuid> | sent
+#   ^ ONE row, despite TWO emails having been sent
 
 curl -s -X DELETE http://localhost:8025/api/v1/messages
-docker compose stop notifications-svc          # группа должна быть неактивна для сброса
+docker compose stop notifications-svc          # the group must be inactive to reset
 docker compose exec kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --group notifications-svc --topic transfer.events --reset-offsets --shift-by -2 --execute
 docker compose start notifications-svc
@@ -2647,28 +2670,28 @@ docker compose logs -f notifications-svc
 # notifications-svc: event <uuid> already handled, skipping (redelivery)
 
 curl -s http://localhost:8025/api/v1/messages | jq .total
-# 0                                            <- новых писем нет
+# 0                                            <- no new emails
 
 docker compose exec postgres psql -U neobank -d neobank \
   -c "SELECT count(*) FROM notifications_processed_events WHERE event_id = '<uuid>';"
 #  1
 docker compose exec kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --group notifications-svc
-#  LAG 0 на всех трёх топиках — переигровка закоммитилась, ничего не застряло
+#  LAG 0 on all three topics — the replay committed, nothing got stuck
 ```
 
-`--shift-by -2`, а не `--to-earliest`: у ридера `transfer.events` старт `LastOffset`, и сброс в начало переиграл бы всю историю топика — ровно то, чего этот старт и избегает.
+`--shift-by -2`, not `--to-earliest`: the `transfer.events` reader starts at `LastOffset`, and resetting to the beginning would replay the topic's entire history — exactly what that starting point exists to avoid.
 
-Опционально, «SMTP лежит на протяжении всего окна ретраев» — теперь заканчивается в DLQ, а не зависает в `processing`:
+Optionally, "SMTP is down for the entire retry window" — now ends up in the DLQ instead of hanging in `processing`:
 
 ```bash
 docker compose stop mailpit
-# сделать перевод → в логе: sendEmailWithRetry (3 попытки), затем 5 попыток
-# handleTransferMessageWithRetry с растущей паузой (500мс, 1с, 2с, 4с),
-# затем "giving up ... sending to transfer.events.dlq"
+# make a transfer → in the log: sendEmailWithRetry (3 attempts), then 5 attempts
+# of handleTransferMessageWithRetry with growing pauses (500ms, 1s, 2s, 4s),
+# then "giving up ... sending to transfer.events.dlq"
 docker compose exec postgres psql -U neobank -d neobank \
   -c "SELECT event_id, status FROM notifications_processed_events WHERE status = 'skipped' ORDER BY processed_at DESC LIMIT 1;"
-#  ^ не 'processing' — строка закрыта после DLQ, честно (мы не отправили, а не "не знаем")
+#  ^ not 'processing' — the row is closed after the DLQ, honestly (we didn't send it, not "we don't know")
 
 docker compose exec kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic transfer.events.dlq --from-beginning --max-messages 1 \
@@ -2678,13 +2701,13 @@ docker compose exec kafka kafka-console-consumer.sh --bootstrap-server localhost
 docker compose start mailpit
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_iban":"<IBAN bob>","amount":1000}'
+  -d '{"recipient_iban":"<Bob's IBAN>","amount":1000}'
 curl -s http://localhost:8025/api/v1/messages | jq .total
-#  ^ следующий перевод дошёл нормально — партиция не заблокирована предыдущим,
-#    ушедшим в DLQ
+#  ^ the next transfer went through fine — the partition isn't blocked by the
+#    earlier one that went to the DLQ
 ```
 
-**Про dev-данные:** у контактов, слинкованных до миграции `000003`, `account_number` остаётся `NULL`, и письмо просто опускает строку со счётом. Сброс оффсета сам по себе не бэкфиллит: строки барьера на те `AccountCreated` уже есть, и каждое переигранное событие короткозамкнётся. Либо `docker compose down -v`, либо (dev-only, вручную — не кодом):
+**On dev data:** for contacts linked before migration `000003`, `account_number` stays `NULL`, and the email simply omits the account line. An offset reset alone doesn't backfill it: barrier rows for those `AccountCreated` events already exist, and every replayed event short-circuits. Either `docker compose down -v`, or (dev-only, by hand — not through code):
 
 ```bash
 docker compose stop notifications-svc
@@ -2693,39 +2716,39 @@ docker compose exec postgres psql -U neobank -d neobank -c \
 docker compose exec kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --group notifications-svc --topic account.events --reset-offsets --to-earliest --execute
 docker compose start notifications-svc
-# account.events компактится, так что переигровка доставит последнее AccountCreated на пользователя
+# account.events is compacted, so the replay delivers the last AccountCreated per user
 ```
 
-Проще всего демонстрировать на свежих пользователях. Кросс-сервисный `UPDATE user_contacts ... FROM accounts` технически возможен (одна физическая база) и отвергается осознанно: notifications-svc не читает чужие таблицы.
+Easiest to demonstrate with fresh users. A cross-service `UPDATE user_contacts ... FROM accounts` is technically possible (one physical database) and deliberately rejected: notifications-svc doesn't read other services' tables.
 
-### Тесты
+### Tests
 
-`services/notifications-svc/money_test.go` — таблица против семантики `money.ts` (`0` → `0.00`, `5` → `0.05`, `123456` → `1,234.56`, `100000000` → `1,000,000.00`, `-2550` → `-25.50`) плюс проверка ASCII, на которой держится отсутствие charset-заголовка.
+`services/notifications-svc/money_test.go` — a table against `money.ts`'s semantics (`0` → `0.00`, `5` → `0.05`, `123456` → `1,234.56`, `100000000` → `1,000,000.00`, `-2550` → `-25.50`) plus an ASCII check, which is what the missing charset header relies on.
 
-`services/notifications-svc/email_test.go` — здесь требования спринта становятся исполняемыми: в теле declined-письма нет ни `amount_threshold`/`velocity_count`/`velocity_sum`, ни слов `threshold`/`limit`/`rule`, ни цифр порогов; в received-письме нет `@` (то есть ничьего email) и слова `balance`, есть номер счёта отправителя, и строка *From account* исчезает целиком при пустом номере; failed-письмо рендерит каждый известный код как фразу и опускает строку `Reason` для неизвестного, не показывая сырой токен; у зануленного `occurred_at` не появляется дата `1970`.
+`services/notifications-svc/email_test.go` — this is where the sprint's requirements become executable checks: a declined email's body contains none of `amount_threshold`/`velocity_count`/`velocity_sum`, none of the words `threshold`/`limit`/`rule`, no threshold numbers; a received email contains no `@` (i.e. nobody's email) and no word `balance`, does have the sender's account number, and the *From account* line disappears entirely when the number is empty; a failed email renders every known code as a sentence and omits the `Reason` line for an unknown one, never showing the raw token; a zeroed `occurred_at` never produces a `1970` date.
 
-`services/notifications-svc/kafka_test.go` — `eventTypeOf` (есть / нет / пустое значение / неверный регистр / дубликаты ключей → первый), и пиннинг обоих наборов литералов wire-контракта.
+`services/notifications-svc/kafka_test.go` — `eventTypeOf` (present / absent / empty value / wrong case / duplicate keys → first one wins), and pinning both sets of wire-contract literals.
 
-`services/notifications-svc/dlq_test.go` — без БД: `transferRetryDelay` (рост и потолок), `sendToDLQ` (ключ/значение/оригинальные заголовки сохраняются, `dlq_reason`/`dlq_source_partition`/`dlq_source_offset` добавляются, через фейковый `kafkaMessageWriter`), и три ядовитых ветки `processTransferMessage` (нет заголовка, неизвестный тип, `proto.Unmarshal` падает) — все три не трогают `pool`, поэтому тестируются с `nil` без БД.
+`services/notifications-svc/dlq_test.go` — no DB needed: `transferRetryDelay` (growth and cap), `sendToDLQ` (key/value/original headers preserved, `dlq_reason`/`dlq_source_partition`/`dlq_source_offset` added, via a fake `kafkaMessageWriter`), and three poison branches of `processTransferMessage` (no header, unrecognized type, `proto.Unmarshal` fails) — none of the three ever touch `pool`, so they're tested with `nil` and no DB.
 
-`services/notifications-svc/contacts_test.go` — под живой базой (`t.Skip` без `DATABASE_URL`, конвенция из `pkg/outbox`): жизненный цикл `claimEvent` — первый вызов `true`; **второй тоже `true`** на строке, оставленной в `processing` (политика восстановления после падения проверяется, а не предполагается); после `finishEvent(sent)` и `finishEvent(skipped)` — `false`; три захвата подряд + `finishEvent` оставляют ровно одну строку. Плюс `getContactByAccountID`: hit, miss, и `account_number IS NULL` → `""`.
+`services/notifications-svc/contacts_test.go` — against a live database (`t.Skip` with no `DATABASE_URL`, the convention from `pkg/outbox`): `claimEvent`'s lifecycle — the first call returns `true`; **so does the second**, on a row left at `processing` (the crash-recovery policy is verified, not assumed); after `finishEvent(sent)` and `finishEvent(skipped)` — `false`; three claims in a row plus a `finishEvent` leave exactly one row. Plus `getContactByAccountID`: hit, miss, and `account_number IS NULL` → `""`.
 
-`pkg/outbox/relay_test.go` — `TestRelayBatch_StampsEventTypeHeader` (заголовок доезжает до сообщения, ровно один, со значением из колонки) и `TestHeaderEventType_IsWireContract`.
+`pkg/outbox/relay_test.go` — `TestRelayBatch_StampsEventTypeHeader` (the header reaches the message, exactly once, with the value from the column) and `TestHeaderEventType_IsWireContract`.
 
 ```bash
 DATABASE_URL="postgres://neobank:neobank_dev_password@localhost:5432/neobank?sslmode=disable" \
   go test ./services/notifications-svc/... ./pkg/outbox/... -v
 ```
 
-## notifications-svc: устойчивость консьюмера
+## notifications-svc: consumer resilience
 
-Retry/DLQ (выше) отвечает на «одно сообщение не должно останавливать остальные». Здесь — три смежных вопроса: видно ли снаружи, что консьюмер отстаёт или упал; не теряет ли рестарт сообщение, которое как раз обрабатывалось; и говорит ли `/healthz` правду.
+Retry/DLQ (above) answers "one message shouldn't stop the rest." Here are three related questions: is it visible from the outside when a consumer falls behind or dies; does a restart lose a message that was mid-processing; and does `/healthz` actually tell the truth.
 
-### Лаг консьюмеров
+### Consumer lag
 
-`monitorConsumers` (`kafka.go`) раз в `consumerLagLogInterval` (30 с) логирует лаг каждого из трёх ридеров — `reader.Stats().Lag`, посчитанный самим `kafka-go` из high water mark партиции на каждом fetch. Не `Reader.Lag()` (тот возвращает `-1` в режиме consumer-group, а у всех трёх ридеров здесь есть `GroupID`) — именно `Stats().Lag`, которая по коду `kafka-go` обновляется независимо от режима. Без этого «письма не приходят» неотличимо снаружи от «никто не переводил деньги»: оба выглядят как тишина в Mailpit. Лаг — то, что их различает.
+`monitorConsumers` (`kafka.go`) logs each of the three readers' lag once every `consumerLagLogInterval` (30s) — `reader.Stats().Lag`, computed by `kafka-go` itself from the partition's high water mark on every fetch. Not `Reader.Lag()` (that returns `-1` in consumer-group mode, and all three readers here have a `GroupID`) — specifically `Stats().Lag`, which per `kafka-go`'s own code updates regardless of mode. Without this, "emails aren't arriving" is indistinguishable from the outside from "nobody's been transferring money": both look like silence in Mailpit. Lag is what tells them apart.
 
-Те же числа продублированы в `/healthz` (`consumer_lag`, ключ — имя топика), а не только в логе — обе формы годятся по условиям задачи («логов и простой метрики» достаточно, Prometheus/Grafana — вне скоупа), и раз число уже посчитано для лога, отдать его же в JSON почти бесплатно. `consumerHealth` в `/healthz` (следующий раздел) обновляется отдельным циклом, не этим — `Stats()` оказалась неподходящим сигналом для здоровья, хотя для лага она справляется отлично.
+The same numbers are duplicated in `/healthz` (`consumer_lag`, keyed by topic name), not just the log — both forms satisfy the task's requirements ("logs and a simple metric" is enough, Prometheus/Grafana are out of scope), and since the number is already computed for the log, handing it out in JSON too is nearly free. `consumerHealth` in `/healthz` (next section) is updated by a separate loop, not this one — `Stats()` turned out to be the wrong signal for health, even though it works perfectly for lag.
 
 ```bash
 docker compose logs notifications-svc | grep 'consumer lag'
@@ -2737,393 +2760,393 @@ curl -s http://localhost:8086/healthz | jq .consumer_lag
 # {"user.events": 0, "account.events": 0, "transfer.events": 0}
 ```
 
-### Graceful shutdown: SIGTERM дообрабатывает текущее сообщение
+### Graceful shutdown: SIGTERM finishes the message it's mid-processing
 
-До этого шага ни один Kafka-консьюмер в репозитории не завершался иначе, чем убийством процесса — `context.Background()` из `main()`, без обработки сигналов, паттерн, явно описанный (и здесь впервые нарушенный) в разделе Reconciliation выше. `notifications-svc` теперь первое исключение.
+Before this step, not one Kafka consumer in the repo ever shut down any way other than the process being killed — `context.Background()` from `main()`, no signal handling, the exact pattern described (and, here, broken for the first time) in the Reconciliation section above. `notifications-svc` is now the first exception.
 
-`main()` берёт `ctx` из `signal.NotifyContext(..., syscall.SIGINT, syscall.SIGTERM)` и передаёт его каждому консьюмеру как `fetchCtx` — контекст, на котором блокируется `FetchMessage`. Отмена контекста расталкивает ридер, если тот простаивает в ожидании следующего сообщения, и горутина завершается, не начиная новую работу. Но сообщение, уже полученное из `FetchMessage` в момент отмены, обрабатывается на **отдельном** `context.Background()`, а не на `fetchCtx` — иначе SIGTERM мог бы оборвать `sendEmailWithRetry`/`claimEvent` на середине, и сообщение осталось бы ни закоммиченным, ни по-настоящему обработанным. Это и значит «дообработать текущее сообщение»: граница — по сообщению, не по горутине. В `runTransferEventsConsumer` та же логика вдобавок покрывает всю цепочку ретраев из `handleTransferMessageWithRetry` — SIGTERM посреди третьей из пяти попыток не обрывает её, а даёт довести до конца (успеха, следующей попытки или DLQ).
+`main()` takes a `ctx` from `signal.NotifyContext(..., syscall.SIGINT, syscall.SIGTERM)` and passes it to every consumer as `fetchCtx` — the context `FetchMessage` blocks on. Canceling the context unblocks a reader that's idling while waiting for the next message, and its goroutine exits without starting new work. But a message already pulled from `FetchMessage` at the moment of cancellation is processed on a **separate** `context.Background()`, not `fetchCtx` — otherwise SIGTERM could cut `sendEmailWithRetry`/`claimEvent` off halfway through, leaving the message neither committed nor genuinely processed. That's exactly what "finish the current message" means: the boundary runs per message, not per goroutine. In `runTransferEventsConsumer`, the same logic additionally covers the whole retry chain in `handleTransferMessageWithRetry` — a SIGTERM in the middle of attempt three of five doesn't cut it off, it lets it run to completion (success, the next attempt, or the DLQ).
 
-HTTP-сервер (`http.Server` вместо голого `http.ListenAndServe`) останавливается тем же сигналом через `srv.Shutdown` с отдельным таймаутом (`shutdownTimeout`, 10 с) — это не связано с Kafka-частью и ограничено по времени специально, в отличие от консьюмеров. `main()` дожидается всех трёх консьюмерных горутин через `sync.WaitGroup` **без** таймаута: обрезать это дедлайном воспроизвело бы ту самую проблему, которую graceful shutdown должен убрать.
+The HTTP server (`http.Server` instead of a bare `http.ListenAndServe`) stops on the same signal via `srv.Shutdown` with its own timeout (`shutdownTimeout`, 10s) — unrelated to the Kafka side and deliberately time-bounded, unlike the consumers. `main()` waits for all three consumer goroutines via a `sync.WaitGroup` with **no** timeout: cutting that off with a deadline would just reproduce the exact problem graceful shutdown is supposed to remove.
 
-Это создаёт зависимость от внешнего таймаута, который код не контролирует: если SMTP лежит на протяжении всей серии ретраев, дренаж одного сообщения может занять больше, чем стандартные 10 секунд, которые Docker/Kubernetes ждут между SIGTERM и SIGKILL. `docker-compose.yml` поэтому задаёт `stop_grace_period: 60s` для `notifications-svc` — с запасом относительно `transferMaxAttempts` попыток и пауз между ними. Если SIGKILL всё же случится раньше (проверено вручную ниже, с намеренно коротким `--timeout 30` при недоступном Mailpit) — это не потеря данных: сообщение остаётся незакоммиченным и `processing`, `claimEvent` реклеймит его на следующем старте — тем же путём, каким уже восстанавливается обычный краш. Щедрый grace period — это то, что превращает этот путь из «единственного» в «редкий, для внешнего SIGKILL», а не гарантия сама по себе.
+This creates a dependency on an external timeout the code doesn't control: if SMTP is down for the entire retry sequence, draining one message can take longer than the standard 10 seconds Docker/Kubernetes wait between SIGTERM and SIGKILL. `docker-compose.yml` therefore sets `stop_grace_period: 60s` for `notifications-svc` — with room to spare relative to `transferMaxAttempts` attempts and the pauses between them. If a SIGKILL happens sooner anyway (manually verified below, with a deliberately short `--timeout 30` while Mailpit is down), that's not data loss: the message stays uncommitted and `processing`, and `claimEvent` reclaims it on the next startup — the same path that already recovers from an ordinary crash. The generous grace period is what turns this path from "the only one" into "rare, for an external SIGKILL," not a guarantee on its own.
 
 ```bash
-docker compose stop mailpit                   # чтобы гарантированно поймать сообщение в процессе ретраев
+docker compose stop mailpit                   # to reliably catch a message mid-retry
 curl -s -X POST http://localhost:8080/transfers \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"recipient_iban":"<IBAN bob>","amount":1000}'
+  -d '{"recipient_iban":"<Bob's IBAN>","amount":1000}'
 docker compose stop --timeout 30 notifications-svc
 docker compose logs notifications-svc | tail -20
 # notifications-svc: shutdown signal received, draining in-flight work
 # notifications-svc: transfer.events: attempt N/5 failed ...
 # notifications-svc: waiting for consumers to finish their current message
-# ... (ретраи или DLQ доводятся до конца, ЗАТЕМ)
+# ... (retries or the DLQ run to completion, THEN)
 # notifications-svc: shutdown complete
 docker compose start mailpit notifications-svc
 ```
 
-### `/healthz`: честная связь с Kafka, не только «процесс жив»
+### `/healthz`: an honest read on Kafka, not just "the process is alive"
 
-`pkg/health.Handler` (всё ещё используется у gateway) всегда отвечает `200` — он не проверяет вообще ничего, только то, что HTTP-сервер способен ответить. `notifications-svc` теперь, как и `auth-svc`/`accounts-svc`/`transfers-svc`/`fraud-svc`, использует собственный inline-обработчик `GET /healthz` вместо него — но, в отличие от них (там проверяется только `SELECT 1`), здесь ещё и Kafka: `consumerHealth` (`kafka.go`) — один `atomic.Bool` на весь брокер (не по одному на ридер — все три ридера подключаются к одному и тому же списку брокеров, так что «доступна ли Kafka» здесь один факт, а не три). `/healthz` возвращает `503`, если Postgres недоступен **или** брокер сейчас недоступен — раньше сервис бодро отвечал `200`, даже если Kafka была недоступна с самого старта.
+`pkg/health.Handler` (still used by the Gateway) always answers `200` — it checks nothing at all, only that the HTTP server can respond. `notifications-svc` now uses its own inline `GET /healthz` handler instead, like `auth-svc`/`accounts-svc`/`transfers-svc`/`fraud-svc` — but unlike them (which only check `SELECT 1`), this one also checks Kafka: `consumerHealth` (`kafka.go`) is a single `atomic.Bool` for the whole broker (not one per reader — all three readers connect to the same broker list, so "is Kafka reachable" is one fact here, not three). `/healthz` returns `503` if Postgres is unreachable **or** the broker is currently unreachable — previously the service happily answered `200` even if Kafka had been unreachable since startup.
 
-**Флаг обновляет `monitorKafkaHealth` — независимый цикл, который сам раз в `kafkaHealthProbeInterval` (10 с) дозванивается до брокера (`kafka.DialContext`), а не что-то, выведенное из состояния трёх ридеров.** Через это пришлось пройти двумя более простыми путями, и оба не выдержали проверки `docker compose stop/start kafka`:
+**The flag is updated by `monitorKafkaHealth` — an independent loop that itself dials the broker (`kafka.DialContext`) once every `kafkaHealthProbeInterval` (10s), rather than something derived from the three readers' state.** Getting here meant going through two simpler approaches first, neither of which survived a `docker compose stop/start kafka` check:
 
-1. Обновлять флаг прямо в цикле `FetchMessage` (`true` на ошибку фетча, `false` на успешный) — честно в сторону отказа, но не в сторону восстановления: `FetchMessage` не возвращается вообще, пока сообщение не готово, так что у восстановившегося, но бездействующего (нет новых событий) ридера просто нет момента, в который флаг мог бы переключиться обратно. После `docker compose start kafka` `/healthz` оставался `503` сколько угодно долго.
-2. Сравнивать `reader.Stats().Errors` между тиками `monitorConsumers`, в предположении, что `kafka-go` ретраит соединение в фоне независимо от того, заблокирован ли `FetchMessage`, и это должно инкрементить счётчик. Проверка показала обратное: при реальном отключении брокера `Stats().Errors` переставал расти после первых нескольких ошибок при старте, хотя `FetchMessage` продолжал явно логировать `failed to dial` каждые ~25 секунд — этот счётчик покрывает более узкий набор внутренних путей ретрая, чем path, по которому реально идут ошибки дозвона у consumer-group ридера.
+1. Update the flag right inside the `FetchMessage` loop (`true` on a fetch error, `false` on success) — honest about failure, but not about recovery: `FetchMessage` doesn't return at all until a message is ready, so a reader that's recovered but idle (no new events) simply has no moment at which the flag could ever flip back. After `docker compose start kafka`, `/healthz` stayed `503` indefinitely.
+2. Compare `reader.Stats().Errors` between `monitorConsumers` ticks, on the assumption that `kafka-go` retries the connection in the background regardless of whether `FetchMessage` is blocked, and that this would increment the counter. Verification showed the opposite: with the broker genuinely down, `Stats().Errors` stopped growing after the first few startup errors, even though `FetchMessage` kept explicitly logging `failed to dial` every ~25 seconds — this counter covers a narrower set of internal retry paths than the one a consumer-group reader's dial errors actually travel through.
 
-Оба случая ловились одинаково: `docker compose stop kafka`, подождать, `docker compose start kafka`, подождать снова **не отправляя ни одного сообщения** — и смотреть, возвращается ли `kafka` к `true`. Прямой независимый пробник эту проблему обходит целиком: результат дозвона — это и есть сигнал, а не что-то, что нужно выводить из внутренностей ридера.
+Both cases were caught the same way: `docker compose stop kafka`, wait, `docker compose start kafka`, wait again **without sending a single message** — and watch whether `kafka` flips back to `true`. A direct, independent probe sidesteps this problem entirely: the result of dialing IS the signal, not something that needs deriving from a reader's internals.
 
 ```bash
 docker compose stop kafka
-sleep 10   # один цикл kafkaHealthProbeInterval
+sleep 10   # one kafkaHealthProbeInterval cycle
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8086/healthz
 # 503
 curl -s http://localhost:8086/healthz | jq '{status, kafka, postgres}'
 # {"status": "error", "kafka": false, "postgres": true}
 
 docker compose start kafka
-sleep 10   # снова один цикл — восстановление тоже не ждёт ни одного сообщения на топиках
+sleep 10   # one more cycle — recovery doesn't wait on a message on the topics either
 curl -s http://localhost:8086/healthz | jq '{status, kafka, postgres}'
 # {"status": "ok", "kafka": true, "postgres": true}
 ```
 
-## Фронтенд
+## Frontend
 
-`frontend/` — SPA на Vite + React + TypeScript, обращается к бэкенду через Gateway (`http://localhost:8080`). Роутинг, структура проекта и типизированный API-слой уже на месте; настоящих форм и экранов пока нет — это следующие шаги.
+`frontend/` is a Vite + React + TypeScript SPA, talking to the backend through the Gateway (`http://localhost:8080`). Routing, the project structure, and a typed API layer are already in place; there are no real forms or screens yet — those are the next steps.
 
-### Запуск (dev)
+### Running it (dev)
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-Поднимает dev-сервер на `http://localhost:5173` (порт по умолчанию у Vite). Бэкенд (в первую очередь Gateway) поднимается отдельно, `docker compose up`.
+Brings up a dev server on `http://localhost:5173` (Vite's default port). The backend (the Gateway first and foremost) comes up separately, via `docker compose up`.
 
-### Структура — feature-based, не по типам файлов
+### Structure — feature-based, not by file type
 ```
 frontend/src/
-├── app/           — роутинг (react-router), провайдеры (react-query), layout-shell
+├── app/           — routing (react-router), providers (react-query), the layout shell
 ├── features/
-│   ├── auth/      — components/ (LoginPage, RegisterPage), api.ts (register/login/logout/...); hooks/ появятся вместе с реальными формами
-│   └── accounts/  — components/ (DashboardPage), api.ts (getMe); hooks/ появятся вместе с реальными запросами в UI
+│   ├── auth/      — components/ (LoginPage, RegisterPage), api.ts (register/login/logout/...); hooks/ arrives with the real forms
+│   └── accounts/  — components/ (DashboardPage), api.ts (getMe); hooks/ arrives with real UI data-fetching
 └── shared/
-    ├── ui/          — переиспользуемые примитивы: Button, Input, Card, tokens.css
-    └── api-client/  — HTTP-слой: fetch-обёртка, токены, single-flight refresh, сгенерированные типы (см. «API-клиент» ниже)
+    ├── ui/          — reusable primitives: Button, Input, Card, tokens.css
+    └── api-client/  — the HTTP layer: the fetch wrapper, tokens, single-flight refresh, generated types (see "API client" below)
 ```
-Принцип: фича несёт свои компоненты, хуки и вызовы API рядом, а не разложена по `components/`, `hooks/`, `api/` на верхнем уровне репозитория. `shared/api-client/` — только инфраструктура (fetch, токены, retry-логика), а не место для конкретных вызовов конкретных эндпоинтов: те типизированы через сгенерированные типы, но живут в `api.ts` своей фичи.
+Principle: a feature carries its components, hooks, and API calls together, rather than spread across top-level `components/`, `hooks/`, `api/` directories. `shared/api-client/` is infrastructure only (fetch, tokens, retry logic), not a place for specific endpoint calls: those are typed via the generated types, but live in each feature's own `api.ts`.
 
-Стили — CSS Modules (`*.module.css`), без отдельной библиотеки: работают у Vite из коробки, и классы уже естественно скопированы по компонентам — то же самое разбиение, что и у feature-based структуры. Общие токены (цвета, отступы, radius, шрифт) — `shared/ui/tokens.css`, CSS custom properties с поддержкой `prefers-color-scheme: dark`.
+Styling is CSS Modules (`*.module.css`), with no separate library: works out of the box with Vite, and the classes are already naturally scoped per component — the same split the feature-based structure already has. Shared tokens (colors, spacing, radius, font) live in `shared/ui/tokens.css`, CSS custom properties with `prefers-color-scheme: dark` support.
 
-### Dev-прокси и CORS
-У Gateway нет префикса `/api` — маршруты у него `/auth/*`, `/accounts/*` и т.д. напрямую (`gateway/proxy.go`). Фронт обращается к `/api/*`; dev-сервер Vite (`frontend/vite.config.ts`) перехватывает `/api/*`, снимает префикс `/api` и проксирует остаток на `http://localhost:8080`. Например, `GET /api/accounts/me` с фронта уходит на Gateway как `GET /accounts/me`.
+### The dev proxy and CORS
+The Gateway has no `/api` prefix — its routes are `/auth/*`, `/accounts/*`, etc. directly (`gateway/proxy.go`). The frontend calls `/api/*`; Vite's dev server (`frontend/vite.config.ts`) intercepts `/api/*`, strips the `/api` prefix, and proxies the rest to `http://localhost:8080`. So `GET /api/accounts/me` from the frontend goes out to the Gateway as `GET /accounts/me`.
 
-Это полностью убирает проблему CORS в разработке: браузер видит только один origin (dev-сервер Vite), запрос к Gateway идёт со стороны самого dev-сервера, а не напрямую из браузера. **В продакшене так же работать не будет** — там нужно либо отдавать собранный статик (`npm run build` → `frontend/dist/`) через сам Gateway (тогда фронт и API снова на одном origin), либо явно выставить CORS-заголовки на Gateway, если фронт и бэкенд остаются на разных origin. Этот выбор — не часть текущего шага.
+This eliminates the CORS problem in development entirely: the browser only ever sees one origin (Vite's dev server), and the call to the Gateway happens from the dev server itself, not directly from the browser. **This won't work the same way in production** — there, either the built static assets (`npm run build` → `frontend/dist/`) need to be served through the Gateway itself (putting the frontend and the API back on one origin), or the Gateway needs explicit CORS headers if the frontend and backend stay on separate origins. That choice isn't part of this step.
 
-### API-клиент
+### API client
 
-**Выбран вариант с OpenAPI-спекой, а не ручными TS-типами.** Контракт Gateway (8 auth-эндпоинтов + `GET /accounts/me`) описан в `gateway/openapi.yaml`; `frontend/src/shared/api-client/schema.ts` генерируется из него командой `npm run gen:api` (обёртка над `openapi-typescript`, см. `frontend/package.json`) и **руками не редактируется**. В спеку осознанно не включены `GET /accounts/{id}` и `PATCH /accounts/{id}/status` — Gateway их проксирует, но фронт их не вызывает и не будет: это внутренняя/оперская поверхность accounts-svc, не часть контракта с браузером.
+**The OpenAPI-spec approach was chosen, not hand-written TS types.** The Gateway's contract (8 auth endpoints + `GET /accounts/me`) is described in `gateway/openapi.yaml`; `frontend/src/shared/api-client/schema.ts` is generated from it by `npm run gen:api` (a wrapper over `openapi-typescript`, see `frontend/package.json`) and **is never edited by hand**. `GET /accounts/{id}` and `PATCH /accounts/{id}/status` were deliberately left out of the spec — the Gateway proxies them, but the frontend never calls them and never will: that's accounts-svc's internal/ops surface, not part of the browser's contract.
 
-Причина выбора: спека — это ещё и единственное живое, проверяемое описание того, что Gateway на самом деле принимает и отдаёт (тело запроса, все коды ответа, какие пути требуют bearer-токен — это тоже в спеке, `security` по каждому эндпоинту списан прямо с `gateway/middleware.go`). Ручные типы работали бы не хуже день в день, но расходятся с бэкендом молча: ничто не заставляет вспомнить о них при следующем изменении хендлера. Цена — лишний шаг генерации при каждом изменении контракта; при таком маленьком числе эндпоинтов (9) она того стоит.
+Reason for the choice: the spec is also the one live, verifiable description of what the Gateway actually accepts and returns (the request body, every response code, which paths require a bearer token — that's in the spec too, `security` per endpoint is copied straight from `gateway/middleware.go`). Hand-written types would work just as well day to day, but drift from the backend silently: nothing forces anyone to remember them on the next handler change. The cost is an extra generation step on every contract change; with this few endpoints (9), it's worth it.
 
-Сами типизированные HTTP-методы (`register`, `login`, `getMe`, ...) не генерируются — это обычные функции в `features/*/api.ts`, использующие типы `paths[...]` из сгенерированной схемы под каждый параметр и ответ. Осознанно не взят `openapi-fetch` (типизированный клиент поверх той же генерации): он берёт на себя разбор ответа и заворачивает результат в `{data, error}`, что плохо сочетается с тем, что должен делать `shared/api-client/client.ts` сам — единообразно бросать `ApiError` (со статусом и телом) и перехватывать 401 для refresh-and-retry. Взято от `openapi-typescript` только то, что действительно нужно — типы, — а вся управляющая логика написана руками.
+The typed HTTP methods themselves (`register`, `login`, `getMe`, ...) aren't generated — they're ordinary functions in each feature's `api.ts`, using the `paths[...]` types from the generated schema for every parameter and response. `openapi-fetch` (a typed client built on the same generation) was deliberately not adopted: it takes over parsing the response and wraps the result in `{data, error}`, which doesn't sit well with what `shared/api-client/client.ts` needs to do itself — uniformly throw an `ApiError` (with a status and body) and intercept a 401 for refresh-and-retry. Only what's actually needed from `openapi-typescript` was taken — the types — while all the control-flow logic is hand-written.
 
 ```bash
-# перегенерировать типы после любого изменения gateway/openapi.yaml
+# regenerate types after any change to gateway/openapi.yaml
 cd frontend
 npm run gen:api
 ```
 
-`npm audit` на этом шаге показывает 2 high (ReDoS в `js-yaml`, транзитивная зависимость `openapi-typescript` → `@redocly/openapi-core`). Это dev-only инструмент, парсящий только наш собственный `gateway/openapi.yaml`, а не недоверенный ввод — реальной экспозиции нет; `npm audit fix` пока недоступен из-за конфликта peer-зависимости `openapi-typescript` на TypeScript (заявлен `^5.x`, в репозитории уже `~6.0.2` — сам пакет от этого не ломается, конфликтует только резолвер).
+`npm audit` at this step shows 2 high-severity findings (a ReDoS in `js-yaml`, a transitive dependency of `openapi-typescript` → `@redocly/openapi-core`). This is a dev-only tool parsing only our own `gateway/openapi.yaml`, not untrusted input — there's no real exposure; `npm audit fix` isn't available yet due to a peer-dependency conflict in `openapi-typescript` on TypeScript (it declares `^5.x`, while the repo is already on `~6.0.2` — the package itself isn't broken by this, only the resolver conflicts).
 
-### Хранение токенов — и его цена
+### Token storage — and its cost
 
-- **Access-токен** (JWT, TTL 15 минут) — только в памяти, модульная переменная в `shared/api-client/tokenStore.ts`. Не переживает перезагрузку страницы.
-- **Refresh-токен** (opaque, TTL 7 дней, одноразовый — ротируется на каждый `/auth/refresh`) — в `localStorage`, чтобы сессия переживала перезагрузку.
+- **The access token** (a JWT, 15-minute TTL) — in memory only, a module-level variable in `shared/api-client/tokenStore.ts`. Doesn't survive a page reload.
+- **The refresh token** (opaque, 7-day TTL, single-use — rotated on every `/auth/refresh`) — in `localStorage`, so the session survives a reload.
 
-Это компромисс, не забывчивость. `localStorage` уязвим к XSS: любой инжектнутый в страницу JS может прочитать `localStorage` и увести refresh-токен, а с ним — возможность бесконечно перевыпускать сессию. По-настоящему правильное решение — `httpOnly`-cookie для refresh-токена: тогда JS (в том числе инжектнутый) физически не может его прочитать, только браузер молча прикладывает cookie к запросам на `/auth/refresh`. Это осознанно не сделано на этом шаге, потому что требует правки бэкенда (auth-svc должен отвечать на `/login`/`/refresh` через `Set-Cookie`, а не JSON-полем `refresh_token`, плюс `SameSite`/`Secure`-политика, плюс сам Gateway должен научиться читать cookie, а не только `Authorization`-заголовок) — то есть контракт `TokenPair` в `gateway/openapi.yaml` пришлось бы менять вместе с этим. Текущий вариант (`localStorage`) — сознательно принятый краткосрочный компромисс, а не то, как это должно остаться.
+This is a trade-off, not an oversight. `localStorage` is vulnerable to XSS: any JS injected into the page can read `localStorage` and steal the refresh token, and with it, the ability to reissue the session forever. The genuinely correct fix is an `httpOnly` cookie for the refresh token: then JS (injected or not) physically can't read it — only the browser silently attaches the cookie to requests against `/auth/refresh`. This was deliberately not done at this step, because it requires backend changes (auth-svc would have to respond to `/login`/`/refresh` via `Set-Cookie` instead of a JSON `refresh_token` field, plus a `SameSite`/`Secure` policy, plus the Gateway itself would need to learn to read a cookie, not just the `Authorization` header) — meaning the `TokenPair` contract in `gateway/openapi.yaml` would have to change along with it. The current setup (`localStorage`) is a deliberately accepted short-term trade-off, not how it should stay.
 
-Держать access-токен вне `localStorage` (только в памяти) — это половина смягчения: даже успешный XSS не достаёт долгоживущий JWT напрямую, только 15-минутный, и то лишь пока вкладка открыта. Полностью проблему это не снимает (тот же XSS всё ещё может дёрнуть `/accounts/me` от имени пользователя, пока вкладка жива, и достать refresh-токен из `localStorage`), но сужает окно и цену компрометации.
+Keeping the access token out of `localStorage` (memory only) is half a mitigation: even a successful XSS can't directly grab a long-lived JWT, only a 15-minute one, and only while the tab stays open. It doesn't fully remove the problem (that same XSS can still call `/accounts/me` as the user while the tab is alive, and pull the refresh token out of `localStorage`), but it narrows both the window and the cost of a compromise.
 
-### Автоматический refresh и single-flight
+### Automatic refresh and single-flight
 
-`shared/api-client/client.ts`: любой запрос, получивший `401`, автоматически вызывает `/auth/refresh` и повторяет исходный запрос с новым access-токеном; если сам refresh не проходит (отклонён бэкендом, а не просто сетевой сбой) — токены чистятся и `client.ts` делает `window.location.href = '/login'`. Это единственная функция, которая триггерит refresh: см. флаг `skipAuthRetry` в `RequestOptions` — им помечены все auth-эндпоинты, у которых собственный `401` (например, `/auth/login` с неверным паролем) значит совсем не «токен протух», а `/auth/logout` (единственный auth-путь, реально требующий сессии — см. `publicPaths` в `gateway/middleware.go`) от общей логики не освобождён.
+`shared/api-client/client.ts`: any request that gets a `401` automatically calls `/auth/refresh` and retries the original request with the new access token; if the refresh itself fails (rejected by the backend, not just a network blip), the tokens are cleared and `client.ts` does `window.location.href = '/login'`. This is the only thing that triggers a refresh: see the `skipAuthRetry` flag in `RequestOptions` — it's set on every auth endpoint whose own `401` doesn't mean "the token expired" at all (e.g. `/auth/login` with the wrong password), while `/auth/logout` (the one auth path that genuinely needs a session — see `publicPaths` in `gateway/middleware.go`) isn't exempted from the general logic.
 
-Критично — **single-flight**: `refreshPromise` в `client.ts` — общий promise на модуль. Первый вызов, поймавший `401`, создаёт его и реально бьёт по `/auth/refresh`; все остальные конкурентные вызовы видят уже созданный promise и ждут его вместо того, чтобы стрелять своим запросом. Это не оптимизация, а необходимость: refresh-токен одноразовый (ротируется при каждом вызове, спринт 1) — без single-flight пять параллельных запросов на `/auth/refresh` означали бы, что только первый пройдёт, а остальные четыре попытаются погасить уже использованный токен и получат отказ, разлогинив пользователя на ровном месте. После завершения (успех или неудача) `refreshPromise` сбрасывается в `null` через `.finally()` — следующий, независимый протухший токен (например, 15 минут спустя) запускает новый цикл, а не переиспользует уже разрешившийся promise.
+The critical part is **single-flight**: `refreshPromise` in `client.ts` is a single promise shared across the module. The first call that catches a `401` creates it and genuinely hits `/auth/refresh`; every other concurrent call sees the already-created promise and waits on it instead of firing its own request. This isn't an optimization, it's a necessity: the refresh token is single-use (rotated on every call, sprint 1) — without single-flight, five parallel requests to `/auth/refresh` would mean only the first one succeeds, and the other four would try to redeem an already-used token and get rejected, logging the user out for no reason. Once it settles (success or failure), `refreshPromise` resets to `null` via `.finally()` — the next, independent expired token (say, 15 minutes later) starts a fresh cycle rather than reusing an already-resolved promise.
 
-**Как проверено.** Ручной сценарий из постановки (открыть dashboard с несколькими параллельными запросами, посмотреть Network) пока недоступен буквально — экраны и data-fetching в UI появятся в следующих промптах, `DashboardPage` сейчас статичная заглушка. Вместо этого поведение проверено скриптом, гоняющим настоящий `client.ts`/`tokenStore.ts` под Node (`tsx`) с подменёнными `fetch`/`localStorage`: 5 параллельных запросов, каждый ловит `401`, и — ровно **один** вызов `/auth/refresh`, все 5 успешно повторились с новым токеном. Отдельно проверено, что после первого цикла `refreshPromise` не залипает: второй, независимый протухший токен запускает новый (второй) вызов `/auth/refresh`, а не переиспользует уже разрешившийся promise. Скрипт был временным (не закоммичен) — при появлении реального dashboard с несколькими запросами стоит повторить проверку буквально, через Network-вкладку.
+**How this was verified.** The manual scenario from the spec (open the dashboard with several parallel requests, watch the Network tab) isn't literally possible yet — real screens and UI data-fetching arrive in later steps, `DashboardPage` is currently a static placeholder. Instead, the behavior was verified with a script driving the real `client.ts`/`tokenStore.ts` under Node (`tsx`) with `fetch`/`localStorage` swapped out: 5 parallel requests, each catching a `401`, and — exactly **one** call to `/auth/refresh`, all 5 successfully retried with the new token. Separately verified that `refreshPromise` doesn't get stuck after the first cycle: a second, independent expired token triggers a fresh (second) call to `/auth/refresh`, not a reuse of the already-resolved promise. The script was temporary (never committed) — once a real dashboard with several requests exists, this check is worth repeating literally, through the Network tab.
 
-### Маршруты
-`/register`, `/login`, `/dashboard` — сейчас пустые страницы-заглушки (заголовок внутри `Card`), нужны только чтобы проверить, что роутинг работает. `/` редиректит на `/login`.
+### Routes
+`/register`, `/login`, `/dashboard` are currently empty placeholder pages (a heading inside a `Card`), only there to verify routing works. `/` redirects to `/login`.
 
-## Нагрузочное тестирование (k6 + `loadtest/`)
+## Load testing (k6 + `loadtest/`)
 
-В спринте 3 уже есть тест корректности под конкуренцией: параллельные переводы с одного счёта не уводят баланс в минус (см. «Конкурентность: перевод не может увести счёт в минус»). Здесь вопрос другой — не «правильно ли считает», а «что происходит под длительной нагрузкой»: где потолок, что деградирует первым и держатся ли инварианты, когда система работает на пределе, а не в тепличных условиях юнит-теста.
+Sprint 3 already has a correctness-under-concurrency test: concurrent transfers off the same account never push the balance negative (see "Concurrency: a transfer can never push an account negative"). The question here is different — not "does it compute correctly," but "what happens under sustained load": where's the ceiling, what degrades first, and do the invariants hold when the system runs at its limit rather than in a unit test's controlled conditions.
 
-Короткий ответ. Потолок распределённого профиля — **~176 переводов/с**, и упирается он в **пул соединений ledger-svc**: 16 штук, значение по умолчанию `pgxpool`, нигде не сконфигурированное. Нижнюю границу латентности задаёт другое — **четыре синхронно реплицируемых коммита на один перевод**, по ~20 мс каждый. Горячий счёт даёт **31.5 перевода/с и не растёт вообще** при увеличении конкуренции в 12 раз — это сериализация на `SELECT ... FOR UPDATE`, осознанная цена схемы, а не баг. Все инварианты после всех прогонов держатся: **0 нарушений на 53 789 проведённых переводах**.
+The short answer. The distributed profile's ceiling is **~176 transfers/s**, bottlenecked on **ledger-svc's connection pool**: 16 connections, `pgxpool`'s default, never configured anywhere. The latency floor comes from something else — **four synchronously replicated commits per transfer**, ~20ms each. The hot account gives **31.5 transfers/s and doesn't grow at all** across a 12x increase in concurrency — that's serialization on `SELECT ... FOR UPDATE`, a deliberate cost of the schema, not a bug. Every invariant holds after every run: **0 violations across 53,789 transfers executed**.
 
-### Чем меряется
+### What's measured, and with what
 
-| часть | чем | почему именно так |
+| part | tool | why this specific tool |
 |---|---|---|
-| генерация нагрузки | k6 0.55.0 в контейнере на сети `neo-bank_default` | k6 не надо ставить на хост, а изнутри сети он бьёт в `gateway:8080` без лишнего хостового loopback |
-| фикстуры, инварианты, наблюдение за Postgres | `loadtest/cmd/lt` — Go-утилита: `setup`, `fraud`, `probe`, `verify`, `report` | всё, для чего k6 — неподходящий инструмент: он не умеет заводить пользователей, не видит внутрь Postgres во время прогона и не может ответить на единственный вопрос, ради которого этот тест вообще имеет смысл для леджера — сошлись ли книги после |
+| load generation | k6 0.55.0 in a container on the `neo-bank_default` network | k6 doesn't need to be installed on the host, and from inside the network it hits `gateway:8080` with no extra host-side loopback |
+| fixtures, invariants, watching Postgres | `loadtest/cmd/lt` — a Go utility: `setup`, `fraud`, `probe`, `verify`, `report` | everything k6 is the wrong tool for: it can't create users, can't see inside Postgres during a run, and can't answer the one question this test exists for on a ledger — did the books balance afterward |
 
-Сценарий бьёт в `POST /transfers/` **через Gateway**, а не в ledger-svc напрямую. Это принципиально: узкое место заранее неизвестно, и мерить один леджер значило бы заранее решить, что оно в нём. Оно там и оказалось — но это результат измерения полного пути, а не следствие того, что мерили только его. Полный путь одного перевода: 1 прокси-хоп Gateway, 5 gRPC-вызовов (три в accounts-svc, по одному в fraud-svc и ledger-svc), 24 SQL-стейтмента и 4 коммита в четырёх разных транзакциях.
+The scenario hits `POST /transfers/` **through the Gateway**, not ledger-svc directly. This matters: the bottleneck wasn't known in advance, and measuring the ledger alone would have meant deciding upfront that's where it lives. It did turn out to live there — but that's a result of measuring the full path, not a consequence of only measuring the ledger. The full path of one transfer: 1 Gateway proxy hop, 5 gRPC calls (three into accounts-svc, one each into fraud-svc and ledger-svc), 24 SQL statements, and 4 commits across four separate transactions.
 
-**Завершающий слэш в `/transfers/` — не опечатка.** Gateway монтирует маршрут поддеревом (`mux.Handle("/transfers/", ...)`), поэтому Go-шный `ServeMux` отвечает на голый `/transfers` редиректом 301, а клиент, идущий за редиректом, по дороге превращает `POST` в `GET`. Отказ бесшумный и эффектный: самый первый прогон показал **2318 rps, ноль ошибок и ноль сдвинувшихся копеек** — это была история переводов, отданная на `GET`. В `common.js` поэтому стоит ещё и `redirects: 0`, чтобы возврат этого редиректа немедленно вылезал стеной `client_error`, а не выглядел рекордом. Фронтенд знает про тот же слэш — см. комментарий в `frontend/src/features/transfers/api.ts`.
+**The trailing slash in `/transfers/` isn't a typo.** The Gateway mounts the route as a subtree (`mux.Handle("/transfers/", ...)`), so Go's `ServeMux` answers a bare `/transfers` with a 301 redirect, and a client that follows the redirect turns its `POST` into a `GET` along the way. The failure is silent and dramatic: the very first run showed **2318 rps, zero errors, and zero cents moved** — that was the transfer history being served up on a `GET`. `common.js` therefore also sets `redirects: 0`, so getting that redirect back immediately surfaces as a wall of `client_error` instead of looking like a record. The frontend knows about the same slash — see the comment in `frontend/src/features/transfers/api.ts`.
 
-### Подготовка прогона
+### Preparing the run
 
-#### Пороги fraud поднимаются — и что при этом НЕ меняется
+#### Fraud thresholds are raised — and what does NOT change as a result
 
-Боевые пороги fraud-svc (миграция `000003`) — `velocity_count > 5` за 300 с и `velocity_sum > 1 000 000` за 3600 с. Любая осмысленная нагрузка пробивает пять переводов на отправителя за первую секунду, после чего всё остальное отвергается на шаге fraud и до ledger-svc не доходит. Это не гипотеза: пробный прогон на четырёх пользователях дал ровно `completed=20, rejected=625` — 4 отправителя × 5 разрешённых, дальше стена.
+fraud-svc's production thresholds (migration `000003`) are `velocity_count > 5` over 300s and `velocity_sum > 1,000,000` over 3600s. Any meaningful load blows through five transfers per sender in the first second, after which everything else gets rejected at the fraud step and never reaches ledger-svc. This isn't a hypothesis: a trial run with four users produced exactly `completed=20, rejected=625` — 4 senders × 5 allowed, then a wall.
 
-`lt fraud -mode loadtest` поднимает **только** `threshold_value` у двух velocity-правил. `enabled` остаётся `true`, `window_seconds` — прежним, `amount_threshold` не трогается вовсе. Это важно: оба правила продолжают выполнять **те же два агрегата** по `fraud_checks` на каждый перевод, в том же окне, по той же растущей таблице. Стоимость правила — а именно она и интересна, раз fraud-svc был кандидатом в узкое место — не меняется; меняется только сравнение в конце, с «reject» на «approve». Исходные значения уезжают в `loadtest/fixtures/fraud-rules.backup.json`, `lt fraud -mode restore` возвращает их.
+`lt fraud -mode loadtest` raises **only** the `threshold_value` on the two velocity rules. `enabled` stays `true`, `window_seconds` stays the same, `amount_threshold` isn't touched at all. This matters: both rules keep running **the exact same two aggregates** against `fraud_checks` on every transfer, in the same window, against the same growing table. The cost of the rule — which is exactly what matters, since fraud-svc was a bottleneck candidate — doesn't change; only the final comparison flips, from "reject" to "approve." The original values are saved to `loadtest/fixtures/fraud-rules.backup.json`, and `lt fraud -mode restore` brings them back.
 
-#### Фикстуры создаются настоящим API
+#### Fixtures are created through the real API
 
-`lt setup` заводит N пользователей публичным путём: `POST /auth/register` → код подтверждения вычитывается из Mailpit по его HTTP-API → `POST /auth/verify-email` → `POST /auth/login` → ожидание, пока асинхронный конвейер (outbox auth-svc → Kafka → accounts-svc → `AccountCreated` → ledger-svc) реально создаст счёт. Это дороже, чем вписать строки в `users` и `accounts` руками, и покупает единственное, чего руками не получить: фикстурные счета ровно такие же, какие система делает настоящему пользователю.
+`lt setup` creates N users the public way: `POST /auth/register` → the confirmation code is read out of Mailpit via its HTTP API → `POST /auth/verify-email` → `POST /auth/login` → waiting for the async pipeline (auth-svc's outbox → Kafka → accounts-svc → `AccountCreated` → ledger-svc) to genuinely create the account. This is more expensive than inserting rows into `users` and `accounts` by hand, and buys the one thing hand-inserted rows can't: fixture accounts identical to whatever the system creates for a real user.
 
-Мимо API идёт только пополнение — публичного способа выпустить деньги в систему нет и быть не должно. Сам топ-ап делается обычным `ExecuteTransfer` из genesis (те же блокировки, та же проверка овердрафта, то же обновление кэша), и только эмиссия в genesis — прямой сбалансированной записью, ровно как в `cmd/devtopup`. Пополняющие проводки сознательно идут **без `reference`**: именно это позволяет верификатору отделить «деньги, которые положил setup» от «денег, которые двигались в прогоне», потому что каждая проводка нагрузочного теста помечена id своего перевода.
+The only thing that bypasses the API is funding — there's no public way to issue money into the system, and there shouldn't be. The top-up itself runs through an ordinary `ExecuteTransfer` from genesis (the same locks, the same overdraft check, the same cache update), and only the emission into genesis is a direct, balanced write, exactly as in `cmd/devtopup`. The funding entries are deliberately posted **with no `reference`**: that's exactly what lets the verifier separate "money setup put in" from "money that moved during the run," since every load-test entry is tagged with its own transfer's id.
 
-#### Токены переиздаются перед каждой ступенью
+#### Tokens are reissued before every stage
 
-`run.sh` вызывает `lt setup -refresh` перед каждым уровнем VU. Это не перестраховка, а следствие уже случившейся ошибки: access-токен auth-svc живёт 15 минут, полный прогон трёх профилей по четыре ступени — дольше, и токены протухают **посреди прогона**. Выглядит это не как отказ, а как рекорд: Gateway отвечает 401 быстрее чем за миллисекунду, k6 радостно показывает 2700 rps (в двадцать раз больше настоящей пропускной способности) при нулевой доле ошибок. Один профиль так и был потерян — 164 тысячи запросов, из них 151 тысяча 401-х. Теперь у 401 отдельная корзина в классификаторе, отдельная строка «THIS RESULT IS INVALID» в сводке k6 и предупреждение в `REPORT.md`.
+`run.sh` calls `lt setup -refresh` before every VU level. This isn't extra caution — it's a consequence of an error that actually happened: an auth-svc access token lives 15 minutes, and a full run of three profiles across four stages each takes longer, so tokens expire **mid-run**. This doesn't look like a failure, it looks like a record: the Gateway answers 401 in under a millisecond, and k6 happily reports 2700 rps (twenty times the real throughput) at a zero error rate. One whole profile was lost this way — 164 thousand requests, 151 thousand of them 401s. Now 401 has its own bucket in the classifier, its own "THIS RESULT IS INVALID" line in the k6 summary, and a warning in `REPORT.md`.
 
-### Три профиля
+### Three profiles
 
-Профили отличаются **ровно одним**: какую пару отправитель/получатель выбирает итерация. Та же лесенка VU, та же сумма, тот же запрос, то же измерение — всё остальное, что различалось бы, было бы примесью в эксперименте.
+The profiles differ in **exactly one thing**: which sender/recipient pair an iteration picks. The same VU ladder, the same amount, the same request, the same measurement — anything else that differed would be contamination in the experiment.
 
-- **РАСПРЕДЕЛЁННАЯ** (`distributed.js`) — 40 пользователей переводят друг другу случайно. Контроль: конкуренция размазана, найденный потолок — это потолок *конвейера*, а не блокировок.
-- **ГОРЯЧИЙ СЧЁТ** (`hotspot.js`) — все переводят на один счёт (`HOT_DIRECTION=inbound`, по умолчанию) либо один переводит всем (`outbound`).
-- **ДУБЛИКАТЫ** (`duplicates.js`) — `FANOUT` (по умолчанию 10) запросов с одним и тем же idempotency-ключом, сгруппированных по глобальному счётчику итераций k6, так что запросы одной группы уходят разными VU в пределах миллисекунд. Отправитель, получатель и сумма выводятся из индекса группы, а не берутся случайно: внутри группы они обязаны совпадать, иначе `reconcileReplay` вернёт 422 «ключ переиспользован с другими параметрами» и проверяться будет не та ветка.
+- **DISTRIBUTED** (`distributed.js`) — 40 users transferring to each other at random. The control: concurrency is spread out, so the ceiling found here is the *pipeline's* ceiling, not a lock's.
+- **HOT ACCOUNT** (`hotspot.js`) — everyone transfers into one account (`HOT_DIRECTION=inbound`, the default) or one account transfers out to everyone (`outbound`).
+- **DUPLICATES** (`duplicates.js`) — `FANOUT` (default 10) requests sharing the same idempotency key, grouped by k6's global iteration counter, so requests in the same group go out from different VUs within milliseconds of each other. The sender, recipient, and amount are derived from the group index rather than chosen at random: within a group they must match, or `reconcileReplay` returns a 422 "key reused with different parameters" and the wrong branch gets exercised.
 
-### Как запустить
+### How to run it
 
 ```bash
 docker compose up -d
 
-# фикстуры: 40 пользователей с пополненными счетами (идемпотентно, можно перезапускать)
+# fixtures: 40 users with funded accounts (idempotent, safe to rerun)
 go run ./loadtest/cmd/lt setup -users 40 -fund 100000000
 
-# поднять пороги fraud на время прогонов
+# raise fraud thresholds for the duration of the runs
 go run ./loadtest/cmd/lt fraud -mode loadtest
 
-# профили: каждый гоняется на 10/30/60/120 VU, с пробой Postgres рядом
-# и проверкой инвариантов в конце
+# profiles: each runs at 10/30/60/120 VUs, with a Postgres probe alongside
+# and an invariant check at the end
 ./loadtest/run.sh distributed
 ./loadtest/run.sh hotspot
 ./loadtest/run.sh duplicates
-./loadtest/run.sh all      # или всё сразу
+./loadtest/run.sh all      # or all of them at once
 
-# вернуть боевые пороги
+# restore the production thresholds
 go run ./loadtest/cmd/lt fraud -mode restore
 ```
 
-Результаты — в `loadtest/results/`: `<профиль>-vus<N>.summary.json` от k6, `<профиль>-vus<N>.probe.csv` от пробы, `<профиль>.verify.json` от инвариантов и сводный `REPORT.md` от `lt report`. Ручки: `VUS="10 50" DURATION=30s`, `HOT_DIRECTION=outbound`, `FANOUT=25`, `AMOUNT=...`. На Windows скрипт запускается из Git Bash — он сам конвертирует путь через `pwd -W`, потому что Docker для bind-mount хочет windows-путь.
+Results land in `loadtest/results/`: `<profile>-vus<N>.summary.json` from k6, `<profile>-vus<N>.probe.csv` from the probe, `<profile>.verify.json` from the invariant check, and a combined `REPORT.md` from `lt report`. Knobs: `VUS="10 50" DURATION=30s`, `HOT_DIRECTION=outbound`, `FANOUT=25`, `AMOUNT=...`. On Windows the script is run from Git Bash — it converts the path itself via `pwd -W`, because Docker's bind-mount wants a Windows-style path.
 
-### Результаты
+### Results
 
-40 счетов, по 100 000 000 минорных единиц на каждом, перевод на 100. Каждая ступень — 60 секунд. Латентность — полный round-trip `POST /transfers/` через Gateway.
+40 accounts, 100,000,000 minor units each, a transfer of 100. Every stage runs 60 seconds. Latency is the full round trip of `POST /transfers/` through the Gateway.
 
-| профиль | VU | RPS | проведено/с | p50 | p95 | p99 | max | ошибки |
+| profile | VU | RPS | executed/s | p50 | p95 | p99 | max | errors |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| распределённая | 10 | 59.7 | 59.7 | 166 мс | 208 мс | 237 мс | 386 мс | 0 % |
-| распределённая | 30 | 151.0 | 151.0 | 188 мс | 280 мс | 353 мс | 523 мс | 0 % |
-| распределённая | 60 | **176.4** | 176.4 | 327 мс | 464 мс | 546 мс | 760 мс | 0 % |
-| распределённая | 120 | 171.9 | 171.9 | 683 мс | 847 мс | 942 мс | 1070 мс | 0 % |
-| горячий счёт | 10 | 31.6 | 31.6 | 314 мс | 405 мс | 490 мс | 657 мс | 0 % |
-| горячий счёт | 30 | 31.5 | 31.5 | 938 мс | 1136 мс | 1477 мс | 2137 мс | 0 % |
-| горячий счёт | 60 | 31.5 | 31.5 | 1893 мс | 2180 мс | 2386 мс | 2962 мс | 0 % |
-| горячий счёт | 120 | 32.1 | 32.1 | 3778 мс | 4016 мс | 4312 мс | 4988 мс | 0 % |
-| дубликаты | 10 | 234.3 | 23.4 | 37 мс | 138 мс | 167 мс | 791 мс | 0 % |
-| дубликаты | 30 | 507.4 | 50.8 | 43 мс | 203 мс | 260 мс | 435 мс | 0 % |
-| дубликаты | 60 | 540.0 | 54.0 | 96 мс | 260 мс | 321 мс | 514 мс | 0 % |
-| дубликаты | 120 | 560.0 | 56.0 | 200 мс | 363 мс | 434 мс | 589 мс | 0 % |
+| distributed | 10 | 59.7 | 59.7 | 166ms | 208ms | 237ms | 386ms | 0% |
+| distributed | 30 | 151.0 | 151.0 | 188ms | 280ms | 353ms | 523ms | 0% |
+| distributed | 60 | **176.4** | 176.4 | 327ms | 464ms | 546ms | 760ms | 0% |
+| distributed | 120 | 171.9 | 171.9 | 683ms | 847ms | 942ms | 1070ms | 0% |
+| hot account | 10 | 31.6 | 31.6 | 314ms | 405ms | 490ms | 657ms | 0% |
+| hot account | 30 | 31.5 | 31.5 | 938ms | 1136ms | 1477ms | 2137ms | 0% |
+| hot account | 60 | 31.5 | 31.5 | 1893ms | 2180ms | 2386ms | 2962ms | 0% |
+| hot account | 120 | 32.1 | 32.1 | 3778ms | 4016ms | 4312ms | 4988ms | 0% |
+| duplicates | 10 | 234.3 | 23.4 | 37ms | 138ms | 167ms | 791ms | 0% |
+| duplicates | 30 | 507.4 | 50.8 | 43ms | 203ms | 260ms | 435ms | 0% |
+| duplicates | 60 | 540.0 | 54.0 | 96ms | 260ms | 321ms | 514ms | 0% |
+| duplicates | 120 | 560.0 | 56.0 | 200ms | 363ms | 434ms | 589ms | 0% |
 
-Средней латентности в таблице нет намеренно: она прячет хвост. Разница между «p50 683 мс» и «avg 695 мс» на распределённом профиле при 120 VU выглядит несущественной ровно до момента, когда смотришь на p99 в 942 мс.
+The table deliberately omits average latency: it hides the tail. The gap between "p50 683ms" and "avg 695ms" on the distributed profile at 120 VUs looks negligible right up until you look at the p99 of 942ms.
 
-Распределение исходов: за все двенадцать прогонов **ни одной** 5xx, ни одного обрыва соединения, ни одного `failed`, ни одного `rejected`, ни одного 202 «исход неизвестен». Единственные два исхода, которые вообще встретились, — `completed` и `replayed` (в профиле дубликатов). Полная разбивка — в `loadtest/results/REPORT.md`.
+Outcome breakdown: across all twelve runs, **not a single** 5xx, not one dropped connection, not one `failed`, not one `rejected`, not one 202 "outcome unknown." The only two outcomes that ever showed up were `completed` and `replayed` (in the duplicates profile). The full breakdown is in `loadtest/results/REPORT.md`.
 
-#### Распределённая: колено между 30 и 60 VU
+#### Distributed: a knee between 30 and 60 VUs
 
-Пропускная способность выходит на полку около **176 переводов/с**, а дальше добавленная конкуренция целиком превращается в очередь: с 60 до 120 VU RPS не растёт (даже слегка падает, 176.4 → 171.9), а p50 удваивается, 327 → 683 мс. Проверка закона Литтла подтверждает, что мерили связно: 171.9 × 0.695 с = 119.5 ≈ 120 VU.
+Throughput plateaus around **176 transfers/s**, and beyond that every added unit of concurrency turns entirely into queueing: from 60 to 120 VUs, RPS doesn't grow (it even dips slightly, 176.4 → 171.9), while p50 doubles, 327 → 683ms. A Little's Law sanity check confirms the measurement is internally consistent: 171.9 × 0.695s = 119.5 ≈ 120 VUs.
 
-#### Горячий счёт: 31.5 перевода/с, и это не зависит от числа воркеров
+#### Hot account: 31.5 transfers/s, independent of worker count
 
-Главный результат всего упражнения, потому что он одинаковый до третьей значащей цифры на всём диапазоне:
+The exercise's central result, because it's the same to three significant figures across the whole range:
 
 | VU | RPS | p50 |
 |---:|---:|---:|
-| 10 | 31.6 | 314 мс |
-| 30 | 31.5 | 938 мс |
-| 60 | 31.5 | 1893 мс |
-| 120 | 32.1 | 3778 мс |
+| 10 | 31.6 | 314ms |
+| 30 | 31.5 | 938ms |
+| 60 | 31.5 | 1893ms |
+| 120 | 32.1 | 3778ms |
 
-Конкуренция выросла в 12 раз, пропускная способность не выросла нисколько, латентность выросла ровно в 12 раз. Каждый добавленный воркер конвертируется в ожидание один в один и не приносит ни одного лишнего перевода.
+Concurrency grew 12x, throughput grew not at all, latency grew by exactly 12x. Every added worker converts one-to-one into waiting, and delivers not a single extra transfer.
 
-Причина — не загадка, а прямое следствие схемы. `executeTransfer` берёт `SELECT ... FOR UPDATE` на обе строки `ledger_accounts` до проверки баланса и держит их до конца транзакции, поэтому все переводы, задевающие горячую строку, выстраиваются в очередь друг за другом. Потолок горячей строки равен `1 / (время удержания блокировки)`; из измеренных 31.5 переводов/с это **31.7 мс** удержания. Это **18 % от потолка распределённого профиля** (176.4 → 31.5).
+The cause isn't a mystery, it's a direct consequence of the schema. `executeTransfer` takes `SELECT ... FOR UPDATE` on both `ledger_accounts` rows before checking the balance, and holds them until the transaction's end, so every transfer touching the hot row queues up behind the last one. The hot row's ceiling equals `1 / (lock hold time)`; from the measured 31.5 transfers/s that works out to **31.7ms** of hold time. That's **18% of the distributed profile's ceiling** (176.4 → 31.5).
 
-Проба подтверждает механизм независимо от латентности: `lock_waiters` на горячем профиле упирается ровно в **15** и выше не идёт — 15 сессий ждут блокировку, 16-я её держит, весь пул ledger-svc израсходован на одну строку.
+The probe confirms the mechanism independently of latency: `lock_waiters` on the hot profile caps at exactly **15** and never goes higher — 15 sessions waiting on the lock, the 16th holding it, ledger-svc's entire pool spent on one row.
 
-**Это ожидаемое поведение выбранной схемы, а не дефект.** Ровно эта блокировка обеспечивает «счёт не может уйти в минус» под конкуренцией (спринт 3). Альтернативы — шардирование баланса на подсчета, оптимистичная блокировка с ретраями, неттинг — торгуют либо этой гарантией, либо простотой. Честная формулировка результата: *горячий счёт даёт 31.5 tx/s из-за сериализации на блокировке строки; это осознанное ограничение выбранной схемы, измеренное, а не предполагаемое.*
+**This is the chosen schema's expected behavior, not a defect.** This exact lock is what guarantees "an account can never go negative" under concurrency (sprint 3). The alternatives — balance sharding on counts, optimistic locking with retries, netting — trade away either that guarantee or the schema's simplicity. The honest way to state the result: *the hot account gives 31.5 tx/s because of row-lock serialization; this is a deliberate limitation of the chosen schema, measured, not assumed.*
 
-Стоит заметить и границу, к которой прогон подошёл вплотную: при 120 VU max-латентность 4988 мс, а `ledgerCallTimeout` в transfers-svc — 5 секунд. Ещё одна ступень вверх — и `settleTransfer` начнёт получать `DeadlineExceeded`, оставлять переводы в `pending` и отдавать 202, перекладывая работу на воркер реконсиляции. Деградация была бы корректной (именно для этого ветка «исход неизвестен» и написана), но пропускная способность горячей строки от этого не выросла бы.
+Worth noting too is a boundary the run came right up against: at 120 VUs the max latency is 4988ms, and `ledgerCallTimeout` in transfers-svc is 5 seconds. One more step up, and `settleTransfer` would start getting `DeadlineExceeded`, leaving transfers `pending` and returning 202s, handing the work off to the reconciliation worker. The degradation would be correct (that's exactly what the "outcome unknown" branch exists for), but it wouldn't have grown the hot row's throughput any.
 
-#### Дубликаты: ровно 9.00 реплеев на один проведённый перевод
+#### Duplicates: exactly 9.00 replays per transfer executed
 
-| VU | RPS | проведено | реплеев | реплеев на перевод |
+| VU | RPS | executed | replays | replays per transfer |
 |---:|---:|---:|---:|---:|
-| 10 | 234.3 | 1408 | 12 670 | **9.00** |
-| 30 | 507.4 | 3053 | 27 469 | **9.00** |
-| 60 | 540.0 | 3250 | 29 241 | **9.00** |
-| 120 | 560.0 | 3378 | 30 400 | **9.00** |
+| 10 | 234.3 | 1408 | 12,670 | **9.00** |
+| 30 | 507.4 | 3053 | 27,469 | **9.00** |
+| 60 | 540.0 | 3250 | 29,241 | **9.00** |
+| 120 | 560.0 | 3378 | 30,400 | **9.00** |
 
-При `FANOUT = 10` идеальный результат — один победитель и девять реплеев на ключ. Получилось ровно это, на всех четырёх ступенях, без единого отклонения при росте конкуренции в 12 раз. Ни одного 422 («ключ переиспользован»), ни одного дубля, ни одной 5xx.
+At `FANOUT = 10`, the ideal outcome is one winner and nine replays per key. That's exactly what happened, at all four stages, with no deviation across a 12x growth in concurrency. Not one 422 ("key reused"), not one duplicate, not one 5xx.
 
-Суммарный RPS здесь выше (560 против 176), потому что девять запросов из десяти уходят по дешёвому пути: `createTransfer` находит существующую строку по ключу и возвращается через `reconcileReplay`, не доходя ни до fraud-svc, ни до ledger-svc, ни до единого коммита. Ровно поэтому «проведено/с» в этом профиле низкое — полезную работу делает каждый десятый запрос.
+Total RPS is higher here (560 versus 176), because nine requests out of ten take the cheap path: `createTransfer` finds the existing row by key and returns through `reconcileReplay`, never reaching fraud-svc, never reaching ledger-svc, never hitting a single commit. That's exactly why "executed/s" is low in this profile — only one request in ten does real work.
 
-И главное: **этот профиль ничего не доказывает без проверки после прогона.** Отказ, за которым он охотится, — два запроса с одним ключом, оба дошедшие до ledger-svc: получилась бы **одна** строка в `transfers` и **четыре** проводки, книги при этом сошлись бы, ни один констрейнт не нарушился бы, и все HTTP-ответы выглядели бы безупречно. Ловит это только `transfer_entries_paired` (см. ниже).
+And most importantly: **this profile proves nothing without post-run verification.** The failure it's hunting for is two requests with the same key, both reaching ledger-svc: that would produce **one** row in `transfers` and **four** entries, the books would still balance, no constraint would be violated, and every HTTP response would look flawless. Only `transfer_entries_paired` (below) catches this.
 
-### Узкое место №1 — пул соединений ledger-svc (16 штук, никем не заданные)
+### Bottleneck #1 — ledger-svc's connection pool (16 of them, set by nobody)
 
-Самый медленный запрос при 120 VU, как он выглядит в Jaeger (трейс `3b77ed24…`, 841 мс):
+The slowest request at 120 VUs, as it looks in Jaeger (trace `3b77ed24…`, 841ms):
 
 ```
 +   0.0ms  840.8ms  gateway        POST /transfers/
 +   1.1ms  839.1ms  transfers-svc  POST /
-+  11.3ms   37.3ms  transfers-svc  query INSERT          <- строка transfers, автокоммит
++  11.3ms   37.3ms  transfers-svc  query INSERT          <- the transfers row, autocommit
 +  48.6ms   29.4ms  transfers-svc  fraud/CheckTransfer
 +  78.0ms  740.9ms  transfers-svc  ledger/ExecuteTransfer
-+  78.6ms  441.1ms  ledger-svc     pool.acquire          <- ЖДЁМ СОЕДИНЕНИЕ 441 мс
-+ 520.3ms  247.0ms  ledger-svc     query SELECT          <- ждём блокировку строки
++  78.6ms  441.1ms  ledger-svc     pool.acquire          <- WAITING ON A CONNECTION, 441ms
++ 520.3ms  247.0ms  ledger-svc     query SELECT          <- waiting on the row lock
 + 793.2ms   25.3ms  ledger-svc     query COMMIT
 + 821.4ms   18.8ms  transfers-svc  query COMMIT
 ```
 
-**441 миллисекунда из 841 — ожидание свободного соединения в пуле ledger-svc, до единого выполненного запроса.** Спан `pool.acquire` существует потому, что `pkg/pgha.NewPool` вешает `otelpgx` на каждый пул в каждом сервисе (спринт «Трейсинг»), и именно он превращает «почему-то медленно» в «вот эта конкретная очередь».
+**441 of the 841 milliseconds is waiting for a free connection in ledger-svc's pool, before a single query even runs.** The `pool.acquire` span exists because `pkg/pgha.NewPool` wires `otelpgx` into every pool in every service (the "Tracing" sprint), and it's exactly what turns "slow for some reason" into "this specific queue, right here."
 
-Размер пула нигде не задан. `pgxpool` по умолчанию берёт `max(4, runtime.NumCPU())`, ни один DSN в репозитории не передаёт `pool_max_conns` — на этой машине (16 CPU у Docker-VM) выходит **16 соединений на сервис**. Подтверждается независимо: `lock_waiters` в горячем профиле упирается ровно в 15.
+The pool size is set nowhere. `pgxpool` defaults to `max(4, runtime.NumCPU())`, and not one DSN anywhere in the repo passes `pool_max_conns` — on this machine (16 CPUs on the Docker VM), that comes out to **16 connections per service**. Confirmed independently: `lock_waiters` on the hot profile caps at exactly 15.
 
-Отдельно стоит проговорить: **раз размер выведен из числа ядер, он зависит от машины.** Тот же образ на 4-ядерном узле получит пул из 4 соединений и упрётся в этот потолок вчетверо раньше. Незаданный размер пула — не «разумное умолчание», а неявный лимит ёмкости, который меняется при переезде на другое железо. `max_connections` у Postgres при этом 200 (`infra/patroni/patroni.yml`), то есть сервер тут ни при чём: узко на стороне приложения.
+Worth calling out separately: **since the size is derived from the core count, it depends on the machine.** The same image on a 4-core node gets a pool of 4 connections and hits this ceiling four times sooner. An unset pool size isn't "a sensible default," it's an implicit capacity limit that changes the moment you move to different hardware. Postgres's own `max_connections` is 200 here (`infra/patroni/patroni.yml`), meaning the server isn't the bottleneck at all — it's narrow on the application side.
 
-### Узкое место №2 — четыре синхронно реплицируемых коммита на перевод
+### Bottleneck #2 — four synchronously replicated commits per transfer
 
-Это не потолок, а **пол**: то, ниже чего латентность не опустится даже при одном пользователе. Один перевод — четыре независимые транзакции в четырёх местах: `INSERT` строки `transfers` (автокоммит); транзакция fraud-svc с `INSERT fraud_checks`; транзакция ledger-svc (две блокировки, проверка баланса, 2 проводки, 2 апдейта кэша); транзакция `UPDATE transfers` + `INSERT outbox`.
+This isn't a ceiling, it's a **floor**: the point latency can't drop below even with a single user. One transfer is four independent transactions in four places: the `INSERT` of the `transfers` row (autocommit); fraud-svc's transaction with `INSERT fraud_checks`; ledger-svc's transaction (two locks, a balance check, 2 entries, 2 cache updates); the `UPDATE transfers` + `INSERT outbox` transaction.
 
-В спокойном трейсе (10 VU, 126 мс суммарно) четыре коммита стоят 30.8 + 18.4 + 24.2 + 19.3 = **92.7 мс, то есть 74 % всего запроса**. Стоимость коммита при этом практически не зависит от объёма записи: коммит одной строки в `fraud_checks` стоит столько же, сколько коммит шести строк в ledger. Так выглядит фиксированная плата за round-trip, а не за работу.
+In a calm trace (10 VUs, 126ms total), the four commits cost 30.8 + 18.4 + 24.2 + 19.3 = **92.7ms, or 74% of the entire request.** The commit's cost is nearly independent of the write's size: committing a single row in `fraud_checks` costs about as much as committing six rows in the ledger. That's what a fixed round-trip fee looks like, not a fee for work done.
 
-Плата эта — `synchronous_commit: on` вместе с `synchronous_mode: true` из спринта про Patroni: лидер не подтверждает коммит, пока синхронный стендбай не сбросит WAL. Проба меряет это напрямую — `sync_flush_lag_seconds` берётся из `pg_stat_replication` по строке с `sync_state = 'sync'` и на пике даёт **27.9 мс**, что совпадает с наблюдаемой стоимостью коммита.
+That fee is `synchronous_commit: on` together with `synchronous_mode: true` from the Patroni sprint: the leader doesn't confirm a commit until a synchronous standby has flushed its WAL. The probe measures this directly — `sync_flush_lag_seconds`, pulled from `pg_stat_replication` on the row with `sync_state = 'sync'`, peaks at **27.9ms**, matching the observed commit cost.
 
-Осознанная цена, а не дефект: ровно эта настройка — единственное, что делает автофейловер безопасным для леджера (без неё повышенный узел может не знать о транзакции, которую клиенту уже подтвердили, и `SUM(entries)` перестаёт быть нулём — см. рассуждение в `infra/patroni/patroni.yml`). Обменять её на пропускную способность значило бы обменять «банк не теряет подтверждённые деньги» на красивую цифру.
+A deliberate cost, not a defect: this exact setting is the one thing that makes automatic failover safe for the ledger (without it, a promoted node might not know about a transaction the client was already told committed, and `SUM(entries)` stops being zero — see the reasoning in `infra/patroni/patroni.yml`). Trading it away for throughput would mean trading "the bank never loses confirmed money" for a nicer-looking number.
 
-### Узкое место №3 — релей outbox: 1.0 события в секунду
+### Bottleneck #3 — the outbox relay: 1.0 events a second
 
-Самое неожиданное из найденного, и нашлось оно только потому, что проба меряет `outbox`, а не только HTTP-латентность. Замер вообще без нагрузки, чистый дренаж накопившегося (240 с):
+The most unexpected finding, and it only surfaced because the probe measures the `outbox`, not just HTTP latency. Measured with no load at all, a clean drain of the accumulated backlog (240s):
 
 ```
 t= 34s  backlog 1129 -> 1029   (-100)
 t=134s  backlog 1029 ->  929   (-100)
 t=234s  backlog  929 ->  829   (-100)
-максимальная открытая транзакция за окно: 99.5 с
+longest open transaction over the window: 99.5s
 ```
 
-Ровно 100 событий каждые ровно 100 секунд. **1.0 события/с** — при том, что распределённый профиль пишет в outbox под 176 событий/с. За один прогон распределённого профиля (четыре ступени, 4 минуты под нагрузкой) бэклог вырос с 1140 до 34 216 записей и не рассасывается уже никогда.
+Exactly 100 events every exactly 100 seconds. **1.0 events/s** — while the distributed profile writes to the outbox at close to 176 events/s. Over one run of the distributed profile alone (four stages, 4 minutes under load), the backlog grew from 1,140 to 34,216 rows, and it never drains again.
 
-Механизм точный, а не предполагаемый. `outbox.RelayBatch` забирает батч (`DefaultBatchSize` = 100) в **одной** Postgres-транзакции и публикует события **по одному**, отдельным вызовом `writer.WriteMessages` на каждое. У `kafka-go` `Writer.BatchTimeout` по умолчанию — **1 секунда**, и синхронный writer ждёт, пока батч заполнится (100 сообщений) или истечёт таймаут; одно сообщение за вызов означает, что каждое оплачивает полную секунду. Отсюда 100 секунд на батч из 100 — и отсюда же 99.5-секундная открытая транзакция, которую видно в `longest_txn_seconds`.
+The mechanism is precise, not assumed. `outbox.RelayBatch` grabs a batch (`DefaultBatchSize` = 100) in **one** Postgres transaction and publishes events **one at a time**, a separate `writer.WriteMessages` call for each. `kafka-go`'s `Writer.BatchTimeout` defaults to **1 second**, and the synchronous writer waits until either the batch fills (100 messages) or the timeout expires; one message per call means every single one pays the full second. Hence 100 seconds for a batch of 100 — and hence the 99.5-second open transaction visible in `longest_txn_seconds`.
 
-Побочный эффект хуже самой задержки: транзакция, открытая полторы минуты, всё это время удерживает горизонт `xmin`, то есть блокирует вакуум по **всей** базе, а не только по `outbox`.
+The side effect is worse than the delay itself: a transaction held open for a minute and a half holds back the `xmin` horizon for that entire time, blocking vacuum across the **entire** database, not just `outbox`.
 
-Практическое следствие для системы: письма о переводах (`transfer.events` → notifications-svc) отстают от самих переводов на всё это время. Данные не теряются — в этом и смысл outbox, — но «отправил перевод, получил письмо» под нагрузкой превращается в часы.
+The practical consequence for the system: transfer emails (`transfer.events` → notifications-svc) lag behind the transfers themselves by this entire delay. No data is lost — that's the whole point of the outbox — but "sent a transfer, got an email" turns into hours under load.
 
-### Узкое место №4 — проверка овердрафта считает сумму по всему журналу, под блокировкой
+### Bottleneck #4 — the overdraft check sums the entire journal, while holding a lock
 
-`executeTransfer` проверяет достаточность средств так:
+`executeTransfer` checks sufficient funds like this:
 
 ```sql
 SELECT COALESCE(SUM(amount), 0)::bigint FROM entries WHERE ledger_account_id = $1
 ```
 
-— то есть суммирует **весь** журнал проводок счёта, уже удерживая на нём `FOR UPDATE`. Замер на живой базе после прогонов (лидер, прогретый кэш, лучшее из 5):
+— i.e. it sums the account's **entire** entry journal, already holding `FOR UPDATE` on it. Measured on the live database after the runs (the leader, a warmed cache, best of 5):
 
-| проводок на счёте | `SUM(entries)` |
+| entries on the account | `SUM(entries)` |
 |---:|---:|
-| 1 | 0.019 мс |
-| 50 | 0.039 мс |
-| 355 | 0.053 мс |
-| 2 408 | 0.869 мс |
-| 10 003 | 1.599 мс |
+| 1 | 0.019ms |
+| 50 | 0.039ms |
+| 355 | 0.053ms |
+| 2,408 | 0.869ms |
+| 10,003 | 1.599ms |
 
-На холодном кэше и под нагрузкой тот же запрос на счёте с 9 438 проводками занял 6.2 мс. Рост измеряется уверенно, но экстраполировать эти точки в «столько-то при миллионе проводок» нельзя: в измеренном диапазоне зависимость заметно сублинейна (плотность страниц, кэш), и честнее сказать «растёт с историей счёта», чем называть коэффициент.
+On a cold cache and under load, the same query on an account with 9,438 entries took 6.2ms. The growth is measured with confidence, but extrapolating these points into "this much at a million entries" isn't valid: across the measured range the relationship is noticeably sublinear (page density, caching), and it's more honest to say "grows with the account's history" than to name a coefficient.
 
-Важно другое — **это время попадает внутрь окна удержания блокировки**, то есть прямо уменьшает потолок горячей строки, и растёт оно ровно с той нагрузкой, которую этот счёт уже принял. Горячий счёт становится тем медленнее, чем больше через него прошло.
+What matters more — **this time falls inside the lock's hold window**, meaning it directly lowers the hot row's ceiling, and it grows exactly with the load that account has already absorbed. A hot account gets slower the more has passed through it.
 
-Ирония в том, что нужное число уже лежит рядом: `account_balances` обновляется той же функцией, в той же транзакции, под той же блокировкой, и `getBalance` читает баланс именно оттуда. Проверка овердрафта — единственное место, которое всё ещё считает сумму по журналу.
+The irony is that the number it needs is already sitting right next to it: `account_balances` is updated by the same function, in the same transaction, under the same lock, and `getBalance` reads the balance from exactly there. The overdraft check is the one remaining place that still sums the journal.
 
-### Что оказалось НЕ узким местом
+### What turned out NOT to be a bottleneck
 
-**fraud-svc.** Постановка называла velocity-правила вероятным узким местом: они делают запросы по истории на каждый перевод. Проверено — не подтвердилось. В трейсах два агрегата по `fraud_checks` стоят по 0.6 мс, а весь `CheckTransfer` — 21–29 мс, из которых 18–25 мс это его собственный `COMMIT`. То есть fraud-svc дорог ровно тем же, чем и все остальные, — синхронной репликацией на записи в `fraud_checks`, — а не своими правилами. Причина дешевизны конкретна: `idx_fraud_checks_account_id_created_at` покрывает `(account_id, created_at)` — ровно предикат обоих запросов, — а окно в 300/3600 секунд ограничивает выборку сверху независимо от роста таблицы. Отрицательный результат стоит записать так же явно, как положительный.
+**fraud-svc.** The task description flagged the velocity rules as a likely bottleneck: they run history queries on every transfer. Checked — didn't hold up. In the traces, the two `fraud_checks` aggregates cost 0.6ms each, while all of `CheckTransfer` is 21–29ms, of which 18–25ms is its own `COMMIT`. In other words, fraud-svc is expensive for exactly the same reason as everything else — synchronous replication on the write to `fraud_checks` — not because of its own rules. The reason it's cheap is concrete: `idx_fraud_checks_account_id_created_at` covers `(account_id, created_at)` — exactly the predicate both queries use — and the 300/3600-second window caps the result set from above independent of how large the table grows. A negative result deserves to be written down just as explicitly as a positive one.
 
-**Лаг реплик.** Под записью он остаётся микроскопическим: `replica_lag_seconds` на пике 0.05 с, по байтам — сотни килобайт. Ожидаемо при `synchronous_mode`: стендбай не может отстать надолго, потому что лидер его ждёт. Лаг не проблема — он *и есть* узкое место №2, просто измеренное с другой стороны.
+**Replica lag.** Under write load it stays microscopic: `replica_lag_seconds` peaks at 0.05s, and in bytes, hundreds of kilobytes. Expected under `synchronous_mode`: a standby can't fall far behind, because the leader is waiting on it. Lag isn't a problem here — it *is* bottleneck #2, just measured from the other side.
 
-**А вот что действительно упало первым — Jaeger.** `jaeger all-in-one` хранит трейсы в памяти, семплирование локально 100 %, и после ~60 тысяч трассированных переводов контейнер занимал **13.3 ГиБ из 15.5 ГиБ** памяти хоста. Возникшее давление по памяти дало таймауты DNS внутри Docker-сети и кратковременный сбой у Patroni. README уже говорит, что 100 % семплирования — только для локалки (см. «Семплирование»); теперь под этим утверждением есть число. Практический вывод для самих прогонов: перед длинной серией Jaeger стоит перезапускать, иначе первым деградирует не банк, а наблюдение за ним.
+**What actually fell over first was Jaeger.** `jaeger all-in-one` stores traces in memory, sampling is 100% locally, and after ~60 thousand traced transfers the container was using **13.3 of 15.5 GiB** of host memory. The resulting memory pressure caused DNS timeouts inside the Docker network and a brief Patroni outage. The README already says 100% sampling is local-only (see "Sampling"); now there's a number backing that claim. The practical takeaway for the runs themselves: restart Jaeger before a long series, or the first thing to degrade won't be the bank, it'll be the thing watching it.
 
-### Инварианты — без них тест бессмысленен
+### Invariants — without them, the test proves nothing
 
-После каждого профиля `lt verify` прогоняет восемь проверок по БД. Четыре — прямо из постановки, остальные четыре добавлены потому, что без них первые четыре можно пройти, оставаясь сломанным.
+After every profile, `lt verify` runs eight database checks. Four come straight from the task description; the other four were added because without them, the first four can pass while the system is still broken.
 
-| проверка | что утверждает |
+| check | what it asserts |
 |---|---|
-| `entries_sum_zero` | `SUM(entries.amount)` по **всей** таблице = 0. Единственная, сознательно не ограниченная когортой: баг, разбалансировавший книги, мог попасть и на genesis |
-| `no_negative_balances` | ни один счёт когорты не ушёл ниже нуля (genesis и external-world отрицательны по построению — так выглядит эмиссия) |
-| `transfer_entries_paired` | у каждого completed-перевода **ровно две** проводки с его `reference`, суммой в ноль, дебет на отправителе, кредит на получателе, обе по модулю равны сумме перевода |
-| `balance_delta_matches_transfers` | по каждому счёту: «сколько должно было прийти-уйти по таблице `transfers`» = «сколько на самом деле провёл леджер». Числа берутся из **разных таблиц, которые пишут разные сервисы**, поэтому это настоящая сверка, а не тавтология |
-| `no_duplicate_idempotency_keys` | одна строка `transfers` на ключ |
-| `balance_cache_matches_log` | `account_balances` = `SUM(entries)` по каждому счёту. Кэш обновляется read-modify-write под блокировкой; возьмись блокировка не на ту строку — журнал остался бы верным, а кэш поехал, и API показывает именно кэш |
-| `no_entries_for_failed_or_rejected` | деньги не двигались ни по одному переводу, записанному как failed или rejected. `pending` сюда сознательно не входит: pending с проводками — законный исход ветки «исход неизвестен», его разрешает воркер реконсиляции |
-| `cohort_money_conserved` | суммарный баланс когорты равен тому, что в неё положил setup. Все переводы теста — внутри когорты, поэтому сколько бы их ни прошло и как бы они ни переплелись, сумма обязана остаться прежней |
+| `entries_sum_zero` | `SUM(entries.amount)` across the **entire** table = 0. The one deliberately not scoped to the cohort: a bug that unbalanced the books could have landed on genesis too |
+| `no_negative_balances` | no cohort account ever went below zero (genesis and the external-world account are negative by construction — that's what emission looks like) |
+| `transfer_entries_paired` | every completed transfer has **exactly two** entries carrying its `reference`, summing to zero, a debit on the sender, a credit on the recipient, both equal in magnitude to the transfer amount |
+| `balance_delta_matches_transfers` | per account: "how much should have moved, per the `transfers` table" = "how much the ledger actually moved." The numbers come from **different tables, written by different services**, so this is a genuine reconciliation, not a tautology |
+| `no_duplicate_idempotency_keys` | one `transfers` row per key |
+| `balance_cache_matches_log` | `account_balances` = `SUM(entries)` per account. The cache updates via read-modify-write under a lock; if the lock ever grabbed the wrong row, the journal would stay correct while the cache drifted, and the API shows the cache |
+| `no_entries_for_failed_or_rejected` | no money moved for any transfer recorded as failed or rejected. `pending` is deliberately excluded: a pending row with entries is a legitimate outcome of the "outcome unknown" branch, resolved by the reconciliation worker |
+| `cohort_money_conserved` | the cohort's total balance equals what setup put into it. Every test transfer stays inside the cohort, so no matter how many ran or how tangled they got, the sum has to stay the same |
 
-Результат: **после каждого из трёх профилей все восемь проверок проходят**. По финальному прогону — 53 789 проведённых переводов, 87 888 проводок, 0 нарушений.
+Result: **all eight checks pass after every one of the three profiles.** On the final run — 53,789 transfers executed, 87,888 entries, 0 violations.
 
-Про две проверки стоит сказать отдельно.
+Two of the checks deserve a separate note.
 
-**`no_duplicate_idempotency_keys` почти тавтологичен** — на `idempotency_key` висит UNIQUE, так что провалиться он может только если кто-то снесёт констрейнт миграцией. Ровно для этого и оставлен. Настоящая проверка защиты от дублей — `transfer_entries_paired`.
+**`no_duplicate_idempotency_keys` is nearly a tautology** — `idempotency_key` carries a UNIQUE constraint, so it can only fail if someone drops that constraint in a migration. It's kept specifically for that case. The real check on duplicate protection is `transfer_entries_paired`.
 
-**`no_negative_balances` падает на когорте и только сообщает о чужом.** На dev-стенде накапливаются счета от прошлых экспериментов — здесь нашлось три, с отрицательными балансами от тестов возвратов и фейловера, все датированы до появления этого каталога. Проверка, падающая на данных, которых не создавала, — это проверка, чей вывод через неделю начнут пролистывать. Нагрузочный тест двигает деньги только между счетами когорты, так что сузить падение до когорты не теряет ничего, а чужие отрицательные балансы всё равно печатаются, явно помеченные как посторонние.
+**`no_negative_balances` scopes its failure to the cohort and only reports on everything else.** The dev environment accumulates accounts from past experiments — three turned up here, with negative balances left over from refund and failover tests, all dated before this directory even existed. A check that fails on data it never created is a check whose output gets skimmed past within a week. The load test only ever moves money between cohort accounts, so scoping the failure to the cohort loses nothing, and other accounts' negative balances still print, explicitly flagged as unrelated.
 
-### Трейсы медленных запросов в Jaeger
+### Slow-request traces in Jaeger
 
-Связь со спринтами 3–4 работает, и разбирать деградацию можно не гадая:
+The connection to sprints 3–4 works, and degradation can be dug into without guessing:
 
 ```bash
-# все переводы дольше 500 мс за последние 5 минут
+# every transfer slower than 500ms in the last 5 minutes
 curl -s "http://localhost:16686/api/traces?service=transfers-svc&operation=POST%20%2F&limit=100&lookback=5m&minDuration=500ms"
-# или в UI: http://localhost:16686 -> service=gateway, operation=POST /transfers/, Min Duration=500ms
+# or in the UI: http://localhost:16686 -> service=gateway, operation=POST /transfers/, Min Duration=500ms
 ```
 
-Что в них видно ровно потому, что инструментация уже стояла:
+What's visible here exists purely because the instrumentation was already in place:
 
-- `pool.acquire` отдельным спаном (`otelpgx` навешен в `pkg/pgha.NewPool` на все семь пулов) — благодаря этому «медленно» сразу разбирается на «ждали соединение» и «ждали блокировку», а не остаётся дыркой внутри хендлера. Узкое место №1 найдено именно так;
-- каждый `BEGIN`/`COMMIT` своим спаном — так и стало видно, что 74 % спокойного запроса это четыре коммита;
-- `neobank.outbox.lag_ms` на спане публикации — задержка релея отвечается по трейсу, без запроса в БД.
+- `pool.acquire` as its own span (`otelpgx` is wired into `pkg/pgha.NewPool` for all seven pools) — this is what immediately splits "slow" into "waiting on a connection" versus "waiting on a lock," instead of leaving a black hole inside the handler. Bottleneck #1 was found exactly this way;
+- every `BEGIN`/`COMMIT` as its own span — this is exactly what made it visible that 74% of a calm request is four commits;
+- `neobank.outbox.lag_ms` on the publish span — the relay's delay is answered straight from the trace, with no query against the DB.
 
-### Что сознательно не сделано
+### What was deliberately not done
 
-- **Не увеличен пул ledger-svc.** Самая очевидная и дешёвая правка (`?pool_max_conns=N` в DSN) — и именно поэтому её стоит делать отдельно и осознанно: 16 соединений × 7 сервисов это уже 112 при `max_connections = 200`, так что «просто поднять» нельзя, не решив заодно, кому сколько положено и не нужен ли pgbouncer.
-- **Не тронута сериализация на горячей строке.** Убрать её — значит менять схему: шардировать баланс на подсчета, переходить на оптимистичную блокировку с ретраями или на неттинг. Всё это торгует либо простотой, либо самой гарантией «счёт не уходит в минус». Это переделка архитектуры, а не оптимизация.
-- **Не заменён `SUM(entries)` на чтение `account_balances`** в проверке овердрафта, хотя нужное число лежит рядом и обновляется той же транзакцией. Замена переносит источник истины для решения «хватает ли денег» с журнала на кэш, а такое в леджере не решают походя, внутри задачи про нагрузочный тест.
-- **Не починен релей outbox.** Правка маленькая (задать `BatchTimeout` или собрать батч одним вызовом `WriteMessages`), но `pkg/outbox` общий для трёх сервисов, и его гарантии держатся на порядке «сначала опубликовать, потом пометить»: при батчевой записи «отправилось частично» перестаёт быть невозможным состоянием, и логику пометки после частичной неудачи надо переосмыслить и покрыть тестом. Своя задача со своим тестом.
-- **Не выключен `synchronous_commit`.** Это как минимум удвоило бы пропускную способность и отменило бы гарантию, ради которой построен весь спринт про Patroni.
+- **ledger-svc's pool was not enlarged.** The most obvious and cheapest fix (`?pool_max_conns=N` in the DSN) — and exactly why it deserves to be done separately and deliberately: 16 connections × 7 services is already 112 against `max_connections = 200`, so "just raise it" isn't possible without also deciding who gets how many, and whether pgbouncer is needed.
+- **The hot-row serialization was left untouched.** Removing it means changing the schema: sharding the balance across counters, moving to optimistic locking with retries, or netting. All of these trade away either simplicity or the guarantee itself that "an account never goes negative." That's an architecture rework, not an optimization.
+- **`SUM(entries)` was not replaced with reading `account_balances`** in the overdraft check, even though the number it needs sits right there, updated by the same transaction. That swap moves the source of truth for "is there enough money" from the journal to a cache, and that's not a decision to make in passing, inside a load-testing task, for a ledger.
+- **The outbox relay was not fixed.** The fix is small (set `BatchTimeout`, or assemble the batch into a single `WriteMessages` call), but `pkg/outbox` is shared by three services, and its guarantees rest on the ordering "publish first, then mark" — with a batched write, "partially sent" stops being an impossible state, and the marking logic after a partial failure needs to be rethought and covered by a test. Its own task, with its own test.
+- **`synchronous_commit` was not turned off.** That would at least double throughput and cancel out the exact guarantee the whole Patroni sprint was built around.
 
-### Оговорки к методике
+### Caveats on methodology
 
-- **Генератор нагрузки живёт на той же машине**, что и система: k6-контейнер и все 15 контейнеров стека делят одну Docker-VM с 16 CPU. При 120 VU часть измеренной латентности — конкуренция за те же ядра. Абсолютные значения характеризуют «этот стек на этом ноутбуке», а не продовую ёмкость; сравнения между профилями честные, потому что условия у всех трёх одинаковые.
-- **Postgres — трёхузловой кластер с синхронной репликацией на Docker Desktop под Windows**, где `fsync` заметно дороже, чем на нормальном диске. Это раздувает в первую очередь узкое место №2.
-- **Один прогон на ступень, без прогрева и без повторов.** Для формы кривой (полка горячего счёта видна до третьей значащей цифры) этого достаточно; для утверждений вида «стало на 5 % быстрее» — нет.
-- **Абсолютные цифры зависят от объёма БД**, и он рос по ходу: узкое место №4 — прямое следствие. Профили гонялись в порядке distributed → hotspot → duplicates по одной базе, поэтому поздние работали на более полной таблице `entries`, чем ранние.
-- **`RECONCILE_STALE_AFTER=20s`** в `.env` (демонстрационное значение вместо дефолтных 2 минут) означает, что воркер реконсиляции во время прогонов работает агрессивнее обычного и добавляет свою долю запросов.
-- **Профиль дубликатов был перезапущен** после того, как первая его попытка попала на протухшие токены (см. «Токены переиздаются перед каждой ступенью»), и Jaeger перед перезапуском был перезапущен, чтобы освободить память. Распределённый и горячий профили этим не затронуты — оба уложились в срок жизни токенов целиком, что подтверждается нулём 401 в их разбивке исходов.
+- **The load generator lives on the same machine** as the system: the k6 container and all 15 stack containers share one Docker VM with 16 CPUs. At 120 VUs, part of the measured latency is contention for those same cores. The absolute numbers characterize "this stack on this laptop," not production capacity; comparisons between profiles are fair, because all three ran under identical conditions.
+- **Postgres is a three-node cluster with synchronous replication on Docker Desktop under Windows**, where `fsync` is noticeably more expensive than on a real disk. This inflates bottleneck #2 above all else.
+- **One run per stage, no warmup, no repeats.** For the shape of a curve (the hot account's plateau is visible to three significant figures), that's enough; for a claim like "got 5% faster," it isn't.
+- **The absolute numbers depend on database volume**, which grew as the runs went on: bottleneck #4 is a direct consequence. The profiles ran in order distributed → hotspot → duplicates against one database, so the later ones ran against a fuller `entries` table than the earlier ones.
+- **`RECONCILE_STALE_AFTER=20s`** in `.env` (a demonstration value in place of the 2-minute default) means the reconciliation worker runs more aggressively than usual during the runs, adding its own share of queries.
+- **The duplicates profile was rerun** after its first attempt hit expired tokens (see "Tokens are reissued before every stage"), and Jaeger was restarted before the rerun to free up memory. The distributed and hot-account profiles were unaffected by this — both completed comfortably within a token's lifetime, confirmed by zero 401s in their outcome breakdowns.
 
-## Статус
-На этом шаге описана только структура репозитория и `docker-compose.yml`.
-Следующие шаги добавят Go-код сервисов, интеграцию с инфраструктурой (Postgres/Redis/Kafka) и CI.
+## Status
+At this step, only the repository structure and `docker-compose.yml` are described.
+The next steps will add the services' Go code, infrastructure integration (Postgres/Redis/Kafka), and CI.
