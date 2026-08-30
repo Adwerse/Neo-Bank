@@ -9,7 +9,7 @@ export function LiveIndicator() {
   return (
     <div className={styles.pill}>
       <span className={[styles.dot, connected ? styles.dotLive : styles.dotPolling].join(' ')} />
-      <span>{connected ? 'Обновления в реальном времени' : 'Автообновление каждые 5 с'}</span>
+      <span>{connected ? 'Live updates' : 'Auto-refreshing every 5s'}</span>
     </div>
   )
 }

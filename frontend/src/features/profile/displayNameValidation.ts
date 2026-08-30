@@ -24,12 +24,12 @@ export function validateDisplayName(value: string): string | null {
 
   const codePoints = Array.from(trimmed)
   if (codePoints.length > MAX_DISPLAY_NAME_LENGTH) {
-    return `Имя должно быть не длиннее ${MAX_DISPLAY_NAME_LENGTH} символов`
+    return `Name must be ${MAX_DISPLAY_NAME_LENGTH} characters or fewer`
   }
   for (const ch of codePoints) {
     const codePoint = ch.codePointAt(0)
     if (codePoint !== undefined && isProblemChar(codePoint)) {
-      return 'Имя содержит недопустимые символы'
+      return 'Name contains characters that are not allowed'
     }
   }
   return null

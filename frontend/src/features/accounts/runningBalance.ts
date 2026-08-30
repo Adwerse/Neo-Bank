@@ -48,8 +48,8 @@ export interface BalanceDelta {
   // back to showing only the absolute amount in that case.
   pct: number | null
   absoluteMinorUnits: number
-  // A real span of whatever was actually fetched ("12 дней"), never a
-  // hardcoded period like the source mockup's illustrative "6 мес".
+  // A real span of whatever was actually fetched ("12 days"), never a
+  // hardcoded period like the source mockup's illustrative "6 mo".
   periodLabel: string
   direction: 'up' | 'down' | 'flat'
 }

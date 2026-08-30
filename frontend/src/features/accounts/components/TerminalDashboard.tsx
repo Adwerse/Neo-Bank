@@ -32,7 +32,7 @@ export function TerminalDashboard({ account, operations }: TerminalDashboardProp
   return (
     <div className={styles.screen}>
       <div>
-        <div className={styles.balanceLabel}>Баланс</div>
+        <div className={styles.balanceLabel}>Balance</div>
         <div className={styles.balanceValueRow}>
           {account ? <TerminalBalanceValue account={account} /> : <Skeleton className={styles.balanceSkeleton} />}
         </div>
@@ -44,13 +44,13 @@ export function TerminalDashboard({ account, operations }: TerminalDashboardProp
             ) : (
               <Money value={delta.absoluteMinorUnits} currency={account.currency} size="compact" />
             )}{' '}
-            за {delta.periodLabel}
+            over {delta.periodLabel}
           </div>
         )}
       </div>
 
       <div className={styles.section}>
-        <BalanceChart account={account} header={<span className={styles.sectionLabel}>Баланс во времени</span>} />
+        <BalanceChart account={account} header={<span className={styles.sectionLabel}>Balance over time</span>} />
       </div>
 
       <div id="account-details" className={styles.identityChips}>
@@ -58,7 +58,7 @@ export function TerminalDashboard({ account, operations }: TerminalDashboardProp
           <>
             <Tag variant="accent">{ACCOUNT_STATUS_LABELS[account.status] ?? account.status}</Tag>
             <span className={styles.iban}>{account.iban}</span>
-            <CopyButton value={account.iban} label="Скопировать IBAN" />
+            <CopyButton value={account.iban} label="Copy IBAN" />
           </>
         ) : (
           <Skeleton className={styles.ibanSkeleton} />
@@ -68,7 +68,7 @@ export function TerminalDashboard({ account, operations }: TerminalDashboardProp
       <QuickActions layout="row" />
 
       <div className={styles.section}>
-        <div className={styles.sectionLabel}>Движение средств</div>
+        <div className={styles.sectionLabel}>Money flow</div>
         <MoneyFlowBar entries={entries} />
       </div>
 
@@ -88,7 +88,7 @@ function TerminalBalanceValue({ account }: { account: MeResponse }) {
       currency={account.currency}
       showSign={false}
       size="hero"
-      label="Баланс"
+      label="Balance"
       className={balanceFlash ? styles.balanceFlash : undefined}
     />
   )

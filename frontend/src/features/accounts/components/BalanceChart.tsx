@@ -6,6 +6,7 @@ import buttonStyles from '../../../shared/ui/Button.module.css'
 import { Skeleton } from '../../../shared/ui/Skeleton'
 import { usePrefersReducedMotion } from '../../../shared/ui/usePrefersReducedMotion'
 import { formatMoney } from '../../../shared/money'
+import { APP_LOCALE } from '../../../shared/locale'
 import type { BalanceHistoryRange, BalanceHistoryResponse, MeResponse } from '../api'
 import { useBalanceHistory } from '../useBalanceHistory'
 import styles from './BalanceChart.module.css'
@@ -13,9 +14,9 @@ import styles from './BalanceChart.module.css'
 type BalancePoint = BalanceHistoryResponse['points'][number]
 
 const RANGES: { key: BalanceHistoryRange; label: string }[] = [
-  { key: 'week', label: 'Неделя' },
-  { key: 'month', label: 'Месяц' },
-  { key: 'all', label: 'Всё' },
+  { key: 'week', label: 'Week' },
+  { key: 'month', label: 'Month' },
+  { key: 'all', label: 'All' },
 ]
 
 function todayDateString(): string {
@@ -42,9 +43,14 @@ function formatAxisValue(minorUnits: number): string {
   return Math.round(units).toString()
 }
 
+const axisDateFormat = new Intl.DateTimeFormat(APP_LOCALE, { day: '2-digit', month: '2-digit' })
+
 function formatAxisDate(dateStr: string): string {
-  const [, month, day] = dateStr.split('-')
-  return `${day}.${month}`
+  // dateStr is a plain 'YYYY-MM-DD' with no time component — parsing it via
+  // `new Date(dateStr)` would read it as UTC midnight and can shift a day
+  // backward in a negative-offset zone, so it's built as local midnight.
+  const [year, month, day] = dateStr.split('-').map(Number)
+  return axisDateFormat.format(new Date(year, month - 1, day))
 }
 
 interface BalanceChartProps {
@@ -117,9 +123,9 @@ function BalanceChartBody({ account, isLoading, isError, onRetry, points, isEmpt
   if (isError) {
     return (
       <div className={styles.errorState}>
-        <p>Не удалось загрузить историю баланса.</p>
+        <p>Failed to load balance history.</p>
         <button type="button" className={styles.retryLink} onClick={onRetry}>
-          Повторить
+          Retry
         </button>
       </div>
     )
@@ -128,16 +134,16 @@ function BalanceChartBody({ account, isLoading, isError, onRetry, points, isEmpt
   if (isEmpty) {
     return (
       <div className={styles.emptyState}>
-        <p className={styles.emptyText}>Пополните счёт, чтобы увидеть динамику баланса.</p>
+        <p className={styles.emptyText}>Top up your account to see the balance trend.</p>
         <Link to="/deposit" className={`${buttonStyles.button} ${buttonStyles.primary}`}>
-          Пополнить счёт
+          Top up account
         </Link>
       </div>
     )
   }
 
   if (points.length < 2) {
-    return <p className={styles.empty}>Недостаточно данных за этот период.</p>
+    return <p className={styles.empty}>Not enough data for this period.</p>
   }
 
   return (

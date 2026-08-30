@@ -19,27 +19,30 @@ import {
   type StatusFilter,
   type TypeFilter,
 } from '../historyGrouping'
+import { APP_LOCALE } from '../../../shared/locale'
 import styles from './OperationHistory.module.css'
 
 const TYPE_OPTIONS: { value: TypeFilter; label: string }[] = [
-  { value: 'all', label: 'Все' },
-  { value: 'transfer', label: 'Переводы' },
-  { value: 'deposit', label: 'Депозиты' },
-  { value: 'withdrawal', label: 'Выводы' },
+  { value: 'all', label: 'All' },
+  { value: 'transfer', label: 'Transfers' },
+  { value: 'deposit', label: 'Deposits' },
+  { value: 'withdrawal', label: 'Withdrawals' },
 ]
 
 const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
-  { value: 'all', label: 'Любой статус' },
-  { value: 'posted', label: 'Выполнено' },
-  { value: 'pending', label: 'В обработке' },
-  { value: 'failed', label: 'Не выполнено' },
+  { value: 'all', label: 'Any status' },
+  { value: 'posted', label: 'Completed' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'failed', label: 'Failed' },
 ]
 
 const RANGE_OPTIONS: { value: RangeFilter; label: string }[] = [
-  { value: 'all', label: 'Всё время' },
-  { value: '7d', label: '7 дней' },
-  { value: '30d', label: '30 дней' },
+  { value: 'all', label: 'All time' },
+  { value: '7d', label: '7 days' },
+  { value: '30d', label: '30 days' },
 ]
+
+const rowTimeFormat = new Intl.DateTimeFormat(APP_LOCALE, { hour: '2-digit', minute: '2-digit' })
 
 function FilterGroup<T extends string>({
   options,
@@ -79,7 +82,7 @@ const OperationRow = memo(function OperationRow({ entry, changed }: { entry: Ope
     <li className={[styles.row, changed && styles.rowChanged].filter(Boolean).join(' ')}>
       <span className={styles.typeBadge}>
         {TYPE_LABELS[entry.type] ?? entry.type}
-        {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · симуляция</span>}
+        {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · simulated</span>}
       </span>
       <Money
         value={outgoing ? -entry.amount : entry.amount}
@@ -89,9 +92,7 @@ const OperationRow = memo(function OperationRow({ entry, changed }: { entry: Ope
       />
       <span className={styles.counterparty}>{entry.type === 'transfer' ? entry.counterparty_iban : '—'}</span>
       <Badge variant={statusBadgeVariant(entry)}>{STATUS_LABELS[entry.status] ?? entry.status}</Badge>
-      <span className={styles.date}>
-        {new Date(entry.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
-      </span>
+      <span className={styles.date}>{rowTimeFormat.format(new Date(entry.created_at))}</span>
     </li>
   )
 })
@@ -123,7 +124,7 @@ export function OperationHistory() {
   }
 
   // Auto-loads the next page once the sentinel scrolls into view — the
-  // "infinite" half of infinite scroll. A manual "Показать ещё" button
+  // "infinite" half of infinite scroll. A manual "Show more" button
   // below covers the case where IntersectionObserver isn't available or
   // the sentinel never enters the viewport (e.g. a very short list).
   useEffect(() => {
@@ -145,7 +146,7 @@ export function OperationHistory() {
   if (isLoading) {
     return (
       <Card>
-        <h2>История операций</h2>
+        <h2>Operation history</h2>
         <Skeleton className={styles.skeletonRow} />
         <Skeleton className={styles.skeletonRow} />
         <Skeleton className={styles.skeletonRow} />
@@ -156,14 +157,14 @@ export function OperationHistory() {
   if (isError) {
     const message =
       isApiError(error) && error.status === 404
-        ? 'Ваш счёт ещё создаётся — попробуйте обновить через несколько секунд.'
-        : 'Не удалось загрузить историю операций.'
+        ? 'Your account is still being created — please refresh in a few seconds.'
+        : 'Could not load your operation history.'
     return (
       <Card>
-        <h2>История операций</h2>
+        <h2>Operation history</h2>
         <Banner variant="warning">{message}</Banner>
         <Button className={styles.retryButton} loading={isRefetching} onClick={() => refetch()}>
-          Повторить
+          Retry
         </Button>
       </Card>
     )
@@ -173,7 +174,7 @@ export function OperationHistory() {
 
   return (
     <Card>
-      <h2>История операций</h2>
+      <h2>Operation history</h2>
 
       {allEntries.length > 0 && (
         <div className={styles.filters}>
@@ -188,13 +189,13 @@ export function OperationHistory() {
       )}
 
       {allEntries.length === 0 ? (
-        <p className={styles.empty}>Операций пока нет.</p>
+        <p className={styles.empty}>No operations yet.</p>
       ) : filteredEntries.length === 0 ? (
         <div className={styles.empty}>
-          <p>Ничего не найдено по выбранным фильтрам.</p>
+          <p>Nothing matches the selected filters.</p>
           {hasAnyFilterApplied && (
             <Button variant="secondary" onClick={() => setFilters(DEFAULT_FILTERS)}>
-              Сбросить фильтры
+              Clear filters
             </Button>
           )}
         </div>
@@ -218,16 +219,16 @@ export function OperationHistory() {
 
           {nextPageError && (
             <div className={styles.loadMoreError}>
-              <Banner variant="warning">Не удалось загрузить ещё операции.</Banner>
+              <Banner variant="warning">Could not load more operations.</Banner>
               <Button variant="secondary" onClick={loadMore}>
-                Повторить
+                Retry
               </Button>
             </div>
           )}
 
           {!isFetchingNextPage && !nextPageError && hasNextPage && (
             <Button variant="secondary" className={styles.loadMoreButton} onClick={loadMore}>
-              Показать ещё
+              Show more
             </Button>
           )}
         </>

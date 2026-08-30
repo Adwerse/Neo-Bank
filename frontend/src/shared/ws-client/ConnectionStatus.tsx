@@ -16,9 +16,9 @@ export function ConnectionStatus() {
   if (isStale) {
     return (
       <Banner variant="warning" className={styles.staleBanner}>
-        <span>Нет соединения в реальном времени — данные могут быть неактуальны.</span>
+        <span>No live connection — data may be out of date.</span>
         <Button type="button" variant="secondary" className={styles.refreshButton} onClick={refreshNow}>
-          Обновить
+          Refresh
         </Button>
       </Banner>
     )
@@ -27,7 +27,7 @@ export function ConnectionStatus() {
   if (wsState === 'reconnecting') {
     return (
       <div className={styles.reconnectingBar} role="status" aria-live="polite">
-        Переподключение… обновления могут запаздывать
+        Reconnecting… updates may be delayed
       </div>
     )
   }

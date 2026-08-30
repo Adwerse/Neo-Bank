@@ -12,7 +12,7 @@ import styles from './DashboardPage.module.css'
 import { TerminalDashboard } from './TerminalDashboard'
 
 export function DashboardPage() {
-  useDocumentTitle('Главная')
+  useDocumentTitle('Home')
   const { data, isError, error, refetch } = useMe()
   const isDesktop = useIsDesktop()
   // Called unconditionally (before the isError early return below) per the
@@ -26,7 +26,7 @@ export function DashboardPage() {
       <Card>
         <Banner variant="warning">{getAccountErrorMessage(error)}</Banner>
         <Button className={styles.retryButton} onClick={() => refetch()}>
-          Повторить
+          Retry
         </Button>
       </Card>
     )
@@ -43,8 +43,8 @@ export function DashboardPage() {
       {account && isRestricted && (
         <Banner variant={account.status === 'closed' ? 'danger' : 'warning'} className={styles.statusBanner}>
           {account.status === 'closed'
-            ? 'Счёт закрыт. Операции недоступны — обратитесь в поддержку.'
-            : 'Счёт заморожен. Операции временно недоступны.'}
+            ? 'Account closed. Operations are unavailable — contact support.'
+            : 'Account frozen. Operations are temporarily unavailable.'}
         </Banner>
       )}
       {isDesktop ? (

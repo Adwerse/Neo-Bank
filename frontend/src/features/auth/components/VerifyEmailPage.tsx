@@ -7,6 +7,8 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage } from '../../../shared/errorMessages'
+import { pluralize } from '../../../shared/locale'
 import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { resendVerification, verifyEmail } from '../api'
 import { verifyCodeSchema, type VerifyCodeFormValues } from '../schemas'
@@ -17,13 +19,14 @@ type VerifyEmailErrorBody = paths['/auth/verify-email']['post']['responses']['40
 
 const RESEND_COOLDOWN_SECONDS = 60
 
-// The backend collapses every verify-email failure into the same
-// {error: string} shape (no error-code field), so distinguishing cases in
-// the UI means matching on these exact strings from services/auth-svc/verify.go.
-const WRONG_CODE = 'invalid verification code'
-const CODE_EXPIRED = 'verification code has expired'
-const TOO_MANY_ATTEMPTS = 'too many failed attempts, request a new code'
-const NO_ACTIVE_CODE = 'no active verification code, request a new one'
+// The backend returns one of these stable codes for every verify-email
+// failure (see gateway/openapi.yaml's Error schema) — distinguishing
+// cases means matching on these, not the human text (that's this
+// component's own job now).
+const WRONG_CODE = 'invalid_verification_code'
+const CODE_EXPIRED = 'verification_code_expired'
+const TOO_MANY_ATTEMPTS = 'too_many_verification_attempts'
+const NO_ACTIVE_CODE = 'no_active_verification_code'
 
 export function VerifyEmailPage() {
   const location = useLocation()
@@ -39,7 +42,7 @@ export function VerifyEmailPage() {
 }
 
 function VerifyEmailForm({ email }: { email: string }) {
-  useDocumentTitle('Подтверждение email')
+  useDocumentTitle('Verify email')
   const navigate = useNavigate()
 
   const [verifyError, setVerifyError] = useState<string | null>(null)
@@ -65,10 +68,10 @@ function VerifyEmailForm({ email }: { email: string }) {
     setVerifyError(null)
     try {
       await verifyEmail({ email, code: values.code })
-      navigate('/login', { state: { message: 'Email подтверждён, войдите' } })
+      navigate('/login', { state: { message: 'Email verified, please log in' } })
     } catch (err) {
       if (!isApiError(err)) {
-        setVerifyError('Не удалось подтвердить код, попробуйте ещё раз')
+        setVerifyError('Could not verify the code, please try again')
         return
       }
       const body = err.body as VerifyEmailErrorBody | undefined
@@ -77,25 +80,19 @@ function VerifyEmailForm({ email }: { email: string }) {
           const remaining = body?.attempts_remaining
           setVerifyError(
             typeof remaining === 'number'
-              ? `Неверный код, осталось попыток: ${remaining}`
-              : 'Неверный код, попробуйте ещё раз',
+              ? `Incorrect code — ${remaining} ${pluralize(remaining, 'attempt', 'attempts')} remaining`
+              : 'Incorrect code, please try again',
           )
           break
         }
         case CODE_EXPIRED:
-          setVerifyError('Код истёк. Запросите новый код.')
-          setMustResend(true)
-          break
         case TOO_MANY_ATTEMPTS:
-          setVerifyError('Попытки исчерпаны. Запросите новый код.')
-          setMustResend(true)
-          break
         case NO_ACTIVE_CODE:
-          setVerifyError('Активный код не найден. Запросите новый код.')
+          setVerifyError(errorMessage(err.message))
           setMustResend(true)
           break
         default:
-          setVerifyError(err.message)
+          setVerifyError(errorMessage(err.message))
       }
     }
   }
@@ -106,7 +103,7 @@ function VerifyEmailForm({ email }: { email: string }) {
     setIsResending(true)
     try {
       await resendVerification({ email })
-      setResendNotice('Новый код отправлен на почту')
+      setResendNotice('A new code has been sent to your email')
       setMustResend(false)
       setVerifyError(null)
     } catch (err) {
@@ -114,7 +111,7 @@ function VerifyEmailForm({ email }: { email: string }) {
       // cooldowns briefly disagreeing) — not worth alarming the user over,
       // the button just stays locked for the rest of the countdown.
       if (isApiError(err) && err.status !== 429) {
-        setResendError(err.message)
+        setResendError(errorMessage(err.message))
       }
     } finally {
       setIsResending(false)
@@ -124,12 +121,12 @@ function VerifyEmailForm({ email }: { email: string }) {
 
   return (
     <Card>
-      <h1>Подтверждение email</h1>
-      <p className={styles.hint}>Мы отправили 6-значный код на {email}</p>
+      <h1>Verify email</h1>
+      <p className={styles.hint}>We sent a 6-digit code to {email}</p>
       <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="code">
-            Код подтверждения
+            Verification code
           </label>
           <Input
             id="code"
@@ -146,12 +143,12 @@ function VerifyEmailForm({ email }: { email: string }) {
         </div>
         {verifyError && <ErrorText>{verifyError}</ErrorText>}
         <Button type="submit" loading={isSubmitting} disabled={mustResend}>
-          Подтвердить
+          Verify
         </Button>
       </form>
       <div className={styles.resend}>
         <Button type="button" variant="secondary" loading={isResending} disabled={secondsLeft > 0} onClick={onResend}>
-          {secondsLeft > 0 ? `Отправить код заново (${secondsLeft})` : 'Отправить код заново'}
+          {secondsLeft > 0 ? `Resend code (${secondsLeft})` : 'Resend code'}
         </Button>
         {resendNotice && <p className={styles.notice}>{resendNotice}</p>}
         {resendError && <ErrorText>{resendError}</ErrorText>}

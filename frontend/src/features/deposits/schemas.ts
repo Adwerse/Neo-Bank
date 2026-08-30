@@ -13,15 +13,15 @@ const MAX_CENTS = 1_000_000
 export const depositSchema = z.object({
   amount: z
     .string()
-    .regex(/^\d+([.,]\d{1,2})?$/, 'Введите сумму, например 100 или 99.50')
+    .regex(/^\d+([.,]\d{1,2})?$/, 'Enter an amount, e.g. 100 or 99.50')
     .refine((v) => {
       const cents = parseAmountToCents(v)
       return cents !== null && cents >= MIN_CENTS
-    }, 'Минимальная сумма пополнения — 0.50 €')
+    }, 'Minimum deposit amount is €0.50')
     .refine((v) => {
       const cents = parseAmountToCents(v)
       return cents !== null && cents <= MAX_CENTS
-    }, 'Максимальная сумма пополнения — 10 000.00 €'),
+    }, 'Maximum deposit amount is €10,000.00'),
 })
 
 export type DepositFormValues = z.infer<typeof depositSchema>

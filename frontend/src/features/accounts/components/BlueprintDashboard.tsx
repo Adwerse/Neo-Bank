@@ -4,6 +4,7 @@ import { Money } from '../../../shared/ui/Money'
 import { NumberedBadge } from '../../../shared/ui/NumberedBadge'
 import { Skeleton } from '../../../shared/ui/Skeleton'
 import { useFlashOnChange } from '../../../shared/ui/useFlashOnChange'
+import { APP_LOCALE } from '../../../shared/locale'
 import type { MeResponse } from '../api'
 import { computeBalanceDelta } from '../runningBalance'
 import { ACCOUNT_STATUS_LABELS } from '../statusLabels'
@@ -27,6 +28,8 @@ const STATUS_COLOR_CLASS: Record<string, string> = {
   closed: 'statusClosed',
 }
 
+const openedDateFormat = new Intl.DateTimeFormat(APP_LOCALE)
+
 export function BlueprintDashboard({ account, operations }: BlueprintDashboardProps) {
   const { entries, balanceBeforeEarliest, isLoading, isError, refetch } = operations
   const earliestCreatedAt = entries[entries.length - 1]?.created_at
@@ -37,38 +40,38 @@ export function BlueprintDashboard({ account, operations }: BlueprintDashboardPr
     <div className={styles.page}>
       <div className={styles.infoStrip}>
         <div className={styles.infoCell}>
-          <div className={styles.infoLabel}>Счёт</div>
+          <div className={styles.infoLabel}>Account</div>
           <div className={styles.infoValue}>
             {account ? account.account_number : <Skeleton className={styles.infoValueSkeleton} />}
           </div>
         </div>
         <div className={styles.infoCell}>
-          <div className={styles.infoLabel}>Валюта</div>
+          <div className={styles.infoLabel}>Currency</div>
           <div className={styles.infoValue}>{account ? account.currency : <Skeleton className={styles.infoValueSkeleton} />}</div>
         </div>
         <div className={styles.infoCell}>
-          <div className={styles.infoLabel}>Статус</div>
+          <div className={styles.infoLabel}>Status</div>
           <div className={[styles.infoValue, statusClass].filter(Boolean).join(' ')}>
             {account ? (ACCOUNT_STATUS_LABELS[account.status] ?? account.status) : <Skeleton className={styles.infoValueSkeleton} />}
           </div>
         </div>
         <div className={styles.infoCell}>
-          <div className={styles.infoLabel}>Тип</div>
+          <div className={styles.infoLabel}>Type</div>
           {/* Every account in this system is the same single product — a
               true constant, not a fabricated per-account field. */}
-          <div className={styles.infoValue}>Текущий</div>
+          <div className={styles.infoValue}>Current</div>
         </div>
         <div className={styles.infoCellLast}>
-          <div className={styles.infoLabel}>Открыт</div>
+          <div className={styles.infoLabel}>Opened</div>
           <div className={styles.infoValue}>
-            {account ? new Date(account.created_at).toLocaleDateString('ru-RU') : <Skeleton className={styles.infoValueSkeleton} />}
+            {account ? openedDateFormat.format(new Date(account.created_at)) : <Skeleton className={styles.infoValueSkeleton} />}
           </div>
         </div>
       </div>
 
       <CornerBracketPanel>
         <div className={styles.balancePanel}>
-          <NumberedBadge n={1} label="Баланс" />
+          <NumberedBadge n={1} label="Balance" />
           <div className={styles.balanceValueRow}>
             {account ? <BlueprintBalanceValue account={account} /> : <Skeleton className={styles.balanceSkeleton} />}
           </div>
@@ -85,42 +88,42 @@ export function BlueprintDashboard({ account, operations }: BlueprintDashboardPr
               ) : (
                 <Money value={delta.absoluteMinorUnits} currency={account.currency} size="compact" />
               )}{' '}
-              за {delta.periodLabel}
+              over {delta.periodLabel}
             </div>
           )}
         </div>
-        <BalanceChart account={account} header={<NumberedBadge n={2} label="Динамика" />} />
+        <BalanceChart account={account} header={<NumberedBadge n={2} label="Trend" />} />
       </CornerBracketPanel>
 
       <div className={styles.grid3}>
         <div id="account-details" className={styles.card}>
-          <NumberedBadge n={3} label="Реквизиты счёта" />
+          <NumberedBadge n={3} label="Account details" />
           <div className={styles.detailsTable}>
             <div className={styles.detailsKey}>IBAN</div>
             <div className={styles.detailsValRow}>
               {account ? (
                 <>
                   <span className={styles.detailsVal}>{account.iban}</span>
-                  <CopyButton value={account.iban} label="Скопировать IBAN" />
+                  <CopyButton value={account.iban} label="Copy IBAN" />
                 </>
               ) : (
                 <Skeleton className={styles.ibanSkeleton} />
               )}
             </div>
-            <div className={styles.detailsKey}>Банк</div>
-            <div className={styles.detailsVal}>Neo-Bank · фиктивный институт</div>
-            <div className={styles.detailsKey}>Переводы</div>
-            <div className={styles.detailsVal}>только между счетами Neo-Bank</div>
+            <div className={styles.detailsKey}>Bank</div>
+            <div className={styles.detailsVal}>Neo-Bank · fictional institution</div>
+            <div className={styles.detailsKey}>Transfers</div>
+            <div className={styles.detailsVal}>Neo-Bank accounts only</div>
           </div>
         </div>
 
         <div className={styles.card}>
-          <NumberedBadge n={4} label="Движение средств" />
+          <NumberedBadge n={4} label="Money flow" />
           <MoneyFlowBar entries={entries} />
         </div>
 
         <div className={styles.card}>
-          <NumberedBadge n={5} label="Действия" />
+          <NumberedBadge n={5} label="Actions" />
           <QuickActions layout="grid" />
         </div>
       </div>
@@ -128,8 +131,8 @@ export function BlueprintDashboard({ account, operations }: BlueprintDashboardPr
       <BlueprintOperationTable entries={entries} isLoading={isLoading} isError={isError} onRetry={refetch} />
 
       <p className={styles.legend}>
-        ① Баланс&nbsp;&nbsp;② Динамика&nbsp;&nbsp;③ Реквизиты счёта&nbsp;&nbsp;④ Движение средств&nbsp;&nbsp;⑤ Быстрые действия&nbsp;&nbsp;⑥
-        Операции
+        ① Balance&nbsp;&nbsp;② Trend&nbsp;&nbsp;③ Account details&nbsp;&nbsp;④ Money flow&nbsp;&nbsp;⑤ Quick actions&nbsp;&nbsp;⑥
+        Operations
       </p>
     </div>
   )
@@ -146,7 +149,7 @@ function BlueprintBalanceValue({ account }: { account: MeResponse }) {
       currency={account.currency}
       showSign={false}
       size="hero"
-      label="Баланс"
+      label="Balance"
       className={balanceFlash ? styles.balanceFlash : undefined}
     />
   )

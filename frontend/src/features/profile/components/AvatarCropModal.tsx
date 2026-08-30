@@ -120,7 +120,7 @@ export function AvatarCropModal({ file, onCancel, onCropped }: AvatarCropModalPr
   }
 
   return (
-    <Modal isOpen onClose={onCancel} title="Обрежьте фото">
+    <Modal isOpen onClose={onCancel} title="Crop your photo">
       <div
         className={styles.viewport}
         style={{ width: VIEWPORT, height: VIEWPORT }}
@@ -141,10 +141,10 @@ export function AvatarCropModal({ file, onCancel, onCropped }: AvatarCropModalPr
         <div className={styles.mask} aria-hidden="true" />
       </div>
 
-      {loadError && <ErrorText>Не удалось открыть изображение — попробуйте другой файл.</ErrorText>}
+      {loadError && <ErrorText>Could not open that image — please try a different file.</ErrorText>}
 
       <label className={styles.zoomRow}>
-        <span className={styles.zoomLabel}>Масштаб</span>
+        <span className={styles.zoomLabel}>Zoom</span>
         <input
           type="range"
           min={1}
@@ -159,10 +159,10 @@ export function AvatarCropModal({ file, onCancel, onCropped }: AvatarCropModalPr
 
       <div className={styles.actions}>
         <Button type="button" onClick={handleConfirm} disabled={!image}>
-          Обрезать и загрузить
+          Crop and upload
         </Button>
         <Button type="button" variant="secondary" onClick={onCancel}>
-          Отмена
+          Cancel
         </Button>
       </div>
     </Modal>

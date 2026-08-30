@@ -1,30 +1,29 @@
 import type { OperationHistoryEntry } from './api'
 import { isPosted } from './operationLabels'
+import { APP_LOCALE } from '../../shared/locale'
 
 const DAY_MS = 86_400_000
+
+const weekdayFormat = new Intl.DateTimeFormat(APP_LOCALE, { weekday: 'long' })
 
 function startOfDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate())
 }
 
-function capitalize(s: string): string {
-  return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1)
-}
-
-// "Сегодня" / "Вчера" / weekday name (this week) / short date otherwise —
-// the backend gives no date-bucket of its own, so this only groups
+// "Today" / "Yesterday" / weekday name (this week) / short date otherwise
+// — the backend gives no date-bucket of its own, so this only groups
 // whatever page(s) the infinite-scroll feed has already loaded.
 export function dateGroupLabel(iso: string, now: Date = new Date()): string {
   const d = new Date(iso)
   const diffDays = Math.round((startOfDay(now).getTime() - startOfDay(d).getTime()) / DAY_MS)
-  if (diffDays === 0) return 'Сегодня'
-  if (diffDays === 1) return 'Вчера'
-  if (diffDays > 1 && diffDays < 7) return capitalize(d.toLocaleDateString('ru-RU', { weekday: 'long' }))
-  return d.toLocaleDateString('ru-RU', {
+  if (diffDays === 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  if (diffDays > 1 && diffDays < 7) return weekdayFormat.format(d)
+  return new Intl.DateTimeFormat(APP_LOCALE, {
     day: 'numeric',
     month: 'long',
     year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
-  })
+  }).format(d)
 }
 
 export interface OperationGroup {

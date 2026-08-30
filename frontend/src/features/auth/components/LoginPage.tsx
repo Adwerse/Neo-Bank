@@ -7,6 +7,7 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage } from '../../../shared/errorMessages'
 import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { useAuth } from '../AuthContext'
 import { resendVerification } from '../api'
@@ -14,13 +15,13 @@ import { loginSchema, type LoginFormValues } from '../schemas'
 import styles from './LoginPage.module.css'
 
 // The backend deliberately collapses "no such email" and "wrong password"
-// into the same message to resist account enumeration — the UI must not
+// into the same code to resist account enumeration — the UI must not
 // undo that by guessing which one it was.
-const INVALID_CREDENTIALS = 'invalid credentials'
-const EMAIL_NOT_VERIFIED = 'email not verified'
+const INVALID_CREDENTIALS = 'invalid_credentials'
+const EMAIL_NOT_VERIFIED = 'email_not_verified'
 
 export function LoginPage() {
-  useDocumentTitle('Вход')
+  useDocumentTitle('Log in')
   const location = useLocation()
   const navigate = useNavigate()
   const { login } = useAuth()
@@ -43,15 +44,15 @@ export function LoginPage() {
       navigate('/dashboard', { replace: true })
     } catch (err) {
       if (!isApiError(err)) {
-        setServerError('Не удалось войти, попробуйте ещё раз')
+        setServerError('Could not log in, please try again')
         return
       }
       if (err.message === INVALID_CREDENTIALS) {
-        setServerError('Неверный email или пароль')
+        setServerError(errorMessage(INVALID_CREDENTIALS))
       } else if (err.message === EMAIL_NOT_VERIFIED) {
         setUnverifiedEmail(values.email)
       } else {
-        setServerError(err.message)
+        setServerError(errorMessage(err.message))
       }
     }
   }
@@ -69,7 +70,7 @@ export function LoginPage() {
 
   return (
     <Card>
-      <h1>Вход</h1>
+      <h1>Log in</h1>
       {infoMessage && <p className={styles.notice}>{infoMessage}</p>}
       <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className={styles.field}>
@@ -89,7 +90,7 @@ export function LoginPage() {
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="password">
-            Пароль
+            Password
           </label>
           <Input
             id="password"
@@ -104,18 +105,18 @@ export function LoginPage() {
         {serverError && <ErrorText>{serverError}</ErrorText>}
         {unverifiedEmail && (
           <ErrorText>
-            Email не подтверждён.{' '}
+            Email not verified.{' '}
             <button type="button" className={styles.linkButton} onClick={onSendVerificationCode}>
-              Отправить код подтверждения
+              Send verification code
             </button>
           </ErrorText>
         )}
         <Button type="submit" loading={isSubmitting}>
-          Войти
+          Log in
         </Button>
       </form>
       <p className={styles.footerLink}>
-        <Link to="/forgot-password">Забыли пароль?</Link>
+        <Link to="/forgot-password">Forgot your password?</Link>
       </p>
     </Card>
   )

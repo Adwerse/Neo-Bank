@@ -23,7 +23,7 @@ export function TerminalOperationList({ entries, isLoading, isError, onRetry }: 
   return (
     <div>
       <div className={styles.header}>
-        <span className={styles.title}>Последние операции</span>
+        <span className={styles.title}>Recent operations</span>
         {!isLoading && !isError && <Tag variant="neutral">{entries.length}</Tag>}
       </div>
 
@@ -37,21 +37,21 @@ export function TerminalOperationList({ entries, isLoading, isError, onRetry }: 
 
       {isError && (
         <div className={styles.errorBlock}>
-          <Banner variant="warning">Не удалось загрузить операции.</Banner>
+          <Banner variant="warning">Failed to load operations.</Banner>
           <Button className={styles.retryButton} onClick={onRetry}>
-            Повторить
+            Retry
           </Button>
         </div>
       )}
 
-      {!isLoading && !isError && entries.length === 0 && <p className={styles.empty}>Операций пока нет.</p>}
+      {!isLoading && !isError && entries.length === 0 && <p className={styles.empty}>No operations yet.</p>}
 
       {!isLoading && !isError && entries.length > 0 && (
         <>
           <div className={styles.columnHeader}>
-            <span className={styles.colOp}>Операция</span>
-            <span className={styles.colAmt}>Сумма</span>
-            <span className={styles.colBal}>Баланс</span>
+            <span className={styles.colOp}>Operation</span>
+            <span className={styles.colAmt}>Amount</span>
+            <span className={styles.colBal}>Balance</span>
           </div>
           <ul className={styles.rows}>
             {entries.map((entry) => {
@@ -71,7 +71,7 @@ export function TerminalOperationList({ entries, isLoading, isError, onRetry }: 
                   <div className={styles.colOp}>
                     <div className={styles.opName}>
                       {TYPE_LABELS[entry.type] ?? entry.type}
-                      {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · симуляция</span>}
+                      {entry.type === 'withdrawal' && <span className={styles.simulationTag}> · simulated</span>}
                     </div>
                     <div className={styles.opMeta}>
                       <span className={styles.opMetaText}>{metaParts.join(' · ')}</span>
@@ -95,7 +95,7 @@ export function TerminalOperationList({ entries, isLoading, isError, onRetry }: 
                     showSign={false}
                     tone="faint"
                     size="compact"
-                    label="Баланс после операции"
+                    label="Balance after operation"
                     className={styles.colBal}
                   />
                 </li>

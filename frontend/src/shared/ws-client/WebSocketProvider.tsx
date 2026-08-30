@@ -38,7 +38,7 @@ interface WebSocketContextValue {
   // reconnect (the common case) never flashes an alarming banner — only a
   // reconnect that's actually taking a while does.
   isStale: boolean
-  // Bypasses the batcher's debounce for a user-initiated "Обновить" click —
+  // Bypasses the batcher's debounce for a user-initiated "Refresh" click —
   // they asked for current data right now, not in 150ms.
   refreshNow: () => void
 }

@@ -9,14 +9,14 @@ import { LiveIndicator } from '../shared/ws-client/LiveIndicator'
 import { PageTransition } from '../shared/ui/PageTransition'
 import styles from './MobileShell.module.css'
 
-// Same three destinations as Sidebar.tsx's persistent nav — Реквизиты is
+// Same three destinations as Sidebar.tsx's persistent nav — Account details is
 // deliberately not a fourth tab, same reasoning as there: it jumps to a
 // section of /dashboard rather than naming a page of its own, so it stays
 // reachable from the dashboard's IBAN block and QuickActions instead.
 const tabItems = [
-  { to: '/dashboard', label: 'Главная', Icon: HomeIcon },
-  { to: '/transfers', label: 'Переводы', Icon: ArrowUpRightIcon },
-  { to: '/deposit', label: 'Пополнение', Icon: PlusCircleIcon },
+  { to: '/dashboard', label: 'Home', Icon: HomeIcon },
+  { to: '/transfers', label: 'Transfers', Icon: ArrowUpRightIcon },
+  { to: '/deposit', label: 'Top up', Icon: PlusCircleIcon },
 ]
 
 // Persistent chrome for every authenticated mobile page — avatar/name/bell
@@ -41,20 +41,20 @@ export function MobileShell() {
     <div className={styles.shell}>
       <header className={styles.header}>
         <div className={styles.identity}>
-          <Link to="/profile" className={styles.avatarLink} aria-label="Профиль">
+          <Link to="/profile" className={styles.avatarLink} aria-label="Profile">
             <Avatar imageUrl={profile?.avatar_url_64} seed={profile?.user_id ?? fallback.name} initial={initial} size={38} />
           </Link>
           <div>
-            <div className={styles.greetingSmall}>С возвращением,</div>
+            <div className={styles.greetingSmall}>Welcome back,</div>
             <div className={styles.greetingName}>{name}</div>
           </div>
         </div>
         <div className={styles.headerActions}>
-          <button type="button" className={styles.bellButton} aria-label="Уведомления">
+          <button type="button" className={styles.bellButton} aria-label="Notifications">
             <BellIcon size={17} />
           </button>
           <button type="button" className={styles.logoutButton} onClick={handleLogout}>
-            Выйти
+            Log out
           </button>
         </div>
       </header>

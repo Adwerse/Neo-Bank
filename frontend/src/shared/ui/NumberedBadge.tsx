@@ -6,7 +6,7 @@ interface NumberedBadgeProps {
 }
 
 // The circled-number section headers used throughout the Blueprint
-// dashboard (①  Баланс, ②  Динамика, …) — the footer legend that spells out
+// dashboard (① Balance, ② Trend, …) — the footer legend that spells out
 // what each number means lives in BlueprintDashboard itself.
 export function NumberedBadge({ n, label }: NumberedBadgeProps) {
   return (

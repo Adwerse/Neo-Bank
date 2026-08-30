@@ -9,6 +9,7 @@ import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Banner } from '../../../shared/ui/Banner'
 import { Money } from '../../../shared/ui/Money'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage, REJECTED_REASON_CLAUSES } from '../../../shared/errorMessages'
 import { useMe } from '../../accounts/useMe'
 import { createTransfer, type TransferResult } from '../api'
 import { parseAmountToCents } from '../money'
@@ -16,61 +17,31 @@ import { transferSchema, type TransferFormValues } from '../schemas'
 import { IbanField } from './IbanField'
 import styles from './TransferForm.module.css'
 
-const FAILURE_REASON_LABELS: Record<string, string> = {
-  insufficient_funds: 'Недостаточно средств',
-  account_not_found: 'Счёт не найден',
-  invalid_amount: 'Некорректная сумма',
-  ledger_internal_error: 'Временная ошибка перевода, попробуйте позже',
-}
-
 function failureReasonMessage(reason?: string): string {
-  if (!reason) return 'Перевод не выполнен'
-  return FAILURE_REASON_LABELS[reason] ?? reason
+  if (!reason) return 'Transfer failed'
+  return errorMessage(reason, 'Transfer failed')
 }
 
-// Matches raw backend error strings (services/transfers-svc/http.go /
-// transfer.go) to Russian messages, same lookup-with-fallback pattern as
-// LoginPage's INVALID_CREDENTIALS/EMAIL_NOT_VERIFIED.
-const API_ERROR_LABELS: Record<string, string> = {
-  'recipient not found': 'Получатель с таким IBAN не найден',
-  'invalid IBAN': 'Проверьте IBAN получателя — неверный формат или контрольные цифры',
-  'only transfers within this bank are supported': 'Переводы поддерживаются только внутри этого банка',
-  'too many resolve attempts, try again later': 'Слишком много попыток, попробуйте позже',
-  'cannot transfer to your own account': 'Нельзя перевести самому себе',
-  'recipient account is closed': 'Счёт получателя закрыт',
-  'sender account is not active': 'Ваш счёт временно не может отправлять переводы',
-  'idempotency key already used with different parameters': 'Что-то пошло не так, попробуйте создать перевод заново',
-  'invalid amount': 'Введите сумму больше нуля',
-  'account not found': 'Ваш счёт ещё создаётся — попробуйте через несколько секунд',
-}
-
-function apiErrorMessage(message: string): string {
-  return API_ERROR_LABELS[message] ?? message
-}
-
-// Deliberately separate from FAILURE_REASON_LABELS above: failure_reason
-// holds two disjoint vocabularies depending on status (ledger codes when
-// failed, fraud-svc's triggered rule name when rejected — see
-// services/transfers-svc/transfer.go's Transfer.FailureReason doc comment).
-// Unlike failureReasonMessage/apiErrorMessage, this deliberately does NOT
-// fall back to the raw string: a raw rule name like "velocity_count" is an
-// internal implementation detail, not something to show a user, and must
-// never leak here.
-const REJECTED_REASON_LABELS: Record<string, string> = {
-  amount_threshold: 'превышен лимит суммы для одного перевода',
-  velocity_count: 'слишком много переводов за короткое время',
-  velocity_sum: 'превышена допустимая общая сумма переводов за короткое время',
-}
-
+// failure_reason holds two disjoint vocabularies depending on status:
+// ledger codes when failed (looked up via errorMessage above, full
+// sentences), fraud-svc's triggered rule name when rejected (looked up
+// here, lowercase clause fragments for the "Reason: ..." template below)
+// — see services/transfers-svc/transfer.go's Transfer.FailureReason doc
+// comment. Deliberately does NOT fall back to the raw code: an
+// unrecognized rule name is an internal implementation detail, not
+// something to show a user, and must never leak here.
 function rejectedReasonClause(reason?: string): string {
-  const clause = reason ? REJECTED_REASON_LABELS[reason] : undefined
-  return clause ? `Причина: ${clause}.` : ''
+  const clause = reason ? REJECTED_REASON_CLAUSES[reason] : undefined
+  return clause ? `Reason: ${clause}.` : ''
 }
 
 // The only signal distinguishing this 202 cause from the pre-existing
 // ledger-uncertain one: both share the identical TransferResult shape
 // (status "pending" + optional message), so the message text itself is
-// the discriminator. Matches services/transfers-svc/http.go's literal.
+// the discriminator. Matches services/transfers-svc/http.go's literal —
+// this is the Transfer's own `message` field on a 202 response, not an
+// Error-schema `error` code, so it was never part of the error-code
+// refactor.
 const FRAUD_CHECK_UNAVAILABLE_MESSAGE = 'fraud check unavailable, transfer still pending'
 
 export function TransferForm() {
@@ -94,21 +65,21 @@ export function TransferForm() {
   // Transfer as-is, with no message at all (message is never persisted to
   // the transfers table, only generated fresh on a definite 202 response).
   // Without this flag, a second retry attempt would silently lose the
-  // fraud-unavailable banner/button and fall back to "Новый перевод",
-  // even though nothing was actually resolved.
+  // fraud-unavailable banner/button and fall back to "New transfer", even
+  // though nothing was actually resolved.
   const [fraudUnavailable, setFraudUnavailable] = useState(false)
   // Purely a presentational gate in front of the real submit — a review
   // step the user must confirm before onSubmit ever runs. Doesn't change
   // when the idempotency key is generated (still at mount, above) or when
-  // the API is actually called (still only from handleConfirm/Повторить).
+  // the API is actually called (still only from handleConfirm/Retry).
   const [reviewValues, setReviewValues] = useState<TransferFormValues | null>(null)
 
   // The review and result "steps" are different JSX trees rendered by the
   // same component instance, not separate routes — a browser drops focus
-  // to <body> when the previously-focused element (the "Продолжить"/
-  // "Подтвердить" button) is removed from the DOM by that swap, which
-  // would strand a keyboard user back at the top of the page. These two
-  // effects re-land focus on the new step's primary element instead.
+  // to <body> when the previously-focused element (the "Continue"/
+  // "Confirm" button) is removed from the DOM by that swap, which would
+  // strand a keyboard user back at the top of the page. These two effects
+  // re-land focus on the new step's primary element instead.
   const reviewButtonRef = useRef<HTMLButtonElement>(null)
   const resultRef = useRef<HTMLDivElement>(null)
 
@@ -132,7 +103,7 @@ export function TransferForm() {
     setServerError(null)
     const amountCents = parseAmountToCents(values.amount)
     if (amountCents === null) {
-      setServerError('Введите корректную сумму')
+      setServerError('Enter a valid amount')
       return
     }
     try {
@@ -157,7 +128,7 @@ export function TransferForm() {
     } catch (err) {
       setResult(null)
       setFraudUnavailable(false)
-      setServerError(isApiError(err) ? apiErrorMessage(err.message) : 'Не удалось выполнить перевод, попробуйте ещё раз')
+      setServerError(isApiError(err) ? errorMessage(err.message) : 'Could not complete the transfer, please try again')
     }
   }
 
@@ -187,35 +158,35 @@ export function TransferForm() {
     const amountCents = parseAmountToCents(reviewValues.amount) ?? 0
     return (
       <Card>
-        <h2>Подтверждение перевода</h2>
+        <h2>Confirm transfer</h2>
         <div className={styles.review}>
           <div className={styles.reviewRow}>
-            <span className={styles.reviewLabel}>Получатель</span>
+            <span className={styles.reviewLabel}>Recipient</span>
             <span className={styles.reviewIban}>{reviewValues.recipientIban}</span>
           </div>
           <div className={styles.reviewRow}>
-            <span className={styles.reviewLabel}>Отправится</span>
-            <Money value={-amountCents} currency="EUR" size="hero" label="Отправится" />
+            <span className={styles.reviewLabel}>Sending</span>
+            <Money value={-amountCents} currency="EUR" size="hero" label="Sending" />
           </div>
           {account && (
             <div className={styles.reviewRow}>
-              <span className={styles.reviewLabel}>Останется на счёте</span>
+              <span className={styles.reviewLabel}>Remaining balance</span>
               <Money
                 value={account.balance - amountCents}
                 currency={account.currency}
                 showSign={false}
                 tone="neutral"
-                label="Останется на счёте"
+                label="Remaining balance"
               />
             </div>
           )}
           {serverError && <ErrorText>{serverError}</ErrorText>}
           <div className={styles.reviewActions}>
             <Button ref={reviewButtonRef} type="button" loading={isSubmitting} onClick={() => onSubmit(reviewValues)}>
-              Подтвердить и отправить
+              Confirm and send
             </Button>
             <Button type="button" variant="secondary" disabled={isSubmitting} onClick={handleBackToForm}>
-              Изменить
+              Edit
             </Button>
           </div>
         </div>
@@ -225,27 +196,27 @@ export function TransferForm() {
 
   return (
     <Card>
-      <h2>Перевод</h2>
+      <h2>Transfer</h2>
       {!result && (
         <form className={styles.form} onSubmit={handleSubmit(handleReview)} noValidate>
           <div className={styles.field}>
             <label className={styles.label} htmlFor="recipientIban">
-              IBAN получателя
+              Recipient's IBAN
             </label>
             <IbanField control={control} />
           </div>
           <div className={styles.field}>
             <div className={styles.amountLabelRow}>
               <label className={styles.label} htmlFor="amount">
-                Сумма
+                Amount
               </label>
               {!accountLoading && !accountError && account && (
                 <span className={styles.available}>
-                  Доступно:{' '}
-                  <Money value={account.balance} currency={account.currency} showSign={false} tone="faint" label="Доступно" />
+                  Available:{' '}
+                  <Money value={account.balance} currency={account.currency} showSign={false} tone="faint" label="Available" />
                 </span>
               )}
-              {accountError && <span className={styles.available}>Баланс временно недоступен</span>}
+              {accountError && <span className={styles.available}>Balance temporarily unavailable</span>}
             </div>
             <Input
               id="amount"
@@ -260,7 +231,7 @@ export function TransferForm() {
           </div>
           {serverError && <ErrorText>{serverError}</ErrorText>}
           <Button type="submit" loading={isSubmitting}>
-            Продолжить
+            Continue
           </Button>
         </form>
       )}
@@ -269,26 +240,22 @@ export function TransferForm() {
         <div className={styles.result} ref={resultRef} tabIndex={-1}>
           {result.status === 'completed' && (
             <Banner variant="success">
-              Перевод выполнен:{' '}
-              <Money value={result.amount} currency="EUR" showSign={false} label="Сумма перевода" />.
+              Transfer completed:{' '}
+              <Money value={result.amount} currency="EUR" showSign={false} label="Transfer amount" />.
             </Banner>
           )}
           {result.status === 'failed' && <Banner variant="danger">{failureReasonMessage(result.failure_reason)}</Banner>}
           {result.status === 'rejected' && (
             <Banner variant="warning">
-              Перевод заблокирован системой безопасности в целях вашей защиты.{' '}
+              This transfer was blocked by our security system to protect you.{' '}
               {rejectedReasonClause(result.failure_reason)}
             </Banner>
           )}
           {result.status === 'pending' && fraudUnavailable && (
-            <Banner variant="warning">
-              Проверка безопасности временно недоступна. Попробуйте повторить перевод.
-            </Banner>
+            <Banner variant="warning">Security check temporarily unavailable. Please try the transfer again.</Banner>
           )}
           {result.status === 'pending' && !fraudUnavailable && result.message && (
-            <Banner variant="warning">
-              Перевод обрабатывается, статус неизвестен — проверьте историю переводов ниже.
-            </Banner>
+            <Banner variant="warning">Transfer is processing, status unknown — check the operation history below.</Banner>
           )}
           {result.status === 'pending' && fraudUnavailable ? (
             <Button
@@ -298,11 +265,11 @@ export function TransferForm() {
               className={styles.newTransferButton}
               onClick={() => reviewValues && onSubmit(reviewValues)}
             >
-              Повторить
+              Retry
             </Button>
           ) : (
             <Button variant="secondary" type="button" className={styles.newTransferButton} onClick={handleNewTransfer}>
-              Новый перевод
+              New transfer
             </Button>
           )}
         </div>

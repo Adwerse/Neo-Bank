@@ -5,22 +5,13 @@ import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Input } from '../../../shared/ui/Input'
 import { PencilIcon } from '../../../shared/ui/icons'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage } from '../../../shared/errorMessages'
 import { getAccessTokenEmail } from '../../../shared/api-client/jwt'
 import { getDisplayName } from '../../accounts/displayName'
 import { validateDisplayName } from '../displayNameValidation'
 import { useUpdateDisplayName } from '../useUpdateDisplayName'
 import type { Profile } from '../api'
 import styles from './DisplayNameEditor.module.css'
-
-const API_ERROR_LABELS: Record<string, string> = {
-  'display_name must be 50 characters or fewer': 'Имя должно быть не длиннее 50 символов',
-  'display_name must not contain control characters': 'Имя содержит недопустимые символы',
-  'display_name must not contain text-direction control characters': 'Имя содержит недопустимые символы',
-}
-
-function apiErrorMessage(message: string): string {
-  return API_ERROR_LABELS[message] ?? message
-}
 
 export function DisplayNameEditor({ profile }: { profile: Profile }) {
   // null = not editing. A separate local string (not just derived from
@@ -61,7 +52,7 @@ export function DisplayNameEditor({ profile }: { profile: Profile }) {
       await mutation.mutateAsync(editingValue.trim())
       setEditingValue(null)
     } catch (err) {
-      setError(isApiError(err) ? apiErrorMessage(err.message) : 'Не удалось сохранить имя, попробуйте ещё раз')
+      setError(isApiError(err) ? errorMessage(err.message) : 'Could not save the name, please try again')
     }
   }
 
@@ -79,7 +70,7 @@ export function DisplayNameEditor({ profile }: { profile: Profile }) {
     return (
       <div className={styles.display}>
         <span className={styles.name}>{currentName}</span>
-        <button type="button" className={styles.editButton} onClick={startEditing} aria-label="Изменить имя">
+        <button type="button" className={styles.editButton} onClick={startEditing} aria-label="Edit name">
           <PencilIcon size={13} />
         </button>
       </div>
@@ -103,7 +94,7 @@ export function DisplayNameEditor({ profile }: { profile: Profile }) {
       </div>
       <div className={styles.editActions}>
         <Button type="button" className={styles.actionButton} loading={mutation.isPending} onClick={save}>
-          Сохранить
+          Save
         </Button>
         <Button
           type="button"
@@ -112,7 +103,7 @@ export function DisplayNameEditor({ profile }: { profile: Profile }) {
           disabled={mutation.isPending}
           onClick={cancelEditing}
         >
-          Отмена
+          Cancel
         </Button>
       </div>
     </div>

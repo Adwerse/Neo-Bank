@@ -18,7 +18,7 @@ export function MoneyFlowBar({ entries }: MoneyFlowBarProps) {
   const buckets = computeMoneyFlowBreakdown(entries)
 
   if (buckets.length === 0) {
-    return <p className={styles.empty}>Операций пока нет.</p>
+    return <p className={styles.empty}>No operations yet.</p>
   }
 
   return (

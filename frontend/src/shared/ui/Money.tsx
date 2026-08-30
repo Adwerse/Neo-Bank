@@ -23,9 +23,9 @@ interface MoneyProps {
   tone?: 'auto' | 'neutral' | 'faint' | 'pending'
   size?: 'hero' | 'compact'
   className?: string
-  // Context word/phrase spoken before the amount ("Доступно",
-  // "Останется на счёте", "Текущий баланс") — supersedes the automatic
-  // "Приход"/"Расход" direction word, since a caller-given label is always
+  // Context word/phrase spoken before the amount ("Available",
+  // "Remaining balance", "Current balance") — supersedes the automatic
+  // "Received"/"Sent" direction word, since a caller-given label is always
   // more specific. Without it, a signed nonzero amount still gets the
   // direction word; a neutral/zero amount gets no prefix, just the amount.
   // Either way the amount itself is always announced — there is no case
@@ -57,7 +57,7 @@ export function Money({ value, currency, showSign = true, tone, size = 'compact'
   // signed nonzero amount falls back to its direction word, and a neutral
   // or zero amount still gets the spoken amount + currency name on its
   // own rather than going unlabeled.
-  const direction = showSign && value > 0 ? 'Приход' : showSign && value < 0 ? 'Расход' : null
+  const direction = showSign && value > 0 ? 'Received' : showSign && value < 0 ? 'Sent' : null
   const prefix = label ?? direction
   const spokenAmount = formatMoneySpoken(Math.abs(value), currency)
   const accessibleLabel = prefix ? `${prefix}: ${spokenAmount}` : spokenAmount

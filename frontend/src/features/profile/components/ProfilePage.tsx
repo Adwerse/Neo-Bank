@@ -12,26 +12,24 @@ import { LogoutIcon } from '../../../shared/ui/icons'
 import { getAccessTokenEmail } from '../../../shared/api-client/jwt'
 import { useAuth } from '../../auth/AuthContext'
 import { formatIban } from '../../transfers/iban'
+import { ACCOUNT_STATUS_LABELS } from '../../accounts/statusLabels'
 import { useMe } from '../../accounts/useMe'
 import { useProfile } from '../useProfile'
 import { AvatarUploader } from './AvatarUploader'
 import { DisplayNameEditor } from './DisplayNameEditor'
 import styles from './ProfilePage.module.css'
 
-const STATUS_LABELS: Record<string, string> = {
-  active: 'Активен',
-  frozen: 'Заморожен',
-  closed: 'Закрыт',
-}
-
-const STATUS_VARIANT: Record<string, 'success' | 'warning' | 'danger'> = {
+// Same success/warning/danger convention as operationLabels.ts's status
+// badges — account status just isn't one of the entry types that helper
+// covers, so its own tiny map lives here instead.
+const ACCOUNT_STATUS_VARIANT: Record<string, 'success' | 'warning' | 'danger'> = {
   active: 'success',
   frozen: 'warning',
   closed: 'danger',
 }
 
 export function ProfilePage() {
-  useDocumentTitle('Профиль')
+  useDocumentTitle('Profile')
   const { data: profile, isLoading: profileLoading, isError: profileError, refetch: refetchProfile } = useProfile()
   const { data: account, isLoading: accountLoading, isError: accountError, refetch: refetchAccount } = useMe()
   const { logout } = useAuth()
@@ -69,9 +67,9 @@ export function ProfilePage() {
     return (
       <div className={styles.page}>
         <Card>
-          <Banner variant="warning">Не удалось загрузить профиль.</Banner>
+          <Banner variant="warning">Could not load your profile.</Banner>
           <Button className={styles.retryButton} onClick={() => refetchProfile()}>
-            Повторить
+            Retry
           </Button>
         </Card>
       </div>
@@ -89,7 +87,7 @@ export function ProfilePage() {
       </Card>
 
       <Card>
-        <h2>Реквизиты счёта</h2>
+        <h2>Account details</h2>
         {accountLoading && (
           <div className={styles.detailsSkeleton}>
             <Skeleton className={styles.detailSkeletonRow} />
@@ -98,9 +96,9 @@ export function ProfilePage() {
         )}
         {accountError && (
           <div className={styles.accountError}>
-            <Banner variant="warning">Реквизиты счёта временно недоступны.</Banner>
+            <Banner variant="warning">Account details are temporarily unavailable.</Banner>
             <Button variant="secondary" onClick={() => refetchAccount()}>
-              Повторить
+              Retry
             </Button>
           </div>
         )}
@@ -109,17 +107,17 @@ export function ProfilePage() {
             <div className={styles.detailRow}>
               <span className={styles.detailLabel}>IBAN</span>
               <span className={styles.detailValue}>{formatIban(account.iban)}</span>
-              <CopyButton value={account.iban} label="Скопировать IBAN" />
+              <CopyButton value={account.iban} label="Copy IBAN" />
             </div>
             <div className={styles.detailRow}>
-              <span className={styles.detailLabel}>Номер счёта</span>
+              <span className={styles.detailLabel}>Account number</span>
               <span className={styles.detailValue}>{account.account_number}</span>
-              <CopyButton value={account.account_number} label="Скопировать номер счёта" />
+              <CopyButton value={account.account_number} label="Copy account number" />
             </div>
             <div className={styles.detailRow}>
-              <span className={styles.detailLabel}>Статус</span>
-              <Badge variant={STATUS_VARIANT[account.status] ?? 'pending'}>
-                {STATUS_LABELS[account.status] ?? account.status}
+              <span className={styles.detailLabel}>Status</span>
+              <Badge variant={ACCOUNT_STATUS_VARIANT[account.status] ?? 'pending'}>
+                {ACCOUNT_STATUS_LABELS[account.status] ?? account.status}
               </Badge>
             </div>
           </div>
@@ -129,18 +127,18 @@ export function ProfilePage() {
       <Card>
         <Button variant="secondary" className={styles.logoutButton} onClick={() => setConfirmOpen(true)}>
           <LogoutIcon size={15} />
-          Выйти из аккаунта
+          Log out
         </Button>
       </Card>
 
-      <Modal isOpen={confirmOpen} onClose={() => setConfirmOpen(false)} title="Выйти из аккаунта?">
-        <p className={styles.confirmText}>Вы сможете войти снова в любой момент — по email и паролю.</p>
+      <Modal isOpen={confirmOpen} onClose={() => setConfirmOpen(false)} title="Log out?">
+        <p className={styles.confirmText}>You can log back in at any time with your email and password.</p>
         <div className={styles.confirmActions}>
           <Button onClick={handleLogout} loading={loggingOut}>
-            Выйти
+            Log out
           </Button>
           <Button variant="secondary" disabled={loggingOut} onClick={() => setConfirmOpen(false)}>
-            Отмена
+            Cancel
           </Button>
         </div>
       </Modal>

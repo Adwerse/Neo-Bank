@@ -3,7 +3,7 @@ import { DepositForm } from './DepositForm'
 import styles from './DepositPage.module.css'
 
 export function DepositPage() {
-  useDocumentTitle('Пополнение')
+  useDocumentTitle('Deposit')
   return (
     <div className={styles.page}>
       <DepositForm />

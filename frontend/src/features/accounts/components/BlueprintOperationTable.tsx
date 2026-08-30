@@ -7,8 +7,11 @@ import { Skeleton } from '../../../shared/ui/Skeleton'
 import { Tag } from '../../../shared/ui/Tag'
 import { useChangedRowKeys } from '../../../shared/ui/useChangedRowKeys'
 import { isOutgoing, isPosted, rowKey, STATUS_LABELS, statusBadgeVariant, TYPE_LABELS } from '../../transfers/operationLabels'
+import { APP_LOCALE } from '../../../shared/locale'
 import type { AnnotatedOperation } from '../runningBalance'
 import styles from './BlueprintOperationTable.module.css'
+
+const rowDateTimeFormat = new Intl.DateTimeFormat(APP_LOCALE, { dateStyle: 'short', timeStyle: 'short' })
 
 interface BlueprintOperationTableProps {
   entries: AnnotatedOperation[]
@@ -23,7 +26,7 @@ export function BlueprintOperationTable({ entries, isLoading, isError, onRetry }
   return (
     <div className={styles.card}>
       <div className={styles.header}>
-        <NumberedBadge n={6} label="Операции" />
+        <NumberedBadge n={6} label="Operations" />
         {!isLoading && !isError && <Tag variant="neutral">{entries.length}</Tag>}
       </div>
 
@@ -37,23 +40,23 @@ export function BlueprintOperationTable({ entries, isLoading, isError, onRetry }
 
       {isError && (
         <div className={styles.errorBlock}>
-          <Banner variant="warning">Не удалось загрузить операции.</Banner>
-          <Button onClick={onRetry}>Повторить</Button>
+          <Banner variant="warning">Failed to load operations.</Banner>
+          <Button onClick={onRetry}>Retry</Button>
         </div>
       )}
 
-      {!isLoading && !isError && entries.length === 0 && <p className={styles.empty}>Операций пока нет.</p>}
+      {!isLoading && !isError && entries.length === 0 && <p className={styles.empty}>No operations yet.</p>}
 
       {!isLoading && !isError && entries.length > 0 && (
         <table className={styles.table}>
           <thead>
             <tr>
-              <th className={styles.colNo}>№</th>
-              <th>Операция</th>
-              <th>Дата</th>
-              <th>Статус</th>
-              <th className={styles.right}>Сумма</th>
-              <th className={styles.right}>Баланс</th>
+              <th className={styles.colNo}>#</th>
+              <th>Operation</th>
+              <th>Date</th>
+              <th>Status</th>
+              <th className={styles.right}>Amount</th>
+              <th className={styles.right}>Balance</th>
             </tr>
           </thead>
           <tbody>
@@ -70,7 +73,7 @@ export function BlueprintOperationTable({ entries, isLoading, isError, onRetry }
                       <span className={styles.counterparty}> · {entry.counterparty_iban}</span>
                     )}
                   </td>
-                  <td className={styles.mono}>{new Date(entry.created_at).toLocaleString('ru-RU')}</td>
+                  <td className={styles.mono}>{rowDateTimeFormat.format(new Date(entry.created_at))}</td>
                   <td>
                     <Badge variant={statusBadgeVariant(entry)}>{STATUS_LABELS[entry.status] ?? entry.status}</Badge>
                   </td>
@@ -90,7 +93,7 @@ export function BlueprintOperationTable({ entries, isLoading, isError, onRetry }
                       showSign={false}
                       tone="faint"
                       size="compact"
-                      label="Баланс после операции"
+                      label="Balance after operation"
                       className={styles.mono}
                     />
                   </td>

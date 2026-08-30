@@ -50,7 +50,7 @@ export function AvatarUploader({ profile }: { profile: Profile }) {
   async function handleCropped(blob: Blob) {
     setLocalStep({ kind: 'idle' })
     const ok = await upload(blob)
-    if (ok) showToast('Аватар обновлён', 'success')
+    if (ok) showToast('Avatar updated', 'success')
   }
 
   return (
@@ -62,7 +62,7 @@ export function AvatarUploader({ profile }: { profile: Profile }) {
           className={styles.cameraButton}
           onClick={() => inputRef.current?.click()}
           disabled={isBusy}
-          aria-label="Изменить аватар"
+          aria-label="Change avatar"
         >
           <CameraIcon size={16} />
         </button>
@@ -86,7 +86,7 @@ export function AvatarUploader({ profile }: { profile: Profile }) {
             />
           </div>
           <span className={styles.progressLabel}>
-            {step.kind === 'uploading' ? `Загрузка… ${Math.round(step.progress * 100)}%` : 'Подтверждение…'}
+            {step.kind === 'uploading' ? `Uploading… ${Math.round(step.progress * 100)}%` : 'Confirming…'}
           </span>
         </div>
       )}

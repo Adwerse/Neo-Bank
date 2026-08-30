@@ -11,6 +11,7 @@ import { ErrorText } from '../../../shared/ui/ErrorText'
 import { Banner } from '../../../shared/ui/Banner'
 import { Money } from '../../../shared/ui/Money'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage } from '../../../shared/errorMessages'
 import { useIsDesktop } from '../../../shared/ui/useIsDesktop'
 import { useMe } from '../../accounts/useMe'
 import { parseAmountToCents } from '../../transfers/money'
@@ -22,31 +23,24 @@ import { getStripeAppearance } from '../stripeAppearance'
 import { useDepositStatusPolling, type DepositPollOutcome } from '../useDepositStatusPolling'
 import styles from './DepositForm.module.css'
 
-const API_ERROR_LABELS: Record<string, string> = {
-  'invalid amount': 'Введите сумму больше нуля',
-  'account not found': 'Ваш счёт ещё создаётся — попробуйте через несколько секунд',
-  'account is not active': 'Ваш счёт временно не может принимать пополнения',
-}
-
-function apiErrorMessage(message: string): string {
-  return API_ERROR_LABELS[message] ?? message
-}
-
-// Matches Stripe's own PaymentIntent last_payment_error.code vocabulary —
-// same lookup-with-fallback convention as TransferForm.tsx's
-// FAILURE_REASON_LABELS, falling back to Stripe's own message (already in
-// Russian — see stripe.ts's locale: 'ru') rather than a raw unmapped code.
+// Stripe's own PaymentIntent last_payment_error.code vocabulary — a
+// separate namespace from the backend's error codes (shared/errorMessages
+// .ts), so it stays its own lookup rather than merging into that one:
+// Stripe's own "insufficient_funds" (the card itself lacks funds) and the
+// backend's ledger "insufficient_funds" (the sender's balance is too low)
+// are the same code string with different meanings, and conflating them
+// would show the wrong message for whichever one didn't win the merge.
 const DECLINE_CODE_LABELS: Record<string, string> = {
-  card_declined: 'Карта отклонена банком-эмитентом.',
-  insufficient_funds: 'Недостаточно средств на карте.',
-  expired_card: 'Срок действия карты истёк.',
-  incorrect_cvc: 'Неверный код CVC.',
-  processing_error: 'Ошибка обработки платежа, попробуйте ещё раз.',
+  card_declined: 'The card was declined by the issuing bank.',
+  insufficient_funds: 'Insufficient funds on the card.',
+  expired_card: 'The card has expired.',
+  incorrect_cvc: 'Incorrect CVC code.',
+  processing_error: 'Payment processing error, please try again.',
 }
 
 function declineMessage(error: StripeError): string {
   if (error.code && DECLINE_CODE_LABELS[error.code]) return DECLINE_CODE_LABELS[error.code]
-  return error.message ?? 'Платёж отклонён, попробуйте другую карту.'
+  return error.message ?? 'The payment was declined, please try a different card.'
 }
 
 type Step =
@@ -68,14 +62,14 @@ export function DepositForm() {
     setServerError(null)
     const amountCents = parseAmountToCents(values.amount)
     if (amountCents === null) {
-      setServerError('Введите корректную сумму')
+      setServerError('Enter a valid amount')
       return
     }
     try {
       const result = await createDeposit(amountCents)
       setStep({ kind: 'payment', depositId: result.deposit_id, clientSecret: result.client_secret })
     } catch (err) {
-      setServerError(isApiError(err) ? apiErrorMessage(err.message) : 'Не удалось начать пополнение, попробуйте ещё раз')
+      setServerError(isApiError(err) ? errorMessage(err.message) : 'Could not start the deposit, please try again')
     }
   }
 
@@ -102,11 +96,11 @@ export function DepositForm() {
 
   return (
     <Card>
-      <h2>Пополнение счёта</h2>
+      <h2>Deposit funds</h2>
       <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="amount">
-            Сумма пополнения
+            Deposit amount
           </label>
           <Input
             id="amount"
@@ -123,7 +117,7 @@ export function DepositForm() {
         {serverError && <ErrorText>{serverError}</ErrorText>}
         {step.declineMessage && <Banner variant="danger">{step.declineMessage}</Banner>}
         <Button type="submit" loading={isSubmitting}>
-          Продолжить
+          Continue
         </Button>
       </form>
     </Card>
@@ -184,22 +178,22 @@ function PaymentStep({ onDeclined, onConfirmed, onCancel }: PaymentStepProps) {
       onConfirmed()
       return
     }
-    onDeclined('Не удалось подтвердить платёж, попробуйте ещё раз.')
+    onDeclined('Could not confirm the payment, please try again.')
   }
 
   return (
     <Card>
       <h2 ref={headingRef} tabIndex={-1} className={styles.focusableHeading}>
-        Оплата картой
+        Pay by card
       </h2>
       <form className={styles.form} onSubmit={handleConfirm}>
         <PaymentElement />
         <div className={styles.paymentActions}>
           <Button type="submit" disabled={!stripe} loading={isConfirming}>
-            Оплатить
+            Pay
           </Button>
           <Button type="button" variant="secondary" disabled={isConfirming} onClick={onCancel}>
-            Изменить сумму
+            Change amount
           </Button>
         </div>
       </form>
@@ -215,10 +209,10 @@ function DepositProgress({ outcome }: { outcome: DepositPollOutcome }) {
   const failed = outcome === 'failed'
   return (
     <ol className={styles.progress}>
-      <li className={styles.progressDone}>Платёж принят</li>
-      <li className={resolved ? styles.progressDone : styles.progressActive}>Обработка</li>
+      <li className={styles.progressDone}>Payment accepted</li>
+      <li className={resolved ? styles.progressDone : styles.progressActive}>Processing</li>
       <li className={resolved ? (failed ? styles.progressFailed : styles.progressDone) : undefined}>
-        {failed ? 'Не зачислено' : 'Зачислено'}
+        {failed ? 'Not credited' : 'Credited'}
       </li>
     </ol>
   )
@@ -254,45 +248,43 @@ function ProcessingStep({ depositId, onStartOver }: { depositId: string; onStart
   return (
     <Card>
       <h2 ref={headingRef} tabIndex={-1} className={styles.focusableHeading}>
-        Пополнение счёта
+        Deposit funds
       </h2>
       <DepositProgress outcome={outcome} />
       <div className={styles.result} ref={resultRef} tabIndex={-1}>
-        {outcome === 'polling' && (
-          <Banner variant="warning">Платёж принят, зачисление в течение минуты…</Banner>
-        )}
+        {outcome === 'polling' && <Banner variant="warning">Payment accepted, crediting within a minute…</Banner>}
         {outcome === 'timed_out' && (
-          <Banner variant="warning">Зачисление обрабатывается дольше обычного — проверьте баланс позже.</Banner>
+          <Banner variant="warning">Crediting is taking longer than usual — please check your balance later.</Banner>
         )}
         {outcome === 'failed' && (
-          <Banner variant="danger">Платёж не был зачислен. Попробуйте создать новое пополнение.</Banner>
+          <Banner variant="danger">The payment was not credited. Please start a new deposit.</Banner>
         )}
         {outcome === 'credited' && deposit && (
           <>
             <Banner variant="success">
-              Баланс пополнен на{' '}
-              <Money value={deposit.amount} currency="EUR" showSign={false} label="Сумма пополнения" />.
+              Balance topped up by{' '}
+              <Money value={deposit.amount} currency="EUR" showSign={false} label="Deposit amount" />.
             </Banner>
             {account && (
               <div className={styles.currentBalance}>
-                Текущий баланс:{' '}
+                Current balance:{' '}
                 <Money
                   value={account.balance}
                   currency={account.currency}
                   showSign={false}
-                  label="Текущий баланс"
+                  label="Current balance"
                   className={balanceFlash ? styles.balanceChanged : undefined}
                 />
               </div>
             )}
             {!account && accountError && (
-              <div className={styles.currentBalance}>Баланс временно недоступен — обновите страницу позже.</div>
+              <div className={styles.currentBalance}>Balance temporarily unavailable — please refresh later.</div>
             )}
           </>
         )}
         {(outcome === 'credited' || outcome === 'failed' || outcome === 'timed_out') && (
           <Button variant="secondary" type="button" className={styles.newDepositButton} onClick={onStartOver}>
-            Новое пополнение
+            New deposit
           </Button>
         )}
       </div>

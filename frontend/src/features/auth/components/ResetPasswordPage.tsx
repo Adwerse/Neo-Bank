@@ -7,22 +7,15 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage } from '../../../shared/errorMessages'
 import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { resetPassword } from '../api'
 import { useAuth } from '../AuthContext'
 import { resetPasswordSchema, type ResetPasswordFormValues } from '../schemas'
 import styles from './ResetPasswordPage.module.css'
 
-// Same {error: string} shape as /auth/verify-email, no error-code field —
-// distinguishing cases means matching on these exact strings from
-// services/auth-svc/reset.go.
-const INVALID_OR_EXPIRED = 'invalid or expired reset code'
-const CODE_EXPIRED = 'verification code has expired'
-const TOO_MANY_ATTEMPTS = 'too many failed attempts, request a new code'
-const WRONG_CODE = 'invalid verification code'
-
 export function ResetPasswordPage() {
-  useDocumentTitle('Новый пароль')
+  useDocumentTitle('New password')
   const navigate = useNavigate()
   const { clearSession } = useAuth()
   const [serverError, setServerError] = useState<string | null>(null)
@@ -41,34 +34,15 @@ export function ResetPasswordPage() {
       // session stored locally in this browser is already dead, so clear it
       // here rather than letting a stale refresh token fail confusingly later.
       clearSession()
-      navigate('/login', { state: { message: 'Пароль изменён, войдите с новым паролем' } })
+      navigate('/login', { state: { message: 'Password changed, please log in with your new password' } })
     } catch (err) {
-      if (!isApiError(err)) {
-        setServerError('Не удалось сбросить пароль, попробуйте ещё раз')
-        return
-      }
-      switch (err.message) {
-        case INVALID_OR_EXPIRED:
-          setServerError('Код недействителен или истёк. Запросите новый на странице восстановления пароля.')
-          break
-        case CODE_EXPIRED:
-          setServerError('Код истёк. Запросите новый на странице восстановления пароля.')
-          break
-        case TOO_MANY_ATTEMPTS:
-          setServerError('Попытки исчерпаны. Запросите новый код на странице восстановления пароля.')
-          break
-        case WRONG_CODE:
-          setServerError('Неверный код.')
-          break
-        default:
-          setServerError(err.message)
-      }
+      setServerError(isApiError(err) ? errorMessage(err.message) : 'Could not reset your password, please try again')
     }
   }
 
   return (
     <Card>
-      <h1>Новый пароль</h1>
+      <h1>New password</h1>
       <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="email">
@@ -87,7 +61,7 @@ export function ResetPasswordPage() {
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="code">
-            Код из письма
+            Code from the email
           </label>
           <Input
             id="code"
@@ -102,7 +76,7 @@ export function ResetPasswordPage() {
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="newPassword">
-            Новый пароль
+            New password
           </label>
           <Input
             id="newPassword"
@@ -116,7 +90,7 @@ export function ResetPasswordPage() {
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="confirmNewPassword">
-            Подтверждение пароля
+            Confirm password
           </label>
           <Input
             id="confirmNewPassword"
@@ -132,11 +106,11 @@ export function ResetPasswordPage() {
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
         <Button type="submit" loading={isSubmitting}>
-          Сохранить новый пароль
+          Save new password
         </Button>
       </form>
       <p className={styles.footerLink}>
-        <Link to="/forgot-password">Запросить новый код</Link>
+        <Link to="/forgot-password">Request a new code</Link>
       </p>
     </Card>
   )

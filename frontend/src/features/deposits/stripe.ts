@@ -14,7 +14,7 @@ if (!publishableKey) {
   console.error('VITE_STRIPE_PUBLISHABLE_KEY is not set — see frontend/.env.example')
 }
 
-// locale: 'ru' matches the rest of this app's UI language for
+// locale: 'en' matches the rest of this app's UI language for
 // PaymentElement's own labels/placeholders and Stripe's built-in
 // validation messages.
-export const stripePromise = loadStripe(publishableKey ?? '', { locale: 'ru' })
+export const stripePromise = loadStripe(publishableKey ?? '', { locale: 'en' })

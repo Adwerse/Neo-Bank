@@ -13,10 +13,10 @@ export interface MoneyFlowBucket {
 const CATEGORY_ORDER: MoneyFlowCategory[] = ['in-transfer', 'deposit', 'out-transfer', 'withdrawal']
 
 const CATEGORY_LABELS: Record<MoneyFlowCategory, string> = {
-  'in-transfer': 'Входящие переводы',
-  deposit: 'Пополнения',
-  'out-transfer': 'Исходящие переводы',
-  withdrawal: 'Вывод средств',
+  'in-transfer': 'Incoming transfers',
+  deposit: 'Deposits',
+  'out-transfer': 'Outgoing transfers',
+  withdrawal: 'Withdrawals',
 }
 
 function categorize(entry: OperationHistoryEntry): MoneyFlowCategory {

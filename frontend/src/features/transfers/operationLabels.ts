@@ -1,23 +1,23 @@
 import type { OperationHistoryEntry } from './api'
 
 export const TYPE_LABELS: Record<string, string> = {
-  transfer: 'Перевод',
-  deposit: 'Депозит',
-  withdrawal: 'Вывод',
+  transfer: 'Transfer',
+  deposit: 'Deposit',
+  withdrawal: 'Withdrawal',
 }
 
 export const STATUS_LABELS: Record<string, string> = {
   // transfer
-  pending: 'В обработке',
-  completed: 'Выполнен',
-  failed: 'Не выполнен',
-  rejected: 'Заблокирован',
+  pending: 'Pending',
+  completed: 'Completed',
+  failed: 'Failed',
+  rejected: 'Rejected',
   // deposit ('pending'/'failed' above already cover the shared cases)
-  succeeded: 'Обрабатывается банком',
-  credited: 'Зачислено',
-  refunded: 'Возвращено',
+  succeeded: 'Processing',
+  credited: 'Credited',
+  refunded: 'Refunded',
   // withdrawal
-  payout_simulated: 'Симуляция выполнена',
+  payout_simulated: 'Simulated',
 }
 
 // Money direction isn't a single shared field across types: transfers carry

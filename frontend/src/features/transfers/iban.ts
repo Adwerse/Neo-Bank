@@ -73,29 +73,29 @@ function mod97Remainder(s: string): bigint | null {
 export function validateIban(s: string): string | null {
   const n = normalizeIban(s)
 
-  if (n.length < 4) return 'Слишком короткий IBAN'
+  if (n.length < 4) return 'IBAN is too short'
 
   const country = n.slice(0, 2)
   const checkDigits = n.slice(2, 4)
   const bban = n.slice(4)
 
-  if (!isAllLetters(country)) return 'Неверный код страны'
-  if (!isAllDigits(checkDigits)) return 'Неверные контрольные цифры'
-  if (!isAllLettersOrDigits(bban)) return 'IBAN содержит недопустимые символы'
+  if (!isAllLetters(country)) return 'Invalid country code'
+  if (!isAllDigits(checkDigits)) return 'Invalid check digits'
+  if (!isAllLettersOrDigits(bban)) return 'IBAN contains invalid characters'
 
   if (country === COUNTRY_IE) {
-    if (n.length !== IE_LENGTH) return `IBAN Ирландии должен содержать ${IE_LENGTH} символов`
+    if (n.length !== IE_LENGTH) return `An Irish IBAN must be ${IE_LENGTH} characters`
     const bankCode = bban.slice(0, BANK_CODE_LENGTH)
     const sortCode = bban.slice(BANK_CODE_LENGTH, BANK_CODE_LENGTH + SORT_CODE_LENGTH)
     const acctNum = bban.slice(BANK_CODE_LENGTH + SORT_CODE_LENGTH)
-    if (!isAllLetters(bankCode)) return 'Неверный код банка'
-    if (!isAllDigits(sortCode)) return 'Неверный sort code'
-    if (!isAllDigits(acctNum)) return 'Неверный номер счёта'
+    if (!isAllLetters(bankCode)) return 'Invalid bank code'
+    if (!isAllDigits(sortCode)) return 'Invalid sort code'
+    if (!isAllDigits(acctNum)) return 'Invalid account number'
   }
 
   const remainder = mod97Remainder(bban + country + checkDigits)
-  if (remainder === null) return 'IBAN содержит недопустимые символы'
-  if (remainder !== 1n) return 'Неверные контрольные цифры IBAN'
+  if (remainder === null) return 'IBAN contains invalid characters'
+  if (remainder !== 1n) return 'Invalid IBAN check digits'
 
   return null
 }

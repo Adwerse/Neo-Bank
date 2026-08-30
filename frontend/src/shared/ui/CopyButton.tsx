@@ -9,7 +9,7 @@ interface CopyButtonProps {
   label?: string
 }
 
-export function CopyButton({ value, label = 'Скопировать' }: CopyButtonProps) {
+export function CopyButton({ value, label = 'Copy' }: CopyButtonProps) {
   const [copied, setCopied] = useState(false)
 
   async function handleClick() {
@@ -27,7 +27,7 @@ export function CopyButton({ value, label = 'Скопировать' }: CopyButt
     <button type="button" className={styles.button} onClick={handleClick} aria-label={label}>
       {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
       <span className={styles.confirm} role="status" aria-live="polite">
-        {copied ? 'Скопировано' : ''}
+        {copied ? 'Copied' : ''}
       </span>
     </button>
   )

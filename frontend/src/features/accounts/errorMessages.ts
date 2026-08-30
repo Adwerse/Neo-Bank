@@ -4,10 +4,10 @@ import { isApiError } from '../../shared/api-client/ApiError'
 // beats a fake number in a banking product.
 export function getAccountErrorMessage(error: unknown): string {
   if (isApiError(error) && error.status === 503) {
-    return 'Баланс временно недоступен. Попробуйте ещё раз через минуту.'
+    return 'Balance temporarily unavailable. Please try again in a minute.'
   }
   if (isApiError(error) && error.status === 404) {
-    return 'Ваш счёт ещё создаётся — это обычно занимает несколько секунд. Попробуйте обновить.'
+    return "Your account is still being created — this usually takes a few seconds. Please refresh."
   }
-  return 'Не удалось загрузить данные счёта, попробуйте ещё раз.'
+  return 'Could not load your account, please try again.'
 }

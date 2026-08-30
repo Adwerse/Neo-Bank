@@ -7,13 +7,14 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage } from '../../../shared/errorMessages'
 import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { register as registerUser } from '../api'
 import { registerSchema, type RegisterFormValues } from '../schemas'
 import styles from './RegisterPage.module.css'
 
 export function RegisterPage() {
-  useDocumentTitle('Регистрация')
+  useDocumentTitle('Register')
   const navigate = useNavigate()
   const [serverError, setServerError] = useState<string | null>(null)
   const {
@@ -31,17 +32,13 @@ export function RegisterPage() {
       // Client-side zod validation is UX, not security — the backend
       // validates independently (duplicate email, weak password, ...) and
       // those errors need to reach the user too, not just get swallowed.
-      if (isApiError(err)) {
-        setServerError(err.status === 409 ? 'Этот email уже зарегистрирован' : err.message)
-      } else {
-        setServerError('Не удалось выполнить регистрацию, попробуйте ещё раз')
-      }
+      setServerError(isApiError(err) ? errorMessage(err.message) : 'Could not register, please try again')
     }
   }
 
   return (
     <Card>
-      <h1>Регистрация</h1>
+      <h1>Register</h1>
       <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="email">
@@ -60,7 +57,7 @@ export function RegisterPage() {
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="password">
-            Пароль
+            Password
           </label>
           <Input
             id="password"
@@ -74,7 +71,7 @@ export function RegisterPage() {
         </div>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="confirmPassword">
-            Подтверждение пароля
+            Confirm password
           </label>
           <Input
             id="confirmPassword"
@@ -88,7 +85,7 @@ export function RegisterPage() {
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
         <Button type="submit" loading={isSubmitting}>
-          Зарегистрироваться
+          Register
         </Button>
       </form>
     </Card>

@@ -4,7 +4,7 @@ import { OperationHistory } from './OperationHistory'
 import styles from './TransfersPage.module.css'
 
 export function TransfersPage() {
-  useDocumentTitle('Переводы')
+  useDocumentTitle('Transfers')
   return (
     <div className={styles.page}>
       <TransferForm />

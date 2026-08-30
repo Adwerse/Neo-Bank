@@ -7,15 +7,15 @@ import { useProfile } from '../features/profile/useProfile'
 import styles from './Sidebar.module.css'
 
 const navItems = [
-  { to: '/dashboard', label: 'Главная', Icon: HomeIcon },
-  { to: '/transfers', label: 'Переводы', Icon: ArrowUpRightIcon },
-  { to: '/deposit', label: 'Пополнение', Icon: PlusCircleIcon },
+  { to: '/dashboard', label: 'Home', Icon: HomeIcon },
+  { to: '/transfers', label: 'Transfers', Icon: ArrowUpRightIcon },
+  { to: '/deposit', label: 'Top up', Icon: PlusCircleIcon },
 ]
 
-// No Настройки item — no route or page exists for it. Реквизиты (below)
+// No Settings item — no route or page exists for it. Account details (below)
 // isn't a NavLink like the three above: it jumps to a section of /dashboard
 // rather than naming "the page you're on," so it never carries the active
-// highlight (which would otherwise also light up whenever Главная is
+// highlight (which would otherwise also light up whenever Home is
 // active, since both resolve to the same /dashboard pathname).
 export function Sidebar() {
   const fallback = getDisplayName(getAccessTokenEmail())
@@ -43,13 +43,13 @@ export function Sidebar() {
         ))}
         <Link to="/dashboard#account-details" className={styles.navItem}>
           <CardIcon size={16} />
-          Реквизиты
+          Account details
         </Link>
       </nav>
 
       <div className={styles.spacer} />
 
-      <Link to="/profile" className={styles.footer} aria-label="Профиль">
+      <Link to="/profile" className={styles.footer} aria-label="Profile">
         <Avatar imageUrl={profile?.avatar_url_64} seed={profile?.user_id ?? fallback.name} initial={initial} size={32} />
         <div className={styles.footerText}>
           <div className={styles.name}>{name}</div>
@@ -57,7 +57,7 @@ export function Sidebar() {
               only renders for an authenticated session), not the bank
               account's own frozen/active/closed status, which is shown
               separately on the dashboard. */}
-          <div className={styles.sessionStatus}>● Активен</div>
+          <div className={styles.sessionStatus}>● Active</div>
         </div>
       </Link>
     </aside>

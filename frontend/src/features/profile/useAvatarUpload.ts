@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { isApiError } from '../../shared/api-client/ApiError'
+import { errorMessage } from '../../shared/errorMessages'
 import { confirmAvatarUpload, createAvatarUploadURL, uploadAvatarFile, type Profile } from './api'
 
 // Mirrors services/auth-svc/avatar.go's maxAvatarUploadBytes/allowed
@@ -14,10 +15,10 @@ const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png'])
 
 export function validateAvatarFile(file: File): string | null {
   if (!ALLOWED_TYPES.has(file.type)) {
-    return 'Поддерживаются только файлы JPEG или PNG'
+    return 'Only JPEG or PNG files are supported'
   }
   if (file.size > MAX_AVATAR_BYTES) {
-    return `Файл слишком большой (макс. ${Math.floor(MAX_AVATAR_BYTES / 1024 / 1024)} МБ)`
+    return `That file is too large (max ${Math.floor(MAX_AVATAR_BYTES / 1024 / 1024)} MB)`
   }
   return null
 }
@@ -28,22 +29,11 @@ type UploadStep =
   | { kind: 'confirming' }
   | { kind: 'error'; message: string }
 
-const API_ERROR_LABELS: Record<string, string> = {
-  'too many avatar upload requests, try again later': 'Слишком много попыток, попробуйте позже',
-  'avatar upload not found': 'Загрузка не найдена — возможно, истекло время. Попробуйте снова.',
-  'invalid key': 'Что-то пошло не так, попробуйте загрузить фото заново',
-}
-
-// The confirm step's 400s carry the server's own message straight through
-// (e.g. 'unsupported image type "image/gif"', 'image is 6000x6000
-// (36000000 pixels), want 20000000 or fewer') — those are already
-// specific enough to show as-is, and re-explaining exactly why a
-// server-side-detected file failed as a generic "upload failed" would be
-// the wrong call the task explicitly warns about: the file DID upload,
-// it just didn't pass validation.
-function avatarErrorMessage(message: string): string {
-  return API_ERROR_LABELS[message] ?? message
-}
+// The confirm step's 400s (avatar_too_large / avatar_unsupported_type /
+// avatar_too_many_pixels / avatar_decode_failed — see errorMessages.ts)
+// are exactly the case the task warns about: the file DID upload, it
+// just didn't pass validation, so this must never fall back to a generic
+// "upload failed" that reads like the network step itself failed.
 
 // Orchestrates the three-step flow end to end: request a presigned POST
 // target, PUT the file there with progress, then confirm. Each step is
@@ -74,9 +64,7 @@ export function useAvatarUpload() {
     } catch (err) {
       setStep({
         kind: 'error',
-        message: isApiError(err)
-          ? avatarErrorMessage(err.message)
-          : 'Не удалось загрузить аватар, попробуйте ещё раз',
+        message: isApiError(err) ? errorMessage(err.message) : 'Could not upload the avatar, please try again',
       })
       return false
     }

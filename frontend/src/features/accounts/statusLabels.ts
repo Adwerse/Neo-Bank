@@ -1,5 +1,5 @@
 export const ACCOUNT_STATUS_LABELS: Record<string, string> = {
-  active: 'Активен',
-  frozen: 'Заморожен',
-  closed: 'Закрыт',
+  active: 'Active',
+  frozen: 'Frozen',
+  closed: 'Closed',
 }

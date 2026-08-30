@@ -1,7 +1,7 @@
 // No "name" field exists anywhere in this API or the JWT — accounts and
 // auth only ever carry an email. This derives a display name from the
 // email's local part rather than inventing one.
-const FALLBACK_NAME = 'Клиент'
+const FALLBACK_NAME = 'Client'
 
 export interface DisplayName {
   name: string

@@ -31,7 +31,7 @@ export function IncomingTransferWatcher() {
           // No counterparty detail beyond what OperationHistory itself
           // already shows (see TransfersPage) — this is a "something
           // happened, go look" nudge, not a second place to read details.
-          showToast(`Входящий перевод: +${formatMoney(entry.amount, 'EUR')}`, 'success')
+          showToast(`Incoming transfer: +${formatMoney(entry.amount, 'EUR')}`, 'success')
         }
       }
     }

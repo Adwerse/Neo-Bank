@@ -7,6 +7,7 @@ import { Input } from '../../../shared/ui/Input'
 import { Button } from '../../../shared/ui/Button'
 import { ErrorText } from '../../../shared/ui/ErrorText'
 import { isApiError } from '../../../shared/api-client/ApiError'
+import { errorMessage } from '../../../shared/errorMessages'
 import { useDocumentTitle } from '../../../shared/ui/useDocumentTitle'
 import { forgotPassword } from '../api'
 import { forgotPasswordSchema, type ForgotPasswordFormValues } from '../schemas'
@@ -15,10 +16,10 @@ import styles from './ForgotPasswordPage.module.css'
 // Matches the backend's own uniform response — it deliberately replies the
 // same way whether or not the email is registered, to avoid leaking account
 // existence. Showing anything more specific here would undo that.
-const NEUTRAL_MESSAGE = 'Если такой email зарегистрирован, на него отправлен код для сброса пароля.'
+const NEUTRAL_MESSAGE = 'If that email is registered, a password reset code has been sent to it.'
 
 export function ForgotPasswordPage() {
-  useDocumentTitle('Восстановление пароля')
+  useDocumentTitle('Reset password')
   const [submitted, setSubmitted] = useState(false)
   const [serverError, setServerError] = useState<string | null>(null)
 
@@ -34,21 +35,17 @@ export function ForgotPasswordPage() {
       await forgotPassword({ email: values.email })
       setSubmitted(true)
     } catch (err) {
-      if (isApiError(err) && err.status === 429) {
-        setServerError('Слишком много запросов. Подождите немного и попробуйте снова.')
-      } else {
-        setServerError('Не удалось отправить запрос, попробуйте ещё раз')
-      }
+      setServerError(isApiError(err) ? errorMessage(err.message) : 'Could not send the request, please try again')
     }
   }
 
   if (submitted) {
     return (
       <Card>
-        <h1>Восстановление пароля</h1>
+        <h1>Reset password</h1>
         <p>{NEUTRAL_MESSAGE}</p>
         <p className={styles.footerLink}>
-          <Link to="/reset-password">Ввести код</Link>
+          <Link to="/reset-password">Enter code</Link>
         </p>
       </Card>
     )
@@ -56,7 +53,7 @@ export function ForgotPasswordPage() {
 
   return (
     <Card>
-      <h1>Восстановление пароля</h1>
+      <h1>Reset password</h1>
       <form className={styles.form} onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="email">
@@ -75,11 +72,11 @@ export function ForgotPasswordPage() {
         </div>
         {serverError && <ErrorText>{serverError}</ErrorText>}
         <Button type="submit" loading={isSubmitting}>
-          Отправить код
+          Send code
         </Button>
       </form>
       <p className={styles.footerLink}>
-        <Link to="/login">Назад ко входу</Link>
+        <Link to="/login">Back to login</Link>
       </p>
     </Card>
   )

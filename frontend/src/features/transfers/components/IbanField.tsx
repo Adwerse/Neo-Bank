@@ -85,7 +85,7 @@ export function IbanField({ control }: IbanFieldProps) {
       />
       {showValid && (
         <span id="recipientIban-valid" className={styles.validHint}>
-          <CheckIcon size={13} /> Реквизиты корректны
+          <CheckIcon size={13} /> Details look correct
         </span>
       )}
       {error && <ErrorText id="recipientIban-error">{error.message}</ErrorText>}

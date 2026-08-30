@@ -45,7 +45,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
-      <div className={styles.stack} role="region" aria-label="Уведомления">
+      <div className={styles.stack} role="region" aria-label="Notifications">
         {toasts.map((toast) => (
           <div
             key={toast.id}
@@ -58,7 +58,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               type="button"
               className={styles.dismissButton}
               onClick={() => dismiss(toast.id)}
-              aria-label="Закрыть уведомление"
+              aria-label="Dismiss notification"
             >
               ×
             </button>

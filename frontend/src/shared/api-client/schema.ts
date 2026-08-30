@@ -284,10 +284,11 @@ export interface components {
     schemas: {
         /**
          * @example {
-         *       "error": "invalid credentials"
+         *       "error": "invalid_credentials"
          *     }
          */
         Error: {
+            /** @description A stable, machine-readable snake_case code (e.g. "insufficient_funds", "invalid_iban", "recipient_not_found") — never a human-readable sentence. The backend deliberately doesn't own display copy or its language; translating a code into a message for the signed-in user's locale is the frontend's job. */
             error: string;
             /** @description Only present on /auth/verify-email wrong-code responses — the number of guesses left before the code is locked out. */
             attempts_remaining?: number;
@@ -345,7 +346,7 @@ export interface components {
             user_id: string;
             account_number: string;
             /**
-             * @description A checksum-valid IE IBAN, deterministically derived from account_number. The bank code is a fictitious institution — see README, "Честные ограничения".
+             * @description A checksum-valid IE IBAN, deterministically derived from account_number. The bank code is a fictitious institution — see README, "Honest limitations".
              * @example IE34ZZZZ00004234567890
              */
             iban: string;
@@ -410,7 +411,7 @@ export interface components {
         };
         CreateTransferRequest: {
             /**
-             * @description The recipient's IBAN — this system's one user-facing account identifier (see AccountWithBalance.iban). Only IBANs for this bank's own code are resolvable; a structurally valid IBAN for another institution is rejected (400), not silently treated as "not found" (also 400, but a distinct message) — see README, "Честные ограничения".
+             * @description The recipient's IBAN — this system's one user-facing account identifier (see AccountWithBalance.iban). Only IBANs for this bank's own code are resolvable; a structurally valid IBAN for another institution is rejected (400), not silently treated as "not found" (also 400, but a distinct message) — see README, "Honest limitations".
              * @example IE34ZZZZ00004234567890
              */
             recipient_iban: string;
@@ -1165,7 +1166,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description Too many recipient-resolve attempts for this caller recently — see accounts-svc's per-user rate limit on resolving an IBAN (README, "Честные ограничения"). Distinct from a generic TooManyRequests: this specific limit exists because an endpoint that answers "this account exists"/"it doesn't" is an enumeration oracle, and a checksum-valid IBAN narrows the space worth guessing rather than making it safe to guess. */
+            /** @description Too many recipient-resolve attempts for this caller recently — see accounts-svc's per-user rate limit on resolving an IBAN (README, "Honest limitations"). Distinct from a generic TooManyRequests: this specific limit exists because an endpoint that answers "this account exists"/"it doesn't" is an enumeration oracle, and a checksum-valid IBAN narrows the space worth guessing rather than making it safe to guess. */
             429: {
                 headers: {
                     [name: string]: unknown;
