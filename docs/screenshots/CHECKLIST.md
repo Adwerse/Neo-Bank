@@ -27,6 +27,6 @@ honest than a screenshot and easier to keep up to date, e.g.
 `docker kill neo-bank-pg-node3-1` followed by a series of transfer
 attempts up to the first success. The exact downtime numbers (three runs
 of the strict automated test, not a manual curl script) are already in
-the README, "Postgres: replication and automatic failover" →
+[spec.md](../../spec.md), "Postgres: replication and automatic failover" →
 "Measured failover time" (23.6–25.4 s); trust those numbers for the
 screenshot/log demo, not a stopwatch during the presentation.
