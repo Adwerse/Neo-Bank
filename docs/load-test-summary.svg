@@ -1,0 +1,37 @@
+<svg viewBox="0 0 1200 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Load test summary: 176.4 transfers per second ceiling on distributed load, 31.5 transfers per second flat on a hot account, 53,789 transfers and 87,888 ledger entries in the final run, 24 out of 24 invariant checks passed with 0 violations.">
+  <rect x="0" y="0" width="1200" height="220" rx="14" fill="#fbfbfa" stroke="#e1e0d9" stroke-width="1.5"/>
+
+  <text x="30" y="34" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" font-weight="600" letter-spacing="0.06em" fill="#6b7280">⚡ LOAD TEST — k6, THREE PROFILES, FOUR CONCURRENCY STEPS EACH</text>
+  <line x1="30" y1="48" x2="1170" y2="48" stroke="#e1e0d9" stroke-width="1"/>
+
+  <!-- vertical separators -->
+  <line x1="315" y1="66" x2="315" y2="196" stroke="#e1e0d9" stroke-width="1"/>
+  <line x1="615" y1="66" x2="615" y2="196" stroke="#e1e0d9" stroke-width="1"/>
+  <line x1="915" y1="66" x2="915" y2="196" stroke="#e1e0d9" stroke-width="1"/>
+
+  <!-- stat 1 -->
+  <text x="30" y="110" font-family="IBM Plex Mono, Consolas, monospace" font-size="40" font-weight="700" fill="#2a78d6">176.4</text>
+  <text x="30" y="132" font-family="IBM Plex Mono, Consolas, monospace" font-size="15" fill="#12181f">tx/s ceiling</text>
+  <text x="30" y="154" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">distributed load — bottlenecked on</text>
+  <text x="30" y="170" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">ledger-svc's unconfigured pool</text>
+
+  <!-- stat 2 -->
+  <text x="345" y="110" font-family="IBM Plex Mono, Consolas, monospace" font-size="40" font-weight="700" fill="#eb6834">31.5</text>
+  <text x="345" y="132" font-family="IBM Plex Mono, Consolas, monospace" font-size="15" fill="#12181f">tx/s, flat</text>
+  <text x="345" y="154" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">one hot account, 12× more</text>
+  <text x="345" y="170" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">concurrency changes nothing</text>
+
+  <!-- stat 3 -->
+  <text x="645" y="110" font-family="IBM Plex Mono, Consolas, monospace" font-size="40" font-weight="700" fill="#12181f">53,789</text>
+  <text x="645" y="132" font-family="IBM Plex Mono, Consolas, monospace" font-size="15" fill="#12181f">transfers executed</text>
+  <text x="645" y="154" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">87,888 ledger entries in the</text>
+  <text x="645" y="170" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">final run — all balanced</text>
+
+  <!-- stat 4 -->
+  <text x="945" y="110" font-family="IBM Plex Mono, Consolas, monospace" font-size="40" font-weight="700" fill="#0ca30c">24/24</text>
+  <text x="945" y="132" font-family="IBM Plex Mono, Consolas, monospace" font-size="15" fill="#12181f">invariants held</text>
+  <text x="945" y="154" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">8 Postgres checks × 3 profiles,</text>
+  <text x="945" y="170" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" fill="#6b7280">0 violations</text>
+
+  <text x="30" y="205" font-family="IBM Plex Mono, Consolas, monospace" font-size="10.5" fill="#9aa1a8">Full charts, bottleneck breakdown, and methodology → the published load test report</text>
+</svg>

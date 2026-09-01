@@ -1,0 +1,196 @@
+<svg viewBox="0 0 1280 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Neo-Bank architecture: a browser talks to a single Gateway, which routes to six Go microservices; the transfer path (highlighted) runs Gateway to transfers-svc, which calls accounts-svc, fraud-svc and ledger-svc over gRPC; every service shares a three-node Postgres cluster, four services use Kafka for events, and Stripe, Jaeger and Mailpit sit at the edges.">
+  <defs>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa1a8"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2a78d6"/>
+    </marker>
+    <marker id="arrow-dim" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b7bcc1"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="1280" height="900" fill="#fbfbfa"/>
+
+  <!-- ============ fonts / shared styles via presentation attrs ============ -->
+
+  <!-- Browser -->
+  <rect x="530" y="34" width="220" height="52" rx="10" fill="#ffffff" stroke="#12181f" stroke-width="1.5"/>
+  <text x="640" y="56" text-anchor="middle" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="14" font-weight="600" fill="#12181f">Browser</text>
+  <text x="640" y="74" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="11" fill="#6b7280">React SPA · :5173 dev</text>
+
+  <line x1="640" y1="86" x2="640" y2="132" stroke="#12181f" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+  <text x="656" y="112" font-family="IBM Plex Mono, Consolas, monospace" font-size="10.5" fill="#6b7280">HTTPS + WebSocket, JWT</text>
+
+  <!-- Gateway -->
+  <rect x="480" y="134" width="320" height="60" rx="10" fill="#eaf2fc" stroke="#2a78d6" stroke-width="2"/>
+  <text x="640" y="160" text-anchor="middle" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="15" font-weight="700" fill="#12181f">Gateway</text>
+  <text x="640" y="178" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10.5" fill="#184f95">single entry · JWT · reverse proxy · WS push</text>
+
+  <!-- Services row -->
+  <!-- x positions: 40,244,448,652,856,1060  width 180 y=252 h=68 -->
+  <g font-family="IBM Plex Sans, Segoe UI, sans-serif">
+    <!-- auth-svc -->
+    <rect x="40" y="252" width="180" height="68" rx="9" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+    <text x="130" y="278" text-anchor="middle" font-size="13.5" font-weight="600" fill="#12181f">auth-svc</text>
+    <text x="130" y="295" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">register · login · profile</text>
+    <text x="130" y="309" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">avatar upload</text>
+
+    <!-- accounts-svc -->
+    <rect x="244" y="252" width="180" height="68" rx="9" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+    <text x="334" y="278" text-anchor="middle" font-size="13.5" font-weight="600" fill="#12181f">accounts-svc</text>
+    <text x="334" y="295" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">balance · IBAN resolve</text>
+    <text x="334" y="309" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">Kafka → WS bridge</text>
+
+    <!-- transfers-svc (highlighted) -->
+    <rect x="448" y="252" width="180" height="68" rx="9" fill="#eaf2fc" stroke="#2a78d6" stroke-width="2"/>
+    <text x="538" y="278" text-anchor="middle" font-size="13.5" font-weight="700" fill="#12181f">transfers-svc</text>
+    <text x="538" y="295" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#184f95">transfers · deposits</text>
+    <text x="538" y="309" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#184f95">withdrawals · reconcile</text>
+
+    <!-- fraud-svc -->
+    <rect x="652" y="252" width="180" height="68" rx="9" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+    <text x="742" y="278" text-anchor="middle" font-size="13.5" font-weight="600" fill="#12181f">fraud-svc</text>
+    <text x="742" y="295" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">rule-based scoring</text>
+    <text x="742" y="309" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">velocity + threshold</text>
+
+    <!-- ledger-svc -->
+    <rect x="856" y="252" width="180" height="68" rx="9" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+    <text x="946" y="278" text-anchor="middle" font-size="13.5" font-weight="600" fill="#12181f">ledger-svc</text>
+    <text x="946" y="295" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">double-entry log</text>
+    <text x="946" y="309" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">internal gRPC only</text>
+
+    <!-- notifications-svc -->
+    <rect x="1060" y="252" width="180" height="68" rx="9" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+    <text x="1150" y="278" text-anchor="middle" font-size="13.5" font-weight="600" fill="#12181f">notifications-svc</text>
+    <text x="1150" y="295" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">transfer + deposit</text>
+    <text x="1150" y="309" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">emails, retry + DLQ</text>
+  </g>
+
+  <!-- Gateway -> each service (gray, unlabeled — routed by path prefix) -->
+  <g stroke="#c7ccd1" stroke-width="1.3" marker-end="url(#arrow-dim)">
+    <path d="M560,194 C480,210 260,225 130,250" fill="none"/>
+    <path d="M600,194 C500,215 400,230 334,250" fill="none"/>
+    <path d="M720,194 C720,210 730,225 742,250" fill="none"/>
+    <path d="M760,194 C820,215 890,230 946,250" fill="none"/>
+    <path d="M790,194 C950,215 1080,230 1150,250" fill="none"/>
+  </g>
+  <text x="770" y="230" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#9aa1a8" font-style="italic">routed by path prefix</text>
+
+  <!-- Gateway -> transfers-svc (highlighted, the one drawn request) -->
+  <line x1="640" y1="194" x2="538" y2="250" stroke="#2a78d6" stroke-width="2.25" marker-end="url(#arrow-blue)"/>
+  <text x="546" y="222" font-family="IBM Plex Mono, Consolas, monospace" font-size="10.5" font-weight="600" fill="#184f95">POST /transfers/</text>
+
+  <!-- transfers-svc -> accounts-svc / fraud-svc / ledger-svc (the money path, gRPC) -->
+  <line x1="448" y1="286" x2="424" y2="286" stroke="#2a78d6" stroke-width="2.25" marker-end="url(#arrow-blue)"/>
+  <text x="356" y="240" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" font-weight="600" fill="#184f95">gRPC</text>
+  <text x="356" y="252" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#184f95">resolve IBAN</text>
+
+  <line x1="628" y1="286" x2="652" y2="286" stroke="#2a78d6" stroke-width="2.25" marker-end="url(#arrow-blue)"/>
+  <text x="742" y="240" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" font-weight="600" fill="#184f95">gRPC</text>
+  <text x="742" y="252" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#184f95">CheckTransfer</text>
+
+  <path d="M628,305 C700,358 785,358 856,305" fill="none" stroke="#2a78d6" stroke-width="2.25" marker-end="url(#arrow-blue)"/>
+  <text x="742" y="378" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" font-weight="600" fill="#184f95">gRPC · ExecuteTransfer</text>
+
+  <!-- ============ data & messaging band ============ -->
+  <text x="40" y="400" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" font-weight="600" letter-spacing="0.04em" fill="#6b7280">DATA &amp; MESSAGING</text>
+  <line x1="40" y1="410" x2="1240" y2="410" stroke="#e1e0d9" stroke-width="1"/>
+
+  <!-- bus line under all six services -> postgres cluster -->
+  <g stroke="#9aa1a8" stroke-width="1.2">
+    <line x1="130" y1="320" x2="130" y2="335"/>
+    <line x1="334" y1="320" x2="334" y2="335"/>
+    <line x1="538" y1="320" x2="538" y2="335"/>
+    <line x1="742" y1="320" x2="742" y2="335"/>
+    <line x1="946" y1="320" x2="946" y2="335"/>
+    <line x1="1150" y1="320" x2="1150" y2="335"/>
+    <line x1="130" y1="335" x2="1150" y2="335"/>
+  </g>
+  <line x1="250" y1="335" x2="250" y2="424" stroke="#9aa1a8" stroke-width="1.2" marker-end="url(#arrow-gray)"/>
+  <text x="264" y="360" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">every service owns its schema —</text>
+  <text x="264" y="374" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">one physical database</text>
+
+  <!-- Postgres cluster -->
+  <rect x="40" y="424" width="440" height="150" rx="10" fill="#ffffff" stroke="#9aa1a8" stroke-width="1.3" stroke-dasharray="5 4"/>
+  <text x="60" y="448" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12.5" font-weight="600" fill="#12181f">Postgres — 3-node cluster</text>
+  <text x="60" y="463" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">Patroni failover · etcd consensus · HAProxy entry</text>
+
+  <rect x="60" y="478" width="118" height="46" rx="7" fill="#f6f7f8" stroke="#c7ccd1"/>
+  <text x="119" y="497" text-anchor="middle" font-size="11" font-weight="600" fill="#12181f">pg-node1</text>
+  <text x="119" y="511" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="9.5" fill="#6b7280">leader (elected)</text>
+
+  <rect x="196" y="478" width="118" height="46" rx="7" fill="#f6f7f8" stroke="#c7ccd1"/>
+  <text x="255" y="497" text-anchor="middle" font-size="11" font-weight="600" fill="#12181f">pg-node2</text>
+  <text x="255" y="511" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="9.5" fill="#6b7280">sync standby</text>
+
+  <rect x="332" y="478" width="118" height="46" rx="7" fill="#f6f7f8" stroke="#c7ccd1"/>
+  <text x="391" y="497" text-anchor="middle" font-size="11" font-weight="600" fill="#12181f">pg-node3</text>
+  <text x="391" y="511" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="9.5" fill="#6b7280">async standby</text>
+
+  <text x="60" y="548" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">measured failover: 23.6–25.4s write downtime, 0 acknowledged</text>
+  <text x="60" y="562" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">transactions ever lost — see infra/failover/failover_test.go</text>
+
+  <!-- Kafka drops from the same shared bus (outbox producers: auth/accounts/transfers; consumers: accounts/notifications) -->
+  <line x1="640" y1="335" x2="640" y2="424" stroke="#9aa1a8" stroke-width="1.2" marker-end="url(#arrow-gray)"/>
+
+  <rect x="540" y="424" width="200" height="80" rx="10" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+  <text x="640" y="450" text-anchor="middle" font-size="13" font-weight="600" fill="#12181f">Kafka</text>
+  <text x="640" y="466" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">user · account · transfer</text>
+  <text x="640" y="480" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">.events topics</text>
+  <text x="640" y="497" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="9.5" fill="#9aa1a8">transactional outbox, not dual-write</text>
+
+  <!-- Redis + MinIO — auth-svc only, called out by caption rather than a routed line -->
+  <rect x="770" y="424" width="150" height="80" rx="10" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+  <text x="845" y="450" text-anchor="middle" font-size="13" font-weight="600" fill="#12181f">Redis</text>
+  <text x="845" y="466" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">refresh tokens</text>
+  <text x="845" y="480" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">rate limits</text>
+  <text x="845" y="497" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="9.5" fill="#9aa1a8">auth-svc only</text>
+
+  <rect x="940" y="424" width="150" height="80" rx="10" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3"/>
+  <text x="1015" y="450" text-anchor="middle" font-size="13" font-weight="600" fill="#12181f">MinIO</text>
+  <text x="1015" y="466" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">avatar objects</text>
+  <text x="1015" y="480" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">presigned URLs</text>
+  <text x="1015" y="497" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="9.5" fill="#9aa1a8">auth-svc only</text>
+
+  <!-- ============ external band ============ -->
+  <text x="40" y="670" font-family="IBM Plex Sans, Segoe UI, sans-serif" font-size="12" font-weight="600" letter-spacing="0.04em" fill="#6b7280">EXTERNAL</text>
+  <line x1="40" y1="680" x2="1240" y2="680" stroke="#e1e0d9" stroke-width="1"/>
+
+  <!-- Stripe <-> transfers-svc -->
+  <line x1="538" y1="320" x2="538" y2="694" stroke="#eb6834" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrow-gray)"/>
+  <rect x="438" y="694" width="200" height="70" rx="10" fill="#fff6f1" stroke="#eb6834" stroke-width="1.3" stroke-dasharray="5 4"/>
+  <text x="538" y="720" text-anchor="middle" font-size="13" font-weight="600" fill="#12181f">Stripe</text>
+  <text x="538" y="736" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#8a5223">PaymentIntent</text>
+  <text x="538" y="750" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#8a5223">+ signed webhook</text>
+
+  <!-- Mailpit <- notifications-svc -->
+  <line x1="1150" y1="320" x2="1150" y2="694" stroke="#c7ccd1" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#arrow-gray)"/>
+  <rect x="1050" y="694" width="190" height="70" rx="10" fill="#ffffff" stroke="#c7ccd1" stroke-width="1.3" stroke-dasharray="5 4"/>
+  <text x="1145" y="720" text-anchor="middle" font-size="13" font-weight="600" fill="#12181f">Mailpit</text>
+  <text x="1145" y="736" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">SMTP sink</text>
+  <text x="1145" y="750" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">no real email leaves the network</text>
+
+  <!-- Jaeger — one dotted line hugging the right margin, standing in for all six services -->
+  <path d="M1240,278 L1265,278 L1265,790 L800,790 L800,764" fill="none" stroke="#b7bcc1" stroke-width="1" stroke-dasharray="2 3" marker-end="url(#arrow-gray)"/>
+  <rect x="700" y="694" width="200" height="70" rx="10" fill="#ffffff" stroke="#b7bcc1" stroke-width="1.3" stroke-dasharray="5 4"/>
+  <text x="800" y="720" text-anchor="middle" font-size="13" font-weight="600" fill="#12181f">Jaeger</text>
+  <text x="800" y="736" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#6b7280">OpenTelemetry traces</text>
+  <text x="800" y="750" text-anchor="middle" font-family="IBM Plex Mono, Consolas, monospace" font-size="9.5" fill="#9aa1a8">every service, one span tree</text>
+
+  <!-- legend -->
+  <g font-family="IBM Plex Mono, Consolas, monospace" font-size="10.5" fill="#6b7280">
+    <line x1="40" y1="825" x2="72" y2="825" stroke="#2a78d6" stroke-width="2.25"/>
+    <text x="80" y="829">one transfer's real path (measured by the load test)</text>
+
+    <line x1="40" y1="848" x2="72" y2="848" stroke="#9aa1a8" stroke-width="1.3"/>
+    <text x="80" y="852">routing / shared infrastructure</text>
+
+    <line x1="470" y1="848" x2="502" y2="848" stroke="#b7bcc1" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="510" y="852">external system / observability, dashed or dotted</text>
+  </g>
+
+  <text x="40" y="885" font-family="IBM Plex Mono, Consolas, monospace" font-size="10" fill="#9aa1a8">Neo-Bank — github.com/Adwerse/Neo-Bank</text>
+</svg>
