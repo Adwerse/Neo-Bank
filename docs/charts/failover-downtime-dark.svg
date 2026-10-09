@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 352" width="960" height="352" role="img" aria-label="Failover breakdown: about 20 s for the leader key TTL, about 2 s election, 1 to 2 s HAProxy. Four measured kills: 25.4, 23.6, 23.6 and 24.6 seconds of write downtime.">
+<rect width="960" height="352" fill="#0d1117"/>
+<text x="32.0" y="36.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#f0f6fc" text-anchor="start" >Killing the Postgres leader: ~24 s of write downtime, 0 confirmed transactions lost</text>
+<text x="32.0" y="58.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="start" >docker kill (SIGKILL) under live transfer load. Downtime = first failed write → first successful write.</text>
+<text x="32.0" y="103.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#f0f6fc" text-anchor="start" >Where the time goes</text>
+<text x="32.0" y="120.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >ttl = 20 s is Patroni's hard minimum</text>
+<rect x="300.00" y="94.00" width="476.92" height="22.00" rx="4" fill="#3987e5"/>
+<rect x="778.92" y="94.00" width="45.69" height="22.00" rx="0" fill="#d95926"/>
+<rect x="826.62" y="94.00" width="36.15" height="22.00" rx="4" fill="#199e70"/>
+<rect x="300.00" y="130.00" width="10.00" height="10.00" rx="2" fill="#3987e5"/>
+<text x="316.0" y="139.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" fill="#9198a1">leader key TTL expires <tspan fill="#f0f6fc" font-weight="600">~20 s</tspan></text>
+<rect x="518.80" y="130.00" width="10.00" height="10.00" rx="2" fill="#d95926"/>
+<text x="534.8" y="139.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" fill="#9198a1">election + promotion <tspan fill="#f0f6fc" font-weight="600">~2 s</tspan></text>
+<rect x="718.40" y="130.00" width="10.00" height="10.00" rx="2" fill="#199e70"/>
+<text x="734.4" y="139.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" fill="#9198a1">HAProxy sees new leader <tspan fill="#f0f6fc" font-weight="600">~1–2 s</tspan></text>
+<text x="32.0" y="186.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#f0f6fc" text-anchor="start" >Measured, 4 kills</text>
+<text x="32.0" y="203.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="start" >infra/failover/failover_test.go</text>
+<rect x="300.00" y="176.00" width="605.69" height="14.00" rx="3" fill="#3d444d"/>
+<text x="913.7" y="187.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#f0f6fc" text-anchor="start" >25.4 s</text>
+<rect x="300.00" y="202.00" width="562.77" height="14.00" rx="3" fill="#3d444d"/>
+<text x="870.8" y="213.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#f0f6fc" text-anchor="start" >23.6 s</text>
+<rect x="300.00" y="228.00" width="562.77" height="14.00" rx="3" fill="#3d444d"/>
+<text x="870.8" y="239.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#f0f6fc" text-anchor="start" >23.6 s</text>
+<rect x="300.00" y="254.00" width="586.62" height="14.00" rx="3" fill="#3d444d"/>
+<text x="894.6" y="265.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#f0f6fc" text-anchor="start" >24.6 s</text>
+<text x="323.8" y="187.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#f0f6fc" text-anchor="start" >Run 1 · pg-node2 killed → pg-node1 leads</text>
+<text x="323.8" y="213.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#f0f6fc" text-anchor="start" >Run 2 · pg-node1 killed → pg-node3 leads</text>
+<text x="323.8" y="239.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#f0f6fc" text-anchor="start" >Run 3 · pg-node2 killed → pg-node1 leads</text>
+<text x="323.8" y="265.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#f0f6fc" text-anchor="start" >Run 4 · pg-node1 killed → pg-node3 leads</text>
+<line x1="300.00" y1="300.00" x2="920.00" y2="300.00" stroke="#3d444d" stroke-width="1"/>
+<line x1="300.00" y1="300.00" x2="300.00" y2="304.00" stroke="#3d444d" stroke-width="1"/>
+<text x="300.0" y="318.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >0 s</text>
+<line x1="419.23" y1="300.00" x2="419.23" y2="304.00" stroke="#3d444d" stroke-width="1"/>
+<text x="419.2" y="318.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >5 s</text>
+<line x1="538.46" y1="300.00" x2="538.46" y2="304.00" stroke="#3d444d" stroke-width="1"/>
+<text x="538.5" y="318.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >10 s</text>
+<line x1="657.69" y1="300.00" x2="657.69" y2="304.00" stroke="#3d444d" stroke-width="1"/>
+<text x="657.7" y="318.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >15 s</text>
+<line x1="776.92" y1="300.00" x2="776.92" y2="304.00" stroke="#3d444d" stroke-width="1"/>
+<text x="776.9" y="318.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >20 s</text>
+<line x1="896.15" y1="300.00" x2="896.15" y2="304.00" stroke="#3d444d" stroke-width="1"/>
+<text x="896.2" y="318.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >25 s</text>
+</svg>
