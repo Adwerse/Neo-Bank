@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="Two line charts against virtual users 10, 30, 60, 120. Throughput: distributed 59.7, 151.0, 176.4, 171.9 transfers per second; hot account 31.6, 31.5, 31.5, 32.1. Median latency: distributed 166, 188, 327, 683 ms; hot account 314, 938, 1893, 3778 ms.">
+<rect width="960" height="400" fill="#ffffff"/>
+<text x="32.0" y="36.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#1f2328" text-anchor="start" >Throughput stops growing; latency doesn't</text>
+<text x="32.0" y="58.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#59636e" text-anchor="start" >k6 through the Gateway, 60 s per stage, 40 funded accounts, transfer of 1.00 EUR. One run per stage.</text>
+<line x1="32.00" y1="86.00" x2="50.00" y2="86.00" stroke="#2a78d6" stroke-width="2.5"/>
+<circle cx="41" cy="86" r="4" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<text x="58.0" y="90.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#59636e" text-anchor="start" >Distributed: 40 users pay each other at random</text>
+<line x1="389.60" y1="86.00" x2="407.60" y2="86.00" stroke="#eb6834" stroke-width="2.5"/>
+<circle cx="398.59999999999997" cy="86" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<text x="415.6" y="90.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#59636e" text-anchor="start" >Hot account: everyone pays one account</text>
+<text x="32.0" y="122.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" fill="#1f2328"><tspan font-size="13.5" font-weight="600">Throughput</tspan><tspan dx="8" font-size="12.5" font-weight="400" fill="#818b98">transfers / s</tspan></text>
+<line x1="72.00" y1="340.00" x2="448.00" y2="340.00" stroke="#d1d9e0" stroke-width="1"/>
+<text x="64.0" y="344.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="72.00" y1="290.00" x2="448.00" y2="290.00" stroke="#eaecef" stroke-width="1"/>
+<text x="64.0" y="294.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">50</text>
+<line x1="72.00" y1="240.00" x2="448.00" y2="240.00" stroke="#eaecef" stroke-width="1"/>
+<text x="64.0" y="244.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">100</text>
+<line x1="72.00" y1="190.00" x2="448.00" y2="190.00" stroke="#eaecef" stroke-width="1"/>
+<text x="64.0" y="194.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">150</text>
+<line x1="72.00" y1="140.00" x2="448.00" y2="140.00" stroke="#eaecef" stroke-width="1"/>
+<text x="64.0" y="144.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">200</text>
+<text x="102.1" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >10</text>
+<text x="162.2" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >30</text>
+<text x="252.5" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >60</text>
+<text x="433.0" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >120</text>
+<text x="448.0" y="378.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" >virtual users</text>
+<polyline points="102.1,280.3 162.2,189.0 252.5,163.6 433.0,168.1" fill="none" stroke="#2a78d6" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="102.1" cy="280.3" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="162.2" cy="189.0" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="252.5" cy="163.6" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="433.0" cy="168.1" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<polyline points="102.1,308.4 162.2,308.5 252.5,308.5 433.0,307.9" fill="none" stroke="#eb6834" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="102.1" cy="308.4" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="162.2" cy="308.5" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="252.5" cy="308.5" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="433.0" cy="307.9" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<text x="252.5" y="149.6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="middle" >176.4 peak</text>
+<text x="431.0" y="293.9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="end" >31.5 at every level</text>
+<text x="520.0" y="122.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" fill="#1f2328"><tspan font-size="13.5" font-weight="600">Median latency (p50)</tspan><tspan dx="8" font-size="12.5" font-weight="400" fill="#818b98">ms</tspan></text>
+<line x1="560.00" y1="340.00" x2="936.00" y2="340.00" stroke="#d1d9e0" stroke-width="1"/>
+<text x="552.0" y="344.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="560.00" y1="290.00" x2="936.00" y2="290.00" stroke="#eaecef" stroke-width="1"/>
+<text x="552.0" y="294.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">1,000</text>
+<line x1="560.00" y1="240.00" x2="936.00" y2="240.00" stroke="#eaecef" stroke-width="1"/>
+<text x="552.0" y="244.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">2,000</text>
+<line x1="560.00" y1="190.00" x2="936.00" y2="190.00" stroke="#eaecef" stroke-width="1"/>
+<text x="552.0" y="194.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">3,000</text>
+<line x1="560.00" y1="140.00" x2="936.00" y2="140.00" stroke="#eaecef" stroke-width="1"/>
+<text x="552.0" y="144.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" style="font-variant-numeric: tabular-nums">4,000</text>
+<text x="590.1" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >10</text>
+<text x="650.2" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >30</text>
+<text x="740.5" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >60</text>
+<text x="921.0" y="360.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="middle" >120</text>
+<text x="936.0" y="378.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#818b98" text-anchor="end" >virtual users</text>
+<polyline points="590.1,331.7 650.2,330.6 740.5,323.6 921.0,305.9" fill="none" stroke="#2a78d6" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="590.1" cy="331.7" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="650.2" cy="330.6" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="740.5" cy="323.6" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="921.0" cy="305.9" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<polyline points="590.1,324.3 650.2,293.1 740.5,245.3 921.0,151.1" fill="none" stroke="#eb6834" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="590.1" cy="324.3" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="650.2" cy="293.1" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="740.5" cy="245.3" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="921.0" cy="151.1" r="4.5" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<text x="907.0" y="155.1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="end" >3,778</text>
+<text x="917.0" y="291.9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="middle" >683</text>
+</svg>

@@ -9,11 +9,10 @@ the balance update live — a neobank you can run on your own laptop, built to
 prove the ledger never lies, even when a node dies mid-transfer or the same
 request arrives twice.
 
-> 🎬 **Demo GIF — pending.** Register → email code → deposit → transfer →
-> both balances update with no reload. Recording instructions and the exact
-> shot list are in [docs/screenshots/CHECKLIST.md](docs/screenshots/CHECKLIST.md);
-> until then, [DEMO.md](DEMO.md) is the same walkthrough as a script you can
-> run yourself in 5–10 minutes.
+![Two phones side by side: Maya sends €42.50, and Liam's balance, history and a toast update without a reload.](docs/screenshots/live-transfer.gif)
+
+More screenshots are in the README's product tour; [DEMO.md](DEMO.md) is the
+same walkthrough as a script you can run yourself in 5–10 minutes.
 
 [![CI](https://github.com/Adwerse/Neo-Bank/actions/workflows/ci.yml/badge.svg)](https://github.com/Adwerse/Neo-Bank/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.work)

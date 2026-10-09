@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 212" width="960" height="212" role="img" aria-label="Stacked bar of a 126 ms transfer: commit 1 transfers insert 30.8 ms, commit 2 fraud checks 18.4 ms, commit 3 ledger 24.2 ms, commit 4 transfers and outbox 19.3 ms, everything else 33.3 ms.">
+<rect width="960" height="212" fill="#ffffff"/>
+<text x="32.0" y="36.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#1f2328" text-anchor="start" >74% of a calm transfer is four commits</text>
+<text x="32.0" y="58.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#59636e" text-anchor="start" >One transfer at 10 VUs, 126 ms end to end. Each COMMIT waits for the synchronous standby to flush its WAL (~20–30 ms).</text>
+<rect x="32.00" y="92.00" width="217.07" height="24.00" rx="4" fill="#2a78d6"/>
+<text x="34.0" y="138.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#1f2328" text-anchor="start" >COMMIT 1</text>
+<text x="34.0" y="156.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" >transfers INSERT</text>
+<text x="34.0" y="174.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#818b98" text-anchor="start" >30.8 ms</text>
+<rect x="251.07" y="92.00" width="129.68" height="24.00" rx="0" fill="#2a78d6"/>
+<text x="253.1" y="138.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#1f2328" text-anchor="start" >COMMIT 2</text>
+<text x="253.1" y="156.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" >fraud_checks</text>
+<text x="253.1" y="174.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#818b98" text-anchor="start" >18.4 ms</text>
+<rect x="382.74" y="92.00" width="170.55" height="24.00" rx="0" fill="#2a78d6"/>
+<text x="384.7" y="138.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#1f2328" text-anchor="start" >COMMIT 3</text>
+<text x="384.7" y="156.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" >ledger entries</text>
+<text x="384.7" y="174.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#818b98" text-anchor="start" >24.2 ms</text>
+<rect x="555.30" y="92.00" width="136.02" height="24.00" rx="0" fill="#2a78d6"/>
+<text x="557.3" y="138.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#1f2328" text-anchor="start" >COMMIT 4</text>
+<text x="557.3" y="156.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" >transfers + outbox</text>
+<text x="557.3" y="174.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#818b98" text-anchor="start" >19.3 ms</text>
+<rect x="693.31" y="92.00" width="234.69" height="24.00" rx="4" fill="#c4cad1"/>
+<text x="695.3" y="138.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#1f2328" text-anchor="start" >other work</text>
+<text x="695.3" y="156.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" >everything else</text>
+<text x="695.3" y="174.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#818b98" text-anchor="start" >33.3 ms</text>
+<line x1="32.00" y1="82.00" x2="691.31" y2="82.00" stroke="#d1d9e0" stroke-width="1"/>
+<line x1="32.00" y1="78.00" x2="32.00" y2="86.00" stroke="#d1d9e0" stroke-width="1"/>
+<line x1="691.31" y1="78.00" x2="691.31" y2="86.00" stroke="#d1d9e0" stroke-width="1"/>
+<text x="701.3" y="86.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="start" >92.7 ms of commits</text>
+</svg>

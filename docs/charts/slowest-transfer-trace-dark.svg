@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 430" width="960" height="430" role="img" aria-label="Waterfall of one 841 ms transfer: gateway 840.8 ms; transfers-svc insert 37.3 ms, fraud check 29.4 ms, ledger call 740.9 ms; inside it ledger-svc waits 441.1 ms in pool.acquire and 247.0 ms on the row lock, then commits in 25.3 ms; transfers-svc commits in 18.8 ms.">
+<rect width="960" height="430" fill="#0d1117"/>
+<text x="32.0" y="36.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#f0f6fc" text-anchor="start" >The slowest transfer at 120 VUs: 841 ms, half of it in a queue</text>
+<text x="32.0" y="58.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="start" >Span tree from Jaeger. ledger-svc has 16 pooled connections (pgxpool default = CPU count); nobody configured it.</text>
+<line x1="336.00" y1="96.00" x2="336.00" y2="384.00" stroke="#21262d" stroke-width="1"/>
+<text x="336.0" y="402.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >0 ms</text>
+<line x1="475.29" y1="96.00" x2="475.29" y2="384.00" stroke="#21262d" stroke-width="1"/>
+<text x="475.3" y="402.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >200 ms</text>
+<line x1="614.59" y1="96.00" x2="614.59" y2="384.00" stroke="#21262d" stroke-width="1"/>
+<text x="614.6" y="402.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >400 ms</text>
+<line x1="753.88" y1="96.00" x2="753.88" y2="384.00" stroke="#21262d" stroke-width="1"/>
+<text x="753.9" y="402.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >600 ms</text>
+<line x1="893.18" y1="96.00" x2="893.18" y2="384.00" stroke="#21262d" stroke-width="1"/>
+<text x="893.2" y="402.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="middle" >800 ms</text>
+<text x="32.0" y="92.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="start" >service</text>
+<text x="140.0" y="92.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="start" >span</text>
+<text x="32.0" y="123.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >gateway</text>
+<text x="140.0" y="123.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >POST /transfers/</text>
+<rect x="336.00" y="112.00" width="585.59" height="14.00" rx="3" fill="#3d444d"/>
+<text x="32.0" y="153.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >transfers-svc</text>
+<text x="140.0" y="153.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >POST /</text>
+<rect x="336.77" y="142.00" width="584.41" height="14.00" rx="3" fill="#3d444d"/>
+<text x="32.0" y="183.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >transfers-svc</text>
+<text x="140.0" y="183.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >INSERT transfers</text>
+<rect x="343.87" y="172.00" width="25.98" height="14.00" rx="3" fill="#3d444d"/>
+<text x="32.0" y="213.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >transfers-svc</text>
+<text x="140.0" y="213.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >fraud/CheckTransfer</text>
+<rect x="369.85" y="202.00" width="20.48" height="14.00" rx="3" fill="#3d444d"/>
+<text x="32.0" y="243.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >transfers-svc</text>
+<text x="140.0" y="243.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >ledger/ExecuteTransfer</text>
+<rect x="390.32" y="232.00" width="516.02" height="14.00" rx="3" fill="#3d444d"/>
+<text x="32.0" y="273.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >ledger-svc</text>
+<text x="140.0" y="273.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >pool.acquire</text>
+<rect x="390.74" y="262.00" width="307.21" height="14.00" rx="3" fill="#d95926"/>
+<text x="706.0" y="273.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f0f6fc" text-anchor="start" >441 ms waiting for a free connection</text>
+<text x="32.0" y="303.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >ledger-svc</text>
+<text x="140.0" y="303.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >SELECT … FOR UPDATE</text>
+<rect x="698.37" y="292.00" width="172.03" height="14.00" rx="3" fill="#3987e5"/>
+<text x="690.4" y="303.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f0f6fc" text-anchor="end" >247 ms waiting on the row lock</text>
+<text x="32.0" y="333.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >ledger-svc</text>
+<text x="140.0" y="333.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >COMMIT</text>
+<rect x="888.44" y="322.00" width="17.62" height="14.00" rx="3" fill="#3d444d"/>
+<text x="32.0" y="363.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" >transfers-svc</text>
+<text x="140.0" y="363.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#f0f6fc" text-anchor="start" >COMMIT</text>
+<rect x="908.08" y="352.00" width="13.09" height="14.00" rx="3" fill="#3d444d"/>
+</svg>

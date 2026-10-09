@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 132" width="960" height="132" role="img" aria-label="Load test headline: 176.4 transfers per second distributed ceiling; 31.5 transfers per second on one hot account at every concurrency level; 53,789 transfers and 87,888 ledger entries in the final run; 0 invariant violations.">
+<rect width="960" height="132" fill="#0d1117"/>
+<rect x="2.0" y="2" width="230.0" height="128" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="20.0" y="32.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="start" >Distributed ceiling</text>
+<text x="20.0" y="76.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" fill="#f0f6fc"><tspan font-size="34" font-weight="600">176.4</tspan><tspan dx="8" font-size="13" font-weight="400" fill="#6e7681">transfers/s</tspan></text>
+<text x="20.0" y="106.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#6e7681" text-anchor="start" >ledger-svc's 16-connection pool</text>
+<rect x="244.0" y="2" width="230.0" height="128" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="262.0" y="32.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="start" >One hot account</text>
+<text x="262.0" y="76.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" fill="#f0f6fc"><tspan font-size="34" font-weight="600">31.5</tspan><tspan dx="8" font-size="13" font-weight="400" fill="#6e7681">transfers/s</tspan></text>
+<text x="262.0" y="106.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#6e7681" text-anchor="start" >flat from 10 to 120 VUs</text>
+<rect x="486.0" y="2" width="230.0" height="128" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="504.0" y="32.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="start" >Final run</text>
+<text x="504.0" y="76.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" fill="#f0f6fc"><tspan font-size="34" font-weight="600">53,789</tspan><tspan dx="8" font-size="13" font-weight="400" fill="#6e7681">transfers</tspan></text>
+<text x="504.0" y="106.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#6e7681" text-anchor="start" >87,888 ledger entries</text>
+<rect x="728.0" y="2" width="230.0" height="128" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="746.0" y="32.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="start" >Invariant checks</text>
+<text x="746.0" y="76.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" fill="#f0f6fc"><tspan font-size="34" font-weight="600">0</tspan><tspan dx="8" font-size="13" font-weight="400" fill="#6e7681">violations</tspan></text>
+<text x="746.0" y="106.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#6e7681" text-anchor="start" >8 SQL checks after each profile</text>
+</svg>
